@@ -206,6 +206,10 @@ This matters: changes must be copied into `image/vllm/...` before building.
 
 ## v1 - Native Glm5Next TP3 starting point
 
+**Prebuilt image (public, no login required):** `docker pull azallaza/glm53-tp3-testing:v1`
+→ replaces the local build `voipmonitor/vllm:glm53-native-tp3-bf16-v1` in the compose examples below.
+
+
 Moved away from the generic Transformers/VTP route and began patching the native NVIDIA `Glm5Next` implementation.
 
 Initial padding helpers were added so model construction could progress under TP3.
@@ -215,6 +219,10 @@ Result: native code path established, but generic vLLM divisibility validation s
 ---
 
 ## v2 - Generic TP divisibility validator bypass
+
+**Prebuilt image (public, no login required):** `docker pull azallaza/glm53-tp3-testing:v2`
+→ replaces the local build `voipmonitor/vllm:glm53-native-tp3-bf16-v2` in the compose examples below.
+
 
 Patched:
 
@@ -238,6 +246,10 @@ Result: startup advanced to the vision path.
 
 ## v3 - Text-only / vision-tower bypass
 
+**Prebuilt image (public, no login required):** `docker pull azallaza/glm53-tp3-testing:v3`
+→ replaces the local build `voipmonitor/vllm:glm53-native-tp3-bf16-v3` in the compose examples below.
+
+
 Added a language-only construction path so the vision tower is skipped when using:
 
 ```text
@@ -251,6 +263,10 @@ Result: startup advanced to the shared expert.
 ---
 
 ## v4 - Replicated shared expert + EP3 routed experts
+
+**Prebuilt image (public, no login required):** `docker pull azallaza/glm53-tp3-testing:v4`
+→ replaces the local build `voipmonitor/vllm:glm53-native-tp3-bf16-v4` in the compose examples below.
+
 
 The shared expert is replicated with TP disabled because its 2048 intermediate width is not divisible by 3.
 
@@ -272,6 +288,10 @@ which chooses a compatible backend for the NVFP4 checkpoint.
 
 ## v5 - Loader diagnostics
 
+**Prebuilt image (public, no login required):** `docker pull azallaza/glm53-tp3-testing:v5`
+→ replaces the local build `voipmonitor/vllm:glm53-native-tp3-bf16-v5` in the compose examples below.
+
+
 Added weight-loader instrumentation to identify checkpoint/runtime shape mismatches.
 
 A key failure appeared around the fused KDA parameter:
@@ -287,6 +307,10 @@ Conclusion: the KDA path should not inherit the global NVFP4 quantizer.
 ---
 
 ## v6 - KDA quantization config override
+
+**Prebuilt image (public, no login required):** `docker pull azallaza/glm53-tp3-testing:v6`
+→ replaces the local build `voipmonitor/vllm:glm53-native-tp3-bf16-v6` in the compose examples below.
+
 
 Before constructing the shared Kimi/GDN KDA implementation, a shallow copy of the vLLM config is made and:
 
@@ -305,6 +329,10 @@ Caveat: this is specific to the pure NVFP4 checkpoint line and can conflict with
 ---
 
 ## v7 - Stable TP3 geometry / running server
+
+**Prebuilt image (public, no login required):** `docker pull azallaza/glm53-tp3-testing:v7`
+→ replaces the local build `voipmonitor/vllm:glm53-native-tp3-bf16-v7` in the compose examples below.
+
 
 This was the first important milestone where the model could fully load and serve requests under native TP3/EP3.
 
@@ -398,6 +426,10 @@ services:
 
 ## v8 - First KDA debug attempt did not reach the image
 
+**Prebuilt image (public, no login required):** `docker pull azallaza/glm53-tp3-testing:v8-debug`
+→ replaces the local build `voipmonitor/vllm:glm53-native-tp3-bf16-v8-debug` in the compose examples below.
+
+
 A KDA cache diagnostic was added to the working source but did not appear in the built container.
 
 Root cause: Docker was copying from:
@@ -417,6 +449,10 @@ This established the build-staging rule used for all later debug versions.
 ---
 
 ## v9 - KDA debug instrumentation active
+
+**Prebuilt image (public, no login required):** `docker pull azallaza/glm53-tp3-testing:v9-kda-debug`
+→ replaces the local build `voipmonitor/vllm:glm53-native-tp3-bf16-v9-kda-debug` in the compose examples below.
+
 
 Image:
 
@@ -499,6 +535,10 @@ services:
 
 ## v10 - Lightweight KDA cache sampling
 
+**Prebuilt image (public, no login required):** `docker pull azallaza/glm53-tp3-testing:v10-kda-debug`
+→ replaces the local build `voipmonitor/vllm:glm53-native-tp3-bf16-v10-kda-debug` in the compose examples below.
+
+
 Image:
 
 ```text
@@ -580,6 +620,10 @@ services:
 ---
 
 ## v11 - Active KDA state-slot instrumentation
+
+**Prebuilt image (public, no login required):** `docker pull azallaza/glm53-tp3-testing:v11-kda-debug`
+→ replaces the local build `voipmonitor/vllm:glm53-native-tp3-bf16-v11-kda-debug` in the compose examples below.
+
 
 Image:
 
@@ -684,6 +728,10 @@ services:
 ---
 
 ## v12 - MLA real-vs-dummy head instrumentation
+
+**Prebuilt image (public, no login required):** `docker pull azallaza/glm53-tp3-testing:v12-mla-debug`
+→ replaces the local build `voipmonitor/vllm:glm53-native-tp3-bf16-v12-mla-debug` in the compose examples below.
+
 
 Image:
 
@@ -811,6 +859,10 @@ services:
 ---
 
 ## v13 - Sparse indexer cross-rank consistency instrumentation
+
+**Prebuilt image (public, no login required):** `docker pull azallaza/glm53-tp3-testing:v13-indexer-debug`
+→ replaces the local build `voipmonitor/vllm:glm53-native-tp3-bf16-v13-indexer-debug` in the compose examples below.
+
 
 Image:
 
