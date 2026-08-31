@@ -48,6 +48,7 @@ Current v17 headline results:
 ```text
 TP / EP:               3 / 3
 Context:               1,048,576
+KV Pool                4,134,385
 Vision:                disabled
 MTP / DFlash:          disabled
 KV dtype:              FP8
