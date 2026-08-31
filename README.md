@@ -125,18 +125,18 @@ v13-indexer-debug
 v14-shared-expert-fix
 v15-parser-clean
 v17-official-template-parser
+v18-shared-tp
+v19-kda-w8a16
 ```
 
 v16 intentionally has no separate image because it was a configuration/template-only validation performed with the v15 image.
 
-The v18/v19 pages currently identify the exact local build tags used for the measurements:
+v18 and v19 are published the same way (digests match the local builds used for the measurements):
 
-```text
-voipmonitor/vllm:glm53-native-tp3-bf16-v18-shared-tp
-voipmonitor/vllm:glm53-native-tp3-bf16-v19-kda-w8a16
+```bash
+docker pull azallaza/glm53-tp3-testing:v18-shared-tp
+docker pull azallaza/glm53-tp3-testing:v19-kda-w8a16
 ```
-
-No public v18/v19 Docker Hub tag is asserted here until those images are explicitly published.
 
 ---
 
@@ -145,7 +145,7 @@ No public v18/v19 Docker Hub tag is asserted here until those images are explici
 ```yaml
 services:
   glm53-native-tp3:
-    image: voipmonitor/vllm:glm53-native-tp3-bf16-v19-kda-w8a16
+    image: azallaza/glm53-tp3-testing:v19-kda-w8a16
     container_name: glm53-native-tp3
     restart: "no"
 
