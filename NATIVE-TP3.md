@@ -15,7 +15,7 @@ native KDA / Gated DeltaNet
 text-only serving
 ```
 
-The server now loads and serves requests successfully. **Correctness is still broken**: short outputs often begin plausibly, then degrade into repetition / semantic collapse. The work below documents what has been ruled out and what remains suspicious.
+The server now loads and serves requests successfully. The major long-decode correctness bug documented through v13 was identified and fixed in v14. The historical sections below are intentionally preserved because they show how the failure was isolated. v15 and v16 then separated template/parser behavior from the numerical TP3 fix. Starting with v17, each major version is documented on its own page; see [V17.md](V17.md).
 
 ---
 
@@ -1136,258 +1136,182 @@ High-value areas still worth testing:
 
 ---
 
-# Current status summary
+# v14 - Shared-expert TP reduction bug identified and fixed
+
+**Prebuilt image (public, no login required):** `docker pull azallaza/glm53-tp3-testing:v14-shared-expert-fix`
+→ replaces the local build `voipmonitor/vllm:glm53-native-tp3-bf16-v14-shared-expert-fix` in the compose examples below.
+
+v14 was the major correctness turning point.
+
+## Root cause
+
+The shared expert has an intermediate width of:
 
 ```text
-Server startup:                  PASS
-Full NVFP4 checkpoint load:      PASS
-TP3 model construction:          PASS
-EP3 routed experts:              PASS
-Shared expert replication:       PASS mechanically
-Short raw completions:           often plausible
-Longer decode correctness:       FAIL
-CUDA graphs required for bug:    NO
-KDA dummy heads leak state:      NO observed
-MLA dummy heads leak output:     NO observed
-Indexer differs across TP ranks: NO observed
-Root cause:                      still unknown
+2048
 ```
 
-The strongest next diagnostic is to **fingerprint replicated hidden states across all TP ranks at strategic layer boundaries and identify the first point of divergence**. That should convert the investigation from component-by-component elimination into a binary search over the network depth.
+which is not divisible by TP3. The native TP3 adaptation therefore instantiated the shared expert as a fully replicated MLP:
 
----
+```python
+disable_tp=True
+reduce_results=False
+```
 
-# Next planned step: v14 shared-expert / TP-reduction diagnostic
+That construction itself was valid. The problem was what happened later in the generic FusedMoE reduction path.
 
-This is the next experiment to run when work resumes.
-
-## Why this is now the highest-priority suspect
-
-The shared expert has an intermediate size of 2048, which is not divisible by TP3:
+Each TP rank computed the same complete shared-expert contribution:
 
 ```text
-2048 % 3 != 0
+rank 0 = S
+rank 1 = S
+rank 2 = S
 ```
 
-The native TP3 patch therefore replicates the shared expert with `disable_tp=True` rather than tensor-parallel sharding it.
-
-That is mechanically valid for construction, but it creates an important correctness question: **is the full replicated shared-expert output later included in a tensor-parallel SUM reduction?**
-
-If each rank computes the same full shared-expert contribution `S`:
-
-```text
-TP0 = S
-TP1 = S
-TP2 = S
-```
-
-and a later operation sums those values across TP ranks, the effective contribution would become:
+The generic MoE path then performed its normal TP SUM over the shared contribution:
 
 ```text
 S + S + S = 3S
 ```
 
-instead of `S`.
-
-A systematic scaling error of this kind is compatible with the observed failure mode: early output can remain semantically plausible while generation progressively becomes repetitive or unstable.
-
-This is only a hypothesis. Do **not** apply a `/ 3` correction until the actual reduction path is verified.
-
-## Step 1 - inspect the shared-expert construction and reduction path
-
-From the repository root:
-
-```bash
-cd ~/glm53-native-tp3
-
-grep -nE \
-  'shared_expert|shared.*expert|disable_tp|mlp|moe|all_reduce|reduce_results|tensor_model_parallel|RowParallel|ColumnParallel' \
-  vllm/vllm/models/glm5next/nvidia/model.py
-```
-
-Then search all GLM5Next NVIDIA files for the replicated path:
-
-```bash
-grep -Rni -B15 -A30 \
-  'disable_tp=True' \
-  vllm/vllm/models/glm5next/nvidia
-```
-
-Also inspect the shared-expert neighborhood directly:
-
-```bash
-grep -n -B20 -A80 \
-  'shared_expert' \
-  vllm/vllm/models/glm5next/nvidia/model.py
-```
-
-If the symbol uses another name, broaden the search:
-
-```bash
-grep -nE \
-  'intermediate_size|moe_intermediate|shared|expert' \
-  vllm/vllm/models/glm5next/nvidia/model.py
-```
-
-The goal is to determine exactly:
-
-- where the shared expert is evaluated;
-- whether it produces a full replicated hidden-size output on each TP rank;
-- where it is combined with routed-expert output;
-- whether any `all_reduce`, row-parallel reduction, or equivalent SUM occurs after that combination;
-- whether routed and shared outputs have different reduction semantics.
-
-## Step 2 - v14 runtime instrumentation
-
-After locating the exact forward path, instrument the **first MoE/shared-expert block** with lightweight statistics on all three ranks.
-
-At minimum log:
+instead of the intended:
 
 ```text
-routed expert output RMS
-shared expert output RMS
-combined output RMS
+S
 ```
 
-Preferably also log the shared contribution immediately **before and after any TP reduction**.
+This explains the pre-v14 failure mode unusually well: short output could remain plausible, but every affected MoE block systematically over-weighted the same valid shared-expert signal, and longer decode progressively destabilized into repetition / semantic collapse.
 
-Expected log shape:
+## v14 fix
+
+`Glm5NextMLP` gained an optional output scale:
+
+```python
+output_scale: float = 1.0
+```
+
+and after `down_proj`:
+
+```python
+if self.output_scale != 1.0:
+    x = x * self.output_scale
+```
+
+The replicated shared expert is instantiated with:
+
+```python
+output_scale=1.0 / self.tp_size
+```
+
+For TP3, each rank therefore contributes:
 
 ```text
-[GLM53-MOE] rank=0 routed_rms=... shared_rms=... combined_rms=...
-[GLM53-MOE] rank=1 routed_rms=... shared_rms=... combined_rms=...
-[GLM53-MOE] rank=2 routed_rms=... shared_rms=... combined_rms=...
+S / 3
 ```
 
-A particularly strong signal would be a roughly TP-world-size increase around a SUM reduction, for example:
+and the existing generic TP SUM restores the correct result:
 
 ```text
-shared RMS before reduction ~= 0.20
-shared contribution after reduction ~= 0.60
+S/3 + S/3 + S/3 = S
 ```
 
-for TP3.
+Only the replicated shared-expert contribution is compensated. No global `/3` correction is applied to the model.
 
-Keep debug statistics lightweight. Avoid reductions over huge temporary tensors that can cause several GiB of allocation, as happened in earlier diagnostics.
+## Result
 
-## Planned v14 compose
+The old decode collapse disappeared.
 
-Use the same stable numerical-debug baseline as v13: minimal no-thinking template, Triton KDA decode, and CUDA graphs disabled. Disable previous KDA/MLA/indexer logging so the new MoE/shared-expert trace is isolated.
-
-<details>
-<summary>Planned v14 shared-expert debug compose</summary>
-
-```yaml
-services:
-  glm53-native-tp3:
-    image: voipmonitor/vllm:glm53-native-tp3-bf16-v14-shared-expert-debug
-    container_name: glm53-native-tp3
-    restart: "no"
-
-    ipc: host
-    shm_size: "64gb"
-
-    ports:
-      - "15015:8000"
-
-    volumes:
-      - /m2-2/huggingface:/root/.cache/huggingface
-      - /home/aabduh/glm53-native-tp3/template-test/minimal-no-think.jinja:/minimal-no-think.jinja:ro
-
-    environment:
-      HF_HUB_OFFLINE: "1"
-      GLM53_DEBUG_KDA_STATE: "0"
-      GLM53_DEBUG_MLA_HEADS: "0"
-      GLM53_DEBUG_INDEXER: "0"
-      GLM53_DEBUG_SHARED_EXPERT: "1"
-
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["0", "1", "2"]
-              capabilities: [gpu]
-
-    command:
-      - LibertAIDAI/GLM-5.3-Flash-NVFP4
-      - --tensor-parallel-size
-      - "3"
-      - --enable-expert-parallel
-      - --language-model-only
-      - --max-model-len
-      - "32768"
-      - --max-num-seqs
-      - "1"
-      - --max-num-batched-tokens
-      - "2048"
-      - --gpu-memory-utilization
-      - "0.95"
-      - --kv-cache-dtype
-      - fp8
-      - --disable-custom-all-reduce
-      - --served-model-name
-      - GLM-5.3-Flash-TP3
-      - --moe-backend
-      - auto
-      - --additional-config
-      - '{"glm53_kda_decode_backend":"triton"}'
-      - --chat-template
-      - /minimal-no-think.jinja
-      - --compilation-config
-      - '{"cudagraph_mode":"NONE"}'
-```
-
-</details>
-
-The environment variable name `GLM53_DEBUG_SHARED_EXPERT` is the planned diagnostic switch; add it to the source instrumentation when the exact shared-expert forward path has been identified.
-
-## Standard 32-token correctness repro for v14
-
-```bash
-curl -s http://127.0.0.1:15015/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "GLM-5.3-Flash-TP3",
-    "messages": [{
-      "role": "user",
-      "content": "What is 2 + 2? Answer only with the number."
-    }],
-    "temperature": 0,
-    "max_tokens": 32
-  }' | jq -r '.choices[0].message.content'
-```
-
-## If a replicated shared-expert SUM is confirmed
-
-Do not blindly divide arbitrary model outputs by 3. Fix the reduction semantics at the narrowest correct point.
-
-Possible implementations depend on the source path:
-
-- keep the replicated shared expert out of the TP SUM entirely; or
-- if the architecture necessarily sums a tensor containing the replicated contribution, scale **only that replicated contribution** by `1 / tp_world_size` before the SUM.
-
-The preferred solution is whichever reproduces the original single-model mathematical expression without relying on an accidental global compensation.
-
-After applying the candidate fix, rerun the deterministic 32-token test first, then longer raw and chat completions.
-
-## If the shared-expert reduction is already correct
-
-Move immediately to **layer-boundary hidden-state fingerprinting**.
-
-Instrument replicated hidden states on all TP ranks at strategic points and locate the first layer/boundary where they differ when they should be identical. Suggested boundaries:
+Observed after v14:
 
 ```text
-input to transformer block
-post-KDA / post-MLA output projection
-post-attention residual
-post-routed/shared-MoE combination
-post-MoE residual / block output
-final norm
+2 + 2 correctness:         fixed
+150-250 token generations: coherent
+old 16/32/64 collapse:     gone
+KDA/MLA padding geometry:   unchanged
+EP3 routed experts:         unchanged
 ```
 
-Start with a sparse set of layers and use a binary-search strategy over model depth. Once the first bad interval is found, instrument every boundary inside that interval.
+The earlier diagnostics remained important because they had already shown:
 
-Use deterministic, lightweight fingerprints such as a small fixed sample plus RMS/absmax rather than copying or reducing full tensors unnecessarily.
+```text
+KDA dummy recurrent state: exactly zero
+KDA dummy conv state:      exactly zero
+MLA dummy Q heads:         exactly zero
+MLA dummy outputs:         exactly zero
+pooled sparse indexer:     matched across all TP ranks
+```
 
-This fallback should identify the **first numerical divergence point** rather than continuing to eliminate entire subsystems one at a time.
+Those results helped narrow the issue to reduction semantics rather than padded-head contamination.
+
+---
+
+# v15 - Parser-clean isolation
+
+**Prebuilt image (public, no login required):** `docker pull azallaza/glm53-tp3-testing:v15-parser-clean`
+→ replaces the local build `voipmonitor/vllm:glm53-native-tp3-bf16-v15-parser-clean`.
+
+v15 kept the v14 numerical fix and removed only:
+
+```text
+--reasoning-parser glm45
+```
+
+from the launcher.
+
+The goal was to isolate whether reasoning-parser handling explained the remaining strange arithmetic behavior seen with the custom minimal no-thinking template.
+
+## Result
+
+With the minimal custom template, a deterministic arithmetic test could still produce:
+
+```text
+17 * 23 -> 289289
+```
+
+while ordinary prompts remained coherent.
+
+That showed:
+
+```text
+v14 numerical fix:       still valid
+reasoning parser:        not the TP3 correctness root cause
+minimal custom template: still suspicious
+```
+
+The catastrophic long-decode corruption fixed in v14 did not return.
+
+---
+
+# v16 - Default-template validation; no separate image built
+
+There is intentionally **no v16 Docker image**.
+
+v16 was not a source-code/container change. It was a configuration-only validation using the existing v15 image, so creating another image tag would have added no useful provenance.
+
+The custom minimal no-thinking template was removed and the checkpoint/default template was used instead.
+
+## Result
+
+With the default checkpoint template:
+
+```text
+17 * 23 -> 391
+```
+
+and normal prompts remained coherent.
+
+This established:
+
+1. the v14 shared-expert reduction fix genuinely solved the TP3 numerical corruption;
+2. the remaining short arithmetic oddity was tied to the custom minimal template experiment rather than TP3 execution;
+3. the official/default checkpoint template should be the production/reference path.
+
+The next version restored the official/default template and restored the `glm45` reasoning parser in the launcher.
+
+---
+
+# Continue with v17
+
+Starting with v17, each major version is documented on its own page rather than extending this already long historical file.
+
+**Next:** [V17.md](V17.md) - official-template/parser baseline, current 1M-context compose, KV-cache pool, CUDA-graph behavior, decode tuning, and Estonia / Estonia-long benchmarks.
