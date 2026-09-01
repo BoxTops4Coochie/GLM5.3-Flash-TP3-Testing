@@ -95,7 +95,7 @@ For implementation details, build lineage, refined expert placement, the FlashIn
 |---|---|---:|
 | v17 | official template/parser + corrected TP3 path | ~95.76 tok/s |
 | v18 | TP-sharded shared expert | 104.19 tok/s |
-| v19 | KDA W8A16 Humming | 111.91 tok/s |
+| v19 (determinism error) | KDA W8A16 Humming | 111.91 tok/s |
 | v22 pre-determinism-fix | load-time refined expert placement | ~112.51 tok/s |
 | **v22 final** | **same target path, FlashInfer autotune disabled** | **109.91 tok/s** |
 
