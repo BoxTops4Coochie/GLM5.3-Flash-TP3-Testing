@@ -2,7 +2,7 @@
 
 This repository documents the native GLM-5.3 Flash TP3/EP3 bring-up and optimization work on three RTX PRO 6000 Blackwell GPUs.
 
-The current path uses the native NVIDIA `Glm5Next` implementation with ModelOpt NVFP4 routed experts, native sparse MLA, native KDA/Gated DeltaNet, FP8 KV cache, and text-only serving.
+The current baseline uses the native NVIDIA `Glm5Next` implementation with ModelOpt mixed-precision weights, native sparse MLA, native KDA/Gated DeltaNet, FP8 KV cache, replicated vision encoder mode, and deterministic FlashInfer CUTLASS MoE execution with autotuning disabled.
 
 ## Documentation
 
@@ -10,7 +10,7 @@ The current path uses the native NVIDIA `Glm5Next` implementation with ModelOpt 
 - `V17.md` - official checkpoint template/parser baseline and first stable post-correctness performance baseline.
 - `V18.md` - TP3-sharded shared expert.
 - `V19.md` - KDA `in_proj_qkvgfab` FP8 E4M3 weight-only Humming W8A16 optimization.
-- `V22.md` - current baseline: zero-overhead refined expert placement, scheduler/KV trade-offs, prefill, Estonia validation, concurrency scaling, and both recommended compose configurations.
+- `V22.md` - current deterministic baseline: zero-overhead refined expert placement, vision, memory/KV behavior, determinism fix, Estonia validation, and final serving compose.
 - `VTP1-5.md` - older generic/Transformers-based TP3 padding experiments.
 
 v20 and v21 were profiling/experimental bridge builds and intentionally do not have standalone Markdown files. Their important findings are summarized in `V22.md`.
@@ -19,7 +19,7 @@ v20 and v21 were profiling/experimental bridge builds and intentionally do not h
 
 # Current baseline: v22
 
-v22 is the current confirmed text-only correctness/performance baseline.
+v22 is the current frozen target-model baseline before renewed MTP work.
 
 ```text
 v14: fix shared-expert TP SUM correctness bug
@@ -34,41 +34,45 @@ v22: refined expert placement encoded entirely at model load
 Headline configuration:
 
 ```text
-checkpoint:              LibertAIDAI/GLM-5.3-Flash-NVFP4
+checkpoint:              local-inference-lab/GLM-5.3-Flash-NVFP4
+snapshot:                378ca54585c46542bad1f3cb3ed0d73ae51cdb62
 TP / EP:                 3 / 3
 context:                 1,048,576
-vision:                  disabled
+vision:                  enabled
+vision TP mode:          data / replicated encoder
 MTP / DFlash:            disabled
 KV dtype:                FP8
 KDA decode:              Triton
 KDA hot projection:      FP8 E4M3 W8A16 / Humming
 MLA backend:             B12X
 MoE backend:             FLASHINFER_CUTLASS
+FlashInfer autotune:     disabled
 expert placement:        refined, load-time only
 runtime remap kernel:     none
+graphs:                  FULL -> FULL_DECODE_ONLY
 TP/EP communication:     PyNCCL / NCCL 2.31.2
 ```
 
 Headline results:
 
 ```text
-512-token decode:         ~112.51 tok/s
+determinism:
+20 / 20 routed-expert captures identical
+20 / 20 strict arithmetic PASS
+first-token logprob spread: 0.000000
 
-Estonia:                  30 / 30 PASS @ 108.9 tok/s
-Estonia-long:             30 / 30 PASS @ 108.4 tok/s
-combined correctness:     60 / 60 PASS
+text decode:
+109.91 tok/s mean, text-only diagnostic
+109.97 tok/s mean, vision loaded
 
-repeated prefill:
-8k:                       10,250 tok/s
-16k:                       9,881 tok/s
-32k:                       9,726 tok/s
-64k:                       9,235 tok/s
-128k:                      8,991 tok/s
+Estonia:                  28 / 30 PASS @ 102.6 tok/s
+Estonia-long:             30 / 30 PASS @ 103.0 tok/s
 
-aggregate decode:
-C1 @ 0 ctx:               111.4 tok/s
-C4 @ 0 ctx:               301.7 tok/s
-C8 @ 0 ctx:               505.7 tok/s
+vision:
+anime_hill.png:           109.89 tok/s
+retro_anime_portrait.png: 109.62 tok/s
+KV pool:                  1,761,607 tokens
+1M max-context capacity:  1.68x
 ```
 
 The preferred general-purpose scheduler configuration is:
@@ -76,11 +80,10 @@ The preferred general-purpose scheduler configuration is:
 ```text
 max_num_seqs=8
 max_num_batched_tokens=8192
+gpu_memory_utilization=0.95
 ```
 
-A lower `max_num_batched_tokens` value can recover substantially more KV-cache capacity at the cost of smaller prefill chunks and potentially lower prefill throughput.
-
-For the full v22 implementation history, v20/v21 findings, load-time expert permutation design, build/image lineage, detailed memory logs, complete `1 / 2048` and `8 / 8192` compose files, Estonia results, prefill measurements, and full C1/C2/C4/C8 concurrency table, see:
+For implementation details, build lineage, refined expert placement, the FlashInfer autotune determinism investigation, final compose, Estonia results, and vision validation, see:
 
 **[`V22.md`](V22.md)**
 
@@ -93,9 +96,10 @@ For the full v22 implementation history, v20/v21 findings, load-time expert perm
 | v17 | official template/parser + corrected TP3 path | ~95.76 tok/s |
 | v18 | TP-sharded shared expert | 104.19 tok/s |
 | v19 | KDA W8A16 Humming | 111.91 tok/s |
-| **v22** | **load-time refined expert placement** | **112.51 tok/s** |
+| v22 pre-determinism-fix | load-time refined expert placement | ~112.51 tok/s |
+| **v22 final** | **same target path, FlashInfer autotune disabled** | **109.91 tok/s** |
 
-No MTP or DFlash is enabled in these measurements.
+The small throughput reduction in the final v22 baseline is intentional: it removes the observed run-to-run target-MoE nondeterminism.
 
 ---
 
@@ -123,15 +127,16 @@ azallaza/glm53-tp3-testing:v22-refined-zero-overhead
 
 # Current status / next targets
 
-v22 is the text-only baseline to freeze before multimodal/speculative work.
+v22 text + vision is now frozen as the deterministic target baseline.
 
 ```text
-1. enable vision on native TP3
-2. verify text-only correctness/performance remains intact
-3. enable MTP
-4. benchmark correctness and speculative acceptance/performance
-5. enable DFlash
-6. revisit smaller conventional tuning afterward
+1. requalify MTP1
+2. requalify MTP2
+3. requalify MTP3
+4. select the best speculative baseline
+5. evaluate Infernix/LIL TP3 improvements
+6. add DFlash2
+7. revisit smaller conventional tuning
 ```
 
 World-size-3 communication remains PyNCCL because the tested custom all-reduce paths do not support this TP3 geometry.
