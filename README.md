@@ -11,7 +11,7 @@ The current qualified path uses the native NVIDIA `Glm5Next` implementation with
 - [`V18.md`](V18.md) — TP3-sharded shared expert.
 - [`V19.md`](V19.md) — KDA `in_proj_qkvgfab` FP8 E4M3 weight-only Humming W8A16 optimization.
 - [`V22.md`](V22.md) — deterministic target baseline: refined load-time expert placement, vision, memory/KV behavior, FlashInfer autotune determinism fix, Estonia validation, and serving configuration.
-- [`V23.md`](V23.md) — native MTP TP3 bring-up, TP-aware MTP loading, draft-backend selection, and the qualified v23d serving configuration.
+- [`V23-WIP.md`](V23.md) — native MTP TP3 bring-up, TP-aware MTP loading, draft-backend selection, and the qualified v23d serving configuration.
 - [`GLM53-TP3-MTP1-MTP5-qualification.md`](GLM53-TP3-MTP1-MTP5-qualification.md) — full MTP1–MTP5 qualification sweep, including correctness, decode performance, vision, and acceptance-rate measurements.
 - [`VTP1-5.md`](VTP1-5.md) — older generic / Transformers-based TP3 padding experiments.
 
