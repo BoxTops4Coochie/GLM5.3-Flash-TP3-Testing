@@ -12,7 +12,7 @@ The current qualified path uses the native NVIDIA `Glm5Next` implementation with
 - [`V19.md`](V19.md) — KDA `in_proj_qkvgfab` FP8 E4M3 weight-only Humming W8A16 optimization.
 - [`V22.md`](V22.md) — deterministic target baseline: refined load-time expert placement, vision, memory/KV behavior, FlashInfer autotune determinism fix, Estonia validation, and serving configuration.
 - [`V23-WIP.md`](V23.md) — native MTP TP3 bring-up, TP-aware MTP loading, draft-backend selection, and the qualified v23d serving configuration.
-- [`GLM53-TP3-MTP1-MTP5-qualification.md`](GLM53-TP3-MTP1-MTP5-qualification.md) — full MTP1–MTP5 qualification sweep, including correctness, decode performance, vision, and acceptance-rate measurements on WIP v23
+- [`GLM53-TP3-MTP1-5-qualification.md`](GLM53-TP3-MTP1-MTP5-qualification.md) — full MTP1–MTP5 qualification sweep, including correctness, decode performance, vision, and acceptance-rate measurements on WIP v23
 - [`VTP1-5.md`](VTP1-5.md) — older generic / Transformers-based TP3 padding experiments.
 
 v20 and v21 were profiling/experimental bridge builds and intentionally do not have standalone Markdown files. Their important findings are summarized in `V22.md`.
