@@ -2,6 +2,8 @@
 
 ## Executive Summary
 
+**Docker image used for testing - https://github.com/infernix/rtx6kpro/blob/research/glm53-tp3-final-benchmark/models/glm-5.3-flash.md#r17-physical-tp3-compatibility-child**
+
 **Test 1 - Distributed Exact Retrieval:** Ten unique records were distributed throughout contexts ranging from roughly 122K to 953K API prompt tokens. FP8 KV returned every requested code exactly, finishing **50/50 overall** and **10/10 at 952,751 tokens**.
 
 **Test 2 - Distributed Multi-Hop Reasoning:** Ten chains per context required linking customer → account → service tier → multiplier plus a separate base allocation, followed by arithmetic. FP8 KV finished **30/30 overall**, including **10/10 at 963,574 API prompt tokens**.
