@@ -83,6 +83,34 @@ Pass rate: 100%
 Largest API prompt tested: 952,751 tokens
 ```
 
+
+<details>
+<summary><strong>Full Test 1 results output</strong></summary>
+
+```text
+==============================================================================
+GLM-5.3 LONG-CONTEXT KV TEST — FP8
+==============================================================================
+
+131,072 target | 121,602 API prompt | 10/10 | 13.82s
+262,144 target | 246,977 API prompt | 10/10 | 27.84s
+524,288 target | 497,723 API prompt | 10/10 | 60.47s
+786,432 target | 748,468 API prompt | 10/10 | 103.51s
+1,000,000 target | 952,751 API prompt | 10/10 | 259.08s
+
+OVERALL: 50/50
+PASS RATE: 100%
+Largest API prompt tested: 952,751 tokens
+
+Results saved to:
+/home/aabduh/glm53-kv-ab/results-fp8.jsonl
+
+Prompts saved under:
+/home/aabduh/glm53-kv-ab/
+```
+
+</details>
+
 <details>
 <summary><strong>Full Test 1 script — glm53-longctx-kv-test.py</strong></summary>
 
@@ -446,6 +474,54 @@ Overall: 30/30
 Pass rate: 100%
 Largest API prompt tested: 963,574 tokens
 ```
+
+
+<details>
+<summary><strong>Full Test 2 results output</strong></summary>
+
+```text
+================================================================================
+GLM-5.3 LONG-CONTEXT MULTI-HOP TEST — FP8
+================================================================================
+
+TARGET CONTEXT: 524,288
+API prompt tokens: 501,844
+RESULT:            10/10
+Elapsed:           64.50 sec
+Output tokens:     1,860
+Reasoning chars:   4,796
+
+TARGET CONTEXT: 786,432
+API prompt tokens: 756,280
+RESULT:            10/10
+Elapsed:           109.92 sec
+Output tokens:     2,410
+Reasoning chars:   6,665
+
+TARGET CONTEXT: 1,000,000
+API prompt tokens: 963,574
+RESULT:            10/10
+Elapsed:           270.44 sec
+Output tokens:     2,592
+Reasoning chars:   7,260
+
+================================================================================
+SUMMARY — FP8
+================================================================================
+524,288 target | 501,844 API prompt | 10/10 | 64.50s
+786,432 target | 756,280 API prompt | 10/10 | 109.92s
+1,000,000 target | 963,574 API prompt | 10/10 | 270.44s
+
+OVERALL: 30/30
+
+Results saved to:
+/home/aabduh/glm53-kv-multihop/results-fp8.jsonl
+
+Prompts saved under:
+/home/aabduh/glm53-kv-multihop/
+```
+
+</details>
 
 <details>
 <summary><strong>Full Test 2 script — glm53-longctx-multihop-test.py</strong></summary>
@@ -1022,6 +1098,59 @@ Pass rate: 100%
 Prompt SHA256:
 5aa96845a2afc240e47f872b938ef37df9101bb75e41743199597f9bc397adae
 ```
+
+
+<details>
+<summary><strong>Full Test 3 results output</strong></summary>
+
+```text
+========================================================================================
+GLM-5.3 ADVERSARIAL TEMPORAL LONG-CONTEXT TEST — FP8
+========================================================================================
+Raw user tokens: 966,381
+Prompt SHA256:    5aa96845a2afc240e47f872b938ef37df9101bb75e41743199597f9bc397adae
+
+Expected chains:
+  CHAIN_01 | COBALT -> C9881 -> A6903 -> SOUTH -> G29 -> 1.15 | base=8600 | adj=+50 | rule=MULTIPLY_THEN_ADJUST | (8600 * 1.15) + 50 -> 9940
+  CHAIN_02 | FALCON -> C5925 -> A4427 -> ATLANTIC -> G93 -> 1.25 | base=7100 | adj=+75 | rule=MULTIPLY_THEN_ADJUST | (7100 * 1.25) + 75 -> 8950
+  CHAIN_03 | VEGA -> C4055 -> A4905 -> ATLANTIC -> G22 -> 1.10 | base=3800 | adj=+450 | rule=ADJUST_THEN_MULTIPLY | (3800 + 450) * 1.10 -> 4675
+  CHAIN_04 | SABLE -> C9974 -> A9533 -> WEST -> G45 -> 1.35 | base=2000 | adj=+300 | rule=ADJUST_THEN_MULTIPLY | (2000 + 300) * 1.35 -> 3105
+  CHAIN_05 | LANTERN -> C1082 -> A2655 -> SOUTH -> G82 -> 1.15 | base=3400 | adj=+150 | rule=MULTIPLY_THEN_ADJUST | (3400 * 1.15) + 150 -> 4060
+  CHAIN_06 | ZEPHYR -> C8610 -> A1413 -> SOUTH -> G52 -> 1.25 | base=3100 | adj=+225 | rule=ADJUST_THEN_MULTIPLY | (3100 + 225) * 1.25 -> 4156
+  CHAIN_07 | ORCHID -> C3397 -> A6027 -> NORTH -> G80 -> 1.45 | base=4300 | adj=+225 | rule=ADJUST_THEN_MULTIPLY | (4300 + 225) * 1.45 -> 6561
+  CHAIN_08 | EMBER -> C8911 -> A3101 -> CENTRAL -> G36 -> 1.45 | base=3700 | adj=+100 | rule=MULTIPLY_THEN_ADJUST | (3700 * 1.45) + 100 -> 5465
+  CHAIN_09 | ATLAS -> C6032 -> A9258 -> NORTH -> G59 -> 1.05 | base=8900 | adj=+400 | rule=MULTIPLY_THEN_ADJUST | (8900 * 1.05) + 400 -> 9745
+  CHAIN_10 | PHOENIX -> C9593 -> A3845 -> PACIFIC -> G56 -> 1.20 | base=8300 | adj=+425 | rule=MULTIPLY_THEN_ADJUST | (8300 * 1.20) + 425 -> 10385
+
+Sending ~1M-token adversarial request ...
+
+Results:
+CHAIN_01: PASS | expected=9940 | actual=9940
+CHAIN_02: PASS | expected=8950 | actual=8950
+CHAIN_03: PASS | expected=4675 | actual=4675
+CHAIN_04: PASS | expected=3105 | actual=3105
+CHAIN_05: PASS | expected=4060 | actual=4060
+CHAIN_06: PASS | expected=4156 | actual=4156
+CHAIN_07: PASS | expected=6561 | actual=6561
+CHAIN_08: PASS | expected=5465 | actual=5465
+CHAIN_09: PASS | expected=9745 | actual=9745
+CHAIN_10: PASS | expected=10385 | actual=10385
+
+========================================================================================
+SUMMARY
+========================================================================================
+RESULT:            10/10
+Elapsed:           60.97 sec
+Prompt tokens API: 966393
+Output tokens:     15760
+Reasoning chars:   52328
+Raw user tokens:   966381
+
+Results saved to: /home/aabduh/glm53-kv-adversarial-temporal/results-fp8.jsonl
+Prompt saved to:  /home/aabduh/glm53-kv-adversarial-temporal/adversarial-temporal-context-1000000.txt
+```
+
+</details>
 
 <details>
 <summary><strong>Full Test 3 script — glm53-longctx-adversarial-temporal-test.py</strong></summary>
@@ -1824,6 +1953,166 @@ Two bank items were excluded automatically because their exact source files were
 Q16: Documentation/mm/pagemap.rst
 Q19: Documentation/mm/shmem.rst
 ```
+
+
+<details>
+<summary><strong>Full Test 4 results output</strong></summary>
+
+```text
+Loading corpus ...
+Corpus SHA256: 46adbc3b275f91bab6f0627cf0c055e50df2979e0577218c3315f0423b6f46e2
+Manifest files: 395
+
+Available question-bank items: 23
+Unavailable source files:
+  Q16: Documentation/mm/pagemap.rst
+  Q19: Documentation/mm/shmem.rst
+
+Running 23 questions:
+  Q01: Explain the distinction between mm and active_mm for a Linux task, including why a kernel thread can have no normal mm while still having an active_mm.
+  Q02: How does Linux allocation profiling attribute memory allocations, and what is the intended use of the resulting information?
+  Q03: What purpose do the generic page-table helper semantics serve for architecture implementations, and what kind of errors are the associated tests intended to detect?
+  Q04: Describe the memory-balancing behavior documented here. What conditions cause balancing or reclaim activity and what is it trying to accomplish?
+  Q05: Describe DAMON's core design. How does it monitor memory access patterns while controlling monitoring overhead?
+  Q06: Within DAMON, explain the relationship between monitoring targets, address spaces or regions, sampling, aggregation, and region adaptation.
+  Q07: What are DAMOS schemes and how do they turn DAMON's monitoring information into memory-management actions or policies?
+  Q08: Identify one limitation, common misunderstanding, or important operational consideration described in the DAMON FAQ and explain it accurately.
+  Q09: Summarize the documented expectations for DAMON development or maintenance, including the workflow or review expectations that a contributor should know.
+  Q10: Why does high memory require special handling on affected architectures, and what distinction does the documentation make between permanent and temporary mappings?
+  Q11: Explain how Kernel Samepage Merging identifies and merges duplicate anonymous pages, and describe the copy-on-write behavior after pages have been merged.
+  Q12: What is the purpose of Linux's out-of-memory handling, and what controls or factors described in the documentation influence which task is selected when memory exhaustion occurs?
+  Q13: Explain what page migration is, why Linux performs it, and what must happen to mappings or references while a page is being migrated.
+  Q14: What problem is page_owner designed to diagnose, what information does it record, and what cost or tradeoff comes with enabling it?
+  Q15: What classes of incorrect page-table mappings is page table check intended to detect, and when are those checks performed?
+  Q17: Explain how Linux represents physical memory in terms of nodes, zones, and pages. Describe the relationship among those structures.
+  Q18: Describe the major data structures and locking considerations used to represent a process virtual address space.
+  Q20: What problem does split page-table locking solve, and at which page-table levels can separate locks be used?
+  Q21: Describe the role of swap in Linux memory management and explain how reclaim and swap interact when anonymous memory must be evicted.
+  Q22: What are Transparent Huge Pages intended to improve, and what tradeoffs or failure modes make THP policy more complicated than simply using huge pages everywhere?
+  Q23: Why does Linux maintain an unevictable LRU, what kinds of pages can end up there, and why is treating those pages separately useful to reclaim?
+  Q24: What are the motivations for vmapped kernel stacks and what memory-safety or debugging benefits do they provide?
+  Q25: Explain the purpose of vmalloc and contrast virtually contiguous memory obtained through vmalloc with physically contiguous allocations.
+
+Loading tokenizer for local-inference-lab/GLM-5.3-Flash-NVFP4 ...
+Ignoring corrupted tree cache file /m2-2/huggingface/hub/models--local-inference-lab--GLM-5.3-Flash-NVFP4/trees/46aaae8a82032f77100f2f03e9cc11b391df3b4d.json: [Errno 13] Permission denied: '/m2-2/huggingface/hub/models--local-inference-lab--GLM-5.3-Flash-NVFP4/trees/46aaae8a82032f77100f2f03e9cc11b391df3b4d.json'
+Local raw prompt tokens: 950,450
+Output allowance:        32,768
+
+Sending Linux-documentation exam ...
+
+================================================================================
+LINUX DOCUMENTATION 25-QUESTION RESULT
+================================================================================
+Questions requested:      23
+Questions answered:       23
+Valid source-path answers:23
+Elapsed:                  354.49 sec
+API prompt tokens:        950462
+Output tokens:            18123
+Reasoning chars:          65909
+Finish reason:            stop
+
+Parsed result: /home/aabduh/linux-docs-bench/linux-docs-25q-result.json
+Raw response:  /home/aabduh/linux-docs-bench/linux-docs-25q-raw-response.txt
+
+================================================================================
+MODEL ANSWERS
+================================================================================
+
+Q01
+The kernel distinguishes 'real' address spaces (tracked by tsk->mm) from 'anonymous' address spaces. For a task with a real address space, tsk->mm is non-NULL and tsk->active_mm always equals tsk->mm. For an anonymous process (e.g., a kernel thread), tsk->mm is NULL because it has no real address space, but tsk->active_mm records the 'borrowed' address space that is currently active; when the task is scheduled away, the borrowed address space is returned and cleared. This avoids wasting time switching VM state for tasks that do not use user mappings. Two counters support this: mm_users counts real users, and mm_count counts lazy users plus one if there are any real users.
+Sources: Documentation/mm/active_mm.rst
+
+Q02
+Memory allocation profiling provides low-overhead accounting of all memory allocations tracked by file and line number. It replaces allocation calls with an alloc_hooks() macro that declares a code tag, stashes a pointer to it in task_struct, calls the real allocation function, and restores the previous tag pointer, allowing nested hooks. The resulting data is exposed via /proc/allocinfo (and an ioctl interface) showing bytes, counts, and the call site (file:line and function). The intended use is to identify memory consumers and debug allocation behavior in production.
+Sources: Documentation/mm/allocation-profiling.rst
+
+Q03
+Generic MM expects architectures (with MMU) to provide helpers to create, access, and modify page table entries at various levels, and these helpers must conform to a common semantics across platforms so that generic code works uniformly. The documented tables describe the expected semantics for PTE, PMD, PUD, HugeTLB, and swap helpers. The associated tests (enabled via CONFIG_DEBUG_VM_PGTABLE) run during boot to verify that architecture implementations conform to these semantics, detecting incorrect or missing helper behavior.
+Sources: Documentation/mm/arch_pgtable_helpers.rst
+
+Q04
+Memory balancing is needed for allocation requests that do not set __GFP_HIGH or __GFP_KSWAPD_RECLAIM, and for non-__GFP_IO allocations. Callers may avoid reclaim because they cannot sleep (holding spinlocks or in interrupt context) or because they are willing to fail an opportunistic high-order allocation rather than incur reclaim overhead. Balancing is driven by per-zone watermarks: when free pages fall below watermark[WMARK_MIN], the hysteric low_on_memory flag is set (until watermark[WMARK_HIGH]) and allocation requests try to free pages; independently, when free pages fall below watermark[WMARK_LOW], kswapd is woken (zone_wake_kswapd). The goal is to keep zones filled and avoid falling back to scarce zones (e.g., DMA), and page stealing from process memory and shm is done if it alleviates memory pressure on any zone below its watermark.
+Sources: Documentation/mm/balance.rst
+
+Q05
+DAMON is a kernel subsystem for efficient data access monitoring and access-aware system operations. It is configured with three layers: an operations set (address-space dependent primitives), core logic (overhead/accuracy control and access-aware operations), and modules (user interfaces). To control overhead, DAMON uses region-based sampling: it groups adjacent pages assumed to have the same access frequencies into regions and checks only one page per region per sampling interval, making overhead controllable via the number of regions. It adaptively merges and splits regions based on access frequency to maintain the assumption, and tracks an age counter per region. Users set sampling interval, aggregation interval, update interval, and min/max number of regions to trade off accuracy and overhead.
+Sources: Documentation/mm/damon/design.rst
+
+Q06
+DAMON monitors target address spaces (e.g., virtual address spaces of processes or the physical address space). For virtual address spaces, it constructs three regions covering every mapped area, excluding the two biggest unmapped gaps. Within each region, DAMON performs region-based sampling: for each sampling interval it picks one page per region, checks whether it was accessed, and increments the region's nr_accesses counter. After each aggregation interval it reports and clears the aggregated access frequency. To keep the assumption that pages in a region have similar access frequencies, DAMON adaptively merges adjacent regions when their access frequency difference is small and their combined size is below a threshold, and splits regions when the total number is below the user-specified maximum. An age counter tracks how long the current access pattern has been maintained.
+Sources: Documentation/mm/damon/design.rst
+
+Q07
+DAMOS (Data Access Monitoring-based Operation Schemes) lets users specify desired memory-management schemes at a high level. DAMON monitors, finds regions matching a user-specified access pattern (size, access frequency, age), and applies a user-desired action to those regions for every apply_interval. Supported actions include willneed, cold, pageout, hugepage, nohugepage, collapse, lru_prio, lru_deprio, migrate_hot, migrate_cold, and stat. To bound overhead, DAMOS provides quotas (limits on time or bytes applied), prioritization mechanisms to choose which regions to act on under quotas, watermarks for conditional activation/deactivation, and filters (e.g., by address, target, anonymous, memcg, young, hugepage size, unmapped) to exclude memory from the scheme.
+Sources: Documentation/mm/damon/design.rst
+
+Q08
+The FAQ clarifies that DAMON is not limited to virtual memory: its core is address-space independent, and address-space-specific operations (target region construction and access checks) can be implemented and configured by users; DAMON provides default vaddr/paddr implementations for convenience. It also notes that page-granularity monitoring is possible by setting min_nr_regions higher than the working set size divided by the page size, because region sizes are forced to be >= page size, making splitting ineffective.
+Sources: Documentation/mm/damon/faq.rst
+
+Q09
+DAMON patches should be made against the mm-new tree and posted to the damon@lists.linux.dev and linux-mm@kvack.org mailing lists. Contributors should build the kernel and documents, ensure no new errors or warnings, run DAMON selftests and kunittests, and (for normal changes) run damon-tests/corr; for performance changes, measure impacts on benchmarks or real-world workloads. Patches can be sent anytime; the maintainer works flexibly (except early morning PT) and may be slow to respond, so contributors should ping if they have not heard back within a week.
+Sources: Documentation/mm/damon/maintainer-profile.rst
+
+Q10
+High memory is needed when physical memory approaches or exceeds the maximum virtual memory size, making it impossible for the kernel to keep all physical memory permanently mapped. The documentation distinguishes permanent mappings (the kernel's direct map, limited by the virtual address space split, e.g., ~896 MiB on i386) from temporary mappings used to access the rest of physical memory. Temporary mappings are created via kmap_local_page()/kmap_local_folio() (preferred, thread-local and CPU-local, valid only in the acquiring context), the deprecated kmap_atomic() and kmap(), and vmap() for long-duration mappings of multiple pages.
+Sources: Documentation/mm/highmem.rst
+
+Q11
+KSM is a memory-saving de-duplication feature that merges identical anonymous pages. It maintains reverse mapping information in a stable tree: if a KSM page is shared by fewer than max_page_sharing VMAs, the stable tree node points to a list of rmap_items; when sharing exceeds that threshold, the node becomes a chain linking multiple 'dups,' each holding reverse mapping information for a KSM page copy. The max_page_sharing limit prevents rmap lists from growing too large. The merged pages are write-protected (the stable tree enforces that chain/dups represent the same write-protected content), so writes to a merged page require breaking the sharing (copy-on-write), though the document focuses on the tree structure rather than the fault path.
+Sources: Documentation/mm/ksm.rst
+
+Q12
+The corpus states that if the kernel fails to make room for data that must be present in physical frames, it invokes the out-of-memory (OOM) killer to make room by terminating lower priority processes until pressure reduces under a safe threshold (Documentation/mm/page_tables.rst). However, the dedicated OOM documentation (Documentation/mm/oom.rst) is a stub and the corpus does not describe specific controls or factors influencing which task is selected.
+Sources: Documentation/mm/page_tables.rst, Documentation/mm/oom.rst
+
+Q13
+Page migration allows moving the physical location of pages between nodes in a NUMA system while a process is running, without changing the virtual addresses the process sees. Its main intent is to reduce memory access latency by moving pages near the processor accessing them. During migration, the folio is isolated from the LRU and its refcount is increased; page table references are converted to migration entries (decrementing mapcount; if mapcount is not zero the page is not migrated); the page is locked, writeback is completed, contents and flags are copied to the new page, the page cache tree is updated, and migration entries are replaced with real PTEs so user space can access the new page.
+Sources: Documentation/mm/page_migration.rst
+
+Q14
+page_owner is designed to diagnose who allocated each page, useful for debugging memory leaks or finding memory hogs. It records allocation information such as the call stack and the order of pages for each page. The cost is that it is disabled by default; enabling it increases kernel size by several kilobytes and, when enabled at runtime, requires memory to store owner information. When disabled at runtime, the overhead is marginal (two unlikely branches in the page allocator hot path).
+Sources: Documentation/mm/page_owner.rst
+
+Q15
+Page table check hardens the kernel by preventing certain memory corruptions, specifically double mappings (e.g., mapping the same physical page as both anonymous and named, or as writable in multiple places) and illegal combinations of page table entry flags (e.g., userfaultfd wr-protect bit against writable flags). The checks are performed synchronously at the time new pages become accessible from userspace—when their page table entries (PTEs, PMDs, etc.) are added to the table—so corruption is caught at the time the wrong mapping occurs.
+Sources: Documentation/mm/page_table_check.rst
+
+Q17
+Linux abstracts physical memory into nodes (struct pglist_data / pg_data_t), each representing a memory bank (even on UMA systems, a single node is used). Each node contains an array of zones (struct zone), which represent ranges within memory determined by architectural constraints (e.g., ZONE_DMA, ZONE_NORMAL, ZONE_HIGHMEM, ZONE_MOVABLE, ZONE_DEVICE). Zones contain free areas managed by the buddy allocator and per-CPU pagesets. The relationship is hierarchical: nodes contain zones, and zones track free pages; the page allocator uses GFP flags to determine the highest zone from which to allocate and falls back to lower zones. Struct page objects track the status of physical page frames.
+Sources: Documentation/mm/physical_memory.rst
+
+Q18
+A process virtual address space is represented by struct mm_struct, which contains a maple tree of VMAs (struct vm_area_struct). Each VMA describes a virtually contiguous range with identical attributes. Locking is layered: mmap locks (a read/write semaphore at MM granularity), VMA locks (per-VMA optimistic read locks via lock_vma_under_rcu and write locks via vma_start_write, which require the mmap write lock), and rmap locks (anon_vma locks for anonymous memory and i_mmap locks for file-backed memory). Page tables have their own locks: higher-level tables use mm->page_table_lock, while PMD and PTE tables use fine-grained split locks. Lock ordering is documented (e.g., mmap_lock before i_mmap_rwsem before page_table_lock) to prevent deadlocks.
+Sources: Documentation/mm/process_addrs.rst
+
+Q20
+Split page table lock solves poor page fault scalability of multi-threaded applications caused by high contention on the single mm->page_table_lock spinlock that originally protected all page tables. It introduces separate per-table locks: at the PTE and PMD levels, each table has its own lock (accessed via helpers like pte_offset_map_lock() and pmd_lock()), while higher-level tables (PUD, P4D, PGD) remain protected by mm->page_table_lock. Split locks for PTE are enabled if CONFIG_SPLIT_PTLOCK_CPUS <= NR_CPUS; PMD split locks additionally require architecture support.
+Sources: Documentation/mm/split_page_table_lock.rst
+
+Q21
+The corpus provides limited information. It describes the swap cache as a per-cluster array (swap table) that maps swap entries to folios, with states for unused, folio-bound, and shadow entries (Documentation/mm/swap-table.rst). It also notes that in the multi-gen LRU, clean file pages can be evicted regardless of swap constraints, implying anonymous pages require swap backing (Documentation/mm/multigen_lru.rst). However, the corpus does not contain a comprehensive description of how reclaim and swap interact when anonymous memory must be evicted.
+Sources: Documentation/mm/swap-table.rst, Documentation/mm/multigen_lru.rst
+
+Q22
+Transparent Huge Pages (THP) are intended to reduce TLB pressure, page table overhead, and improve memory allocation efficiency and performance for certain workloads by using larger page sizes (e.g., 2MB/1GB). However, THP policy is complicated by tradeoffs: hugepage allocation can fail due to memory fragmentation, in which case regular pages must be gracefully allocated instead and mixed into the same VMA without failure or significant delay; khugepaged later relocates regular pages to hugepages when available. Refcounting and splitting are complex: split_huge_page() can fail if the page is pinned, and partial unmap requires deferred splitting. The design requires graceful fallback so components unaware of hugepages continue working.
+Sources: Documentation/mm/transhuge.rst
+
+Q23
+The unevictable LRU is an additional per-node LRU list that tracks unevictable folios and hides them from vmscan. It was introduced to address scalability problems where vmscan spent excessive time scanning LRU lists looking for the small fraction of evictable pages on large-memory systems. Pages that can end up there include ramfs pages, tmpfs pages with the noswap mount option, pages mapped into SHM_LOCK'd shared memory regions, and pages mapped into VM_LOCKED (mlock()ed) VMAs. Treating them separately is useful because reclaim can deal only with pages that have a chance of being reclaimed, and it also allows unevictable pages to be migrated between nodes for defragmentation, workload management, and memory hotplug.
+Sources: Documentation/mm/unevictable-lru.rst
+
+Q24
+Vmapped kernel stacks are motivated by the difficulty of debugging kernel stack overflows, which can cause hard-to-diagnose corruption and make the kernel susceptible to exploits. By allocating stacks from virtually contiguous memory with guard pages (via HAVE_ARCH_VMAP_STACK and VMAP_STACK), stack overflows cause reliable faults immediately rather than silent corruption. Requirements include sufficient vmalloc space, reliable stack operation in vmalloc space, and reasonable behavior (e.g., not instantly rebooting without logging) when the stack overflows into a guard page.
+Sources: Documentation/mm/vmalloced-kernel-stacks.rst
+
+Q25
+The dedicated vmalloc documentation (Documentation/mm/vmalloc.rst) is a stub with no content. The corpus indicates indirectly that vmalloc (via __vmalloc_node_range) allocates pages from the page level allocator and maps them into contiguous kernel virtual space (Documentation/mm/vmalloced-kernel-stacks.rst), implying it provides virtual contiguity without requiring physical contiguity. However, the corpus does not provide a general explanation of vmalloc's purpose or an explicit contrast with physically contiguous allocations.
+Sources: Documentation/mm/vmalloc.rst, Documentation/mm/vmalloced-kernel-stacks.rst
+```
+
+</details>
 
 <details>
 <summary><strong>Linux setup steps — clone docs, prepare venv, build corpus, and record revision</strong></summary>
