@@ -10,6 +10,9 @@
 
 **Test 4 - Real Linux Kernel Documentation Exam:** A deterministic **950,000-token** corpus built from **395 upstream Linux documentation files** was followed by 23 technical questions. GLM answered **23/23**, cited valid in-corpus source paths for **23/23**, and completed naturally with `finish_reason=stop`; semantic correctness can be graded separately against the cited source text.
 
+
+**Test 5 - Source-Code Call-Graph / Runtime Trace Exam:** A deterministic **950,000-token** corpus built from **115 production source/launcher files** extracted from the exact immutable R17 TP3 image was queried with 25 cross-file implementation questions. Using the final batched procedure, GLM completed **25/25**, every answer cited at least one valid in-corpus source path, **21/25** answers had every cited path present in the corpus manifest, and every authoritative run finished naturally with `finish_reason=stop`. The result measures long-context source retrieval and structural/source grounding; semantic correctness remains separately gradeable against the cited code.
+
 ## Combined Results
 
 | Test | Largest API prompt | Result |
@@ -18,6 +21,9 @@
 | Test 2 - Distributed Multi-Hop Reasoning | 963,574 | 10/10 at largest context |
 | Test 3 - Adversarial Temporal / Revision Reasoning | 966,393 | 10/10 |
 | Test 4 - Real Linux Kernel Documentation Exam | 950,462 | 23/23 answered, 23/23 valid source paths |
+| Test 5 - Source-Code Call-Graph / Runtime Trace Exam | 950,362* | 25/25 answered, 25/25 with ≥1 valid source path |
+
+\* Largest API prompt among the authoritative completed Test 5 runs. Batch 9/Q10 used a larger 90,000-token completion allowance but an API prompt of 950,237 tokens.
 
 Synthetic exact checks:
 
@@ -29,7 +35,7 @@ Adversarial temporal:       10/10
 Synthetic total:            90/90
 ```
 
-The Linux documentation exam is listed separately because the current **23/23** score reflects answer completion and valid in-corpus source attribution rather than a completed source-by-source semantic grade.
+The Linux documentation and source-code exams are listed separately from the synthetic exact-match tests because their scores primarily reflect answer completion and source-grounding structure rather than a completed source-by-source semantic grade. For Test 5, **25/25** answers cited at least one manifest-valid source; **21/25** used only manifest-valid paths. The remaining four contained one or more extra path citations not present in the 115-file corpus manifest, while still citing valid in-corpus evidence.
 
 ---
 
