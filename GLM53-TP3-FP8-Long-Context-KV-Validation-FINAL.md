@@ -6,6 +6,8 @@
 
 **Model used - https://huggingface.co/local-inference-lab/GLM-5.3-Flash-NVFP4**
 
+**Runtime Details - https://github.com/BoxTops4Coochie/GLM5.3-Flash-TP3-Testing/blob/main/GLM-5.3-Flash-TP3-DFlash2-runtime-record.md**
+
 **Test 1 - Distributed Exact Retrieval:** Ten unique records were distributed throughout contexts ranging from roughly 122K to 953K API prompt tokens. FP8 KV returned every requested code exactly, finishing **50/50 overall** and **10/10 at 952,751 tokens**.
 
 **Test 2 - Distributed Multi-Hop Reasoning:** Ten chains per context required linking customer → account → service tier → multiplier plus a separate base allocation, followed by arithmetic. FP8 KV finished **30/30 overall**, including **10/10 at 963,574 API prompt tokens**.
