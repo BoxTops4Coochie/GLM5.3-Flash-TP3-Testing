@@ -4,7 +4,9 @@
 
 **Docker image used for testing - https://github.com/infernix/rtx6kpro/blob/research/glm53-tp3-final-benchmark/models/glm-5.3-flash.md#r17-physical-tp3-compatibility-child**
 
-**Model used - https://huggingface.co/local-inference-lab/GLM-5.3-Flash-NVFP4**
+**Weight used - https://huggingface.co/local-inference-lab/GLM-5.3-Flash-NVFP4**
+
+**DFlash Weight Used - https://huggingface.co/local-inference-lab/GLM-5.3-Flash-DFlash2**
 
 **Runtime Details - https://github.com/BoxTops4Coochie/GLM5.3-Flash-TP3-Testing/blob/main/GLM-5.3-Flash-TP3-DFlash2-runtime-record.md**
 
