@@ -1,6 +1,6 @@
 # GLM-5.3 Flash Native TP3 / EP3 Notes
 
-***09/04 - No longer working on this build. Build by Infernix is currently what I’m using. eventually hit a wall on boosting performance and their build has been able to perform better***
+***09/04 - No longer working on this build. Build by Infernix is currently what I’m using. Eventually hit a wall on boosting performance and their build has been able to perform better***
 
 ***Infernix GitHub - https://github.com/infernix/rtx6kpro/blob/research/glm53-tp3-final-benchmark/models/glm-5.3-flash.md#r17-physical-tp3-compatibility-child-***
 
