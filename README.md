@@ -4,6 +4,8 @@
 
 ***Infernix GitHub - https://github.com/infernix/rtx6kpro/blob/research/glm53-tp3-final-benchmark/models/glm-5.3-flash.md#r17-physical-tp3-compatibility-child-***
 
+***File: GLM-5.3-Flash-TP3-DFlash2-runtime-record.md is current runtime details for Infernix’s image and File: GLM53-TP3-FP8-Long-Context-KV-Validation-FINAL is FP8 long context testing on Infernix’s image***
+
 This repository documents the native GLM-5.3 Flash TP3/EP3 bring-up and optimization work on three RTX PRO 6000 Blackwell GPUs.
 
 The current qualified path uses the native NVIDIA `Glm5Next` implementation with ModelOpt mixed-precision weights, B12X sparse MLA, native KDA/Gated DeltaNet, FP8 KV cache, replicated vision encoder mode, deterministic FlashInfer CUTLASS target MoE execution, and native MTP speculative decoding.
