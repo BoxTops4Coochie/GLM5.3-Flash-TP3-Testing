@@ -1,10 +1,6 @@
 # GLM-5.3 Flash Native TP3 / EP3 Notes
 
-***09/04 - No longer working on this build. Build by Infernix is currently what I’m using. Eventually hit a wall on boosting performance and their build has been able to perform better***
-
-***Infernix GitHub - https://github.com/infernix/rtx6kpro/blob/research/glm53-tp3-final-benchmark/models/glm-5.3-flash.md#r17-physical-tp3-compatibility-child-***
-
-***[GLM-5.3-Flash-TP3-DFlash2-runtime-record.md](GLM-5.3-Flash-TP3-DFlash2-runtime-record.md) is current runtime details for Infernix’s image and File: [GLM53-TP3-FP8-Long-Context-KV-Validation-FINAL.md](GLM53-TP3-FP8-Long-Context-KV-Validation-FINAL.md) is FP8 long context testing on Infernix’s image***
+***09/09***
 
 ****Anything below this message is my previous attempted build****
 
