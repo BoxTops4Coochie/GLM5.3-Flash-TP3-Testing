@@ -1,6 +1,6 @@
 # GLM-5.3 Flash Native TP3 / EP3 Notes
 
-***09/09 - ['glm-5.3-flash-tp3.md'](glm-5.3-flash-tp3.md)*** - Current r30-TP3 release
+***09/09 - [glm-5.3-flash-tp3.md](glm-5.3-flash-tp3.md)*** - Current r30-TP3 release based on localinferencelab/vllm:jovian-judgement-community-20260909-r30
 
 ****Anything below this message is my previous attempted build****
 
