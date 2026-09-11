@@ -3,8 +3,7 @@
 Everything applied on top of the published R34 image to serve GLM-5.3-Flash
 NVFP4 on three RTX PRO 6000 Blackwell GPUs (TP3, EP3) with decode-context
 parallelism across the three ranks (DCP3). One document, self-contained; the
-detailed receipts live in `PORT-CHANGES.md`, `PATCH-LEDGER.md`, `STATUS.md` and
-`optimization/dcp3-20260910/`.
+detailed receipts live in `PORT-CHANGES.md`, `PATCH-LEDGER.md`, and `STATUS.md`.
 
 ## 1. Base and build method
 
