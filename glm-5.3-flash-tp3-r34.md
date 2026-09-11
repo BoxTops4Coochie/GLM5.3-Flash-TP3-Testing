@@ -24,7 +24,8 @@ carrying the R30 TP3 compatibility changes forward.
 ## Docker artifact
 
 
-Published image: ‘azallaza/glm53-r34-tp3:20260910’
+Published image: `azallaza/glm53-r34-tp3:20260910`
+
 Local build: `glm53-r34-tp3:dcp-20260910` (image ID `sha256:34d5ad37b8bb…`),
 31 overlay files, overlay identity `7447b24601a4ad8a866790479b99fb3e95415ef4037111b176fa3ba95e4b155c`.
 one source file modified for DCP,
