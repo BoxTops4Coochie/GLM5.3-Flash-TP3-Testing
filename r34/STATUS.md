@@ -1,6 +1,8 @@
 # R34 TP3 port log
 
-Port in progress. R30 optimization work stopped; R30 preserved for rollback.
+Chronological log. Current state is summarized in SUMMARY.md: image
+`glm53-r34-tp3:dcp-20260910`, production at DCP3, R30 preserved for rollback.
+The entries below start with the original port and end with the DCP3 adoption.
 Parent: localinferencelab/vllm@sha256:d2d13141fc158f3e5f989930c4be4637eaf28322307288724c2faa7cd4e9bcc7.
 Upstream instructions saved as upstream-glm-5.3-flash.md; image metadata and source.lock retained.
 

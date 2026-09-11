@@ -45,11 +45,18 @@ The shareable post intentionally leaves its Docker artifact section blank.
    Preserve omitted-choice behavior. It suppresses forbidden API tool events;
    it is not a model-degeneration fix or a reasoning-only-response fix.
 6. **Launcher and Compose.** Add R34 TP3 launcher/dispatcher routing, pin the
-   target checkpoint, scope supported serving to TP3/EP3/DCP1 and GPU-only cache,
+   target checkpoint, scope supported serving to TP3/EP3 with DCP 1 or 3 and GPU-only cache,
    retain B12X attention/linear/collectives and FlashKDA prefill, explicitly select
    EP-capable MoE `auto`, and preserve temperature 1 / top_p .95 / history defaults.
    Expose batched tokens and maximum graph size plus an optional capture list.
    Default capture list adjusts to the maximum. Use separate R34 cache namespace.
+7. **Decode-context parallelism (DCP3).** `vllm/v1/attention/ops/dcp.py` masks
+   the LSE-combine Triton kernel so a DCP world size of 3 (not a power of two)
+   works; the TP3 launcher gate accepts `DCP=1|3`; Compose exposes `DCP`
+   (default 3). Attention KV is sharded across the three ranks (7.5M-token
+   capacity vs 2.1M) at about −8% decode speed below 128K context and −1% at
+   512K. DCP-group collectives run over PyNCCL. Recurrent (KDA) state is
+   replicated, as upstream. Receipts: optimization/dcp3-20260910/.
 
 ## Upstream changes preserved
 
@@ -78,6 +85,9 @@ file disposition: `PATCH-LEDGER.md`; source hashes: `source-audit.json`.
   17,642-token retrieval, and .95 default render check.
 - 826,266-token retained history / 28,883-token completion: normal stop,
   nonempty final answer and no sustained degeneration in screens/sampled review.
+- DCP3 on `dcp-20260910`: smokes, 4 concurrent, OCR, 17.6K/128K/900K exact
+  retrieval; 826,266-token retained history / 27,592-token completion, normal
+  stop, clean content channel.
 - Exact marker retrieval at 127,992 and 899,994 prompt tokens: 3/3 values each.
   Both used Markdown JSON fences, so bare-JSON formatting compliance failed.
   Raw results and the distinction are recorded in STATUS.md and results/.
@@ -93,8 +103,10 @@ Mode switches waited for three idle observations. MTP3 is the final mode.
 A source port does not establish a cure for R30's retained-history degeneration
 or occasional reasoning-only output. Long prose is screened and sampled, not
 factually audited. Known-answer retrieval tests check exact values separately.
-External cache/DCP>1, strict structured-output concurrency, TP4/TP8 hardware and
-new draft checkpoints are not qualified by these TP3 checks. Rejected R30
+External cache, DCP=2, strict structured-output concurrency, TP4/TP8 hardware and
+new draft checkpoints are not qualified by these TP3 checks. DCP=3 is qualified
+by the bounded checks listed in SUMMARY.md (smokes, concurrency, OCR, 128K/900K
+retrieval, 826K retained history), not by a repeated full matrix. Rejected R30
 optimization experiments and diagnostic mounts are not included. The image's
 development-unqualified build label is not a broader production guarantee;
 these documents record the bounded local checks on the exact tested image.

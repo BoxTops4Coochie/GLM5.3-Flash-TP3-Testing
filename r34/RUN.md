@@ -2,15 +2,16 @@
 
 This port carries the R30 TP3 source changes onto the pulled R34 base, including
 physical TP3 padding/loaders, three-rank collectives, target/MTP/DFlash/vision
-geometry, the qualified GDN profile component, and the tested local explicit
-no-tool parser fix. Upstream source and native libraries remain R34.
-See PATCH-LEDGER.md and STATUS.md for lineage and qualification results.
+geometry, the qualified GDN profile component, the tested local explicit
+no-tool parser fix, and the DCP world-size fix that enables DCP=3. Upstream
+source and native libraries remain R34. Current image: `glm53-r34-tp3:dcp-20260910`.
+See PATCH-LEDGER.md, SUMMARY.md and STATUS.md for lineage and qualification.
 
 ## Build
 
 ```bash
 r27-port/.venv/bin/python r34-port/prepare-build.py
-docker build -t glm53-r34-tp3:ported-20260910 r34-port/build
+docker build -t glm53-r34-tp3:dcp-20260910 r34-port/build
 ```
 
 Parent is pinned by digest in build/Dockerfile. This is a local image; no Docker
@@ -68,6 +69,7 @@ docker start glm53-r30-tp3
 ```
 
 R30 and R34 share GPUs and port 15015; run only one. R30 files, image and cache
-are preserved. R34 TP3 testing is bounded, not a universal model-quality or
+are preserved. The previous R34 image `glm53-r34-tp3:ported-20260910` (DCP1
+only) also remains available: set it as `image:` in compose.yaml with `DCP=1`. R34 TP3 testing is bounded, not a universal model-quality or
 concurrency qualification. Prior R30 retained-history degeneration and occasional
 reasoning-only replies are not declared fixed by a source port.
