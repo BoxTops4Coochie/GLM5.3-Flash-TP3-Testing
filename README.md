@@ -2,7 +2,9 @@
 
 This repo focuses on porting over docker images for running GLM-5.3-Flash on vllm made my local-inference-lab in order to work with 3x RTX 6000 PRO
 
-***09/09 Current release - [glm-5.3-flash-tp3.md](glm-5.3-flash-tp3.md)*** - Current r30-TP3 release based on localinferencelab/vllm:jovian-judgement-community-20260909-r30
+***Current releases***
+**r34**-  [glm-5.3-flash-tp3-r34.md](glm-5.3-flash-tp3-r34.md) - Current r34-TP3 release based on localinferencelab/vllm:jovian-judgement-community-20260910-r34
+**r30**- [glm-5.3-flash-tp3.md](glm-5.3-flash-tp3.md) - Current r30-TP3 release based on localinferencelab/vllm:jovian-judgement-community-20260909-r30
 
 Previous builds - not all were published as full qulaifications were not compelted. Consider all below deprecated. Much better speeds seen on r30
 
