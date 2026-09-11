@@ -24,9 +24,10 @@ carrying the R30 TP3 compatibility changes forward.
 ## Docker artifact
 
 
+Published image: ‘azallaza/glm53-r34-tp3:20260910’
 Local build: `glm53-r34-tp3:dcp-20260910` (image ID `sha256:34d5ad37b8bb…`),
 31 overlay files, overlay identity `7447b24601a4ad8a866790479b99fb3e95415ef4037111b176fa3ba95e4b155c`.
-It differs from the qualified `ported-20260910` build by one source file,
+one source file modified for DCP,
 `vllm/v1/attention/ops/dcp.py`: the DCP log-sum-exp combine kernel used the
 DCP world size directly as a Triton `arange` extent, which must be a power of
 two, so world size 3 could not start. The kernel now masks the extra lanes;
