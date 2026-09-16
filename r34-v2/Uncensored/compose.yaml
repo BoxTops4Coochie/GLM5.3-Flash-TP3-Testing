@@ -1,0 +1,195 @@
+services:
+  glm53-tp3:
+    image: "${GLM53_IMAGE:-azallaza/glm53-r34-tp3:native-dcp-20260913}"
+    container_name: glm53-r34-tp3
+
+    restart: "no"
+    init: true
+
+    ipc: host
+    shm_size: "64gb"
+    # Match this host; choose available CPU IDs on another machine.
+    cpuset: "${GLM53_CPUSET:-8-47}"
+
+    ports:
+      - "${GLM53_PORT:-15015}:8000"
+
+    volumes:
+      # Hugging Face hub cache (checkpoint download / offline reuse).
+      - huggingface:/root/.cache/huggingface
+
+      # Persistent JIT / FlashInfer-autotune caches, keyed by the image's
+      # source-delta fingerprint. First start of each mode on a new image
+      # pays autotune once; afterwards startup is warm.
+      - runtime-cache:/cache
+
+      # Required: current launcher has settings absent from the image copy.
+      - ./serve-glm53-flash-tp3-r34.sh:/usr/local/bin/serve-glm53-flash-tp3-r34.sh:ro
+
+    environment:
+      # Which qualified checkpoint to serve. Switching requires a restart:
+      #   CHECKPOINT=uncensored docker compose up -d
+      #   CHECKPOINT=default    docker compose up -d
+      #
+      #   uncensored  orcarouter/GLM-5.3-Flash-Uncensored-NVFP4 (this file's
+      #               default). Selecting it also switches the expert and MTP
+      #               kernels, because its weights are compressed-tensors W4A16
+      #               NVFP4 with an unquantized BF16 MTP layer.
+      #   default     the released local-inference-lab GLM-5.3-Flash-NVFP4
+      #               build, for comparison against the same image.
+      #
+      # Both checkpoints must be present in the Hugging Face cache; neither is
+      # bundled with this configuration.
+      CHECKPOINT: "${CHECKPOINT:-uncensored}"
+
+      # The launcher pins model and revision per CHECKPOINT; a MODEL that
+      # disagrees with the selected checkpoint fails closed. Leave unset unless
+      # you are deliberately asserting the expected values.
+      MODEL: "${MODEL:-}"
+      MODEL_REVISION: "${MODEL_REVISION:-}"
+
+      # Name clients pass as "model" in API requests. Override per invocation:
+      #   SERVED_MODEL_NAME=my-model docker compose up -d
+      SERVED_MODEL_NAME: "${SERVED_MODEL_NAME:-GLM-5.3-Flash-TP3}"
+
+      VLLM_NO_USAGE_STATS: "1"
+
+      # Override per invocation without editing this file:
+      #   MODE=dflash2 docker compose up -d
+      MODE: "${MODE:-mtp}"
+
+      # Scheduling / CUDA graphs; override here, in .env, or before compose.
+      MAX_NUM_BATCHED_TOKENS: "${MAX_NUM_BATCHED_TOKENS:-4096}"
+      MAX_CUDAGRAPH_CAPTURE_SIZE: "${MAX_CUDAGRAPH_CAPTURE_SIZE:-32}"
+      # Empty: adapt the tested capture list to the maximum above.
+      # Optional space-separated list, or "none" for vLLM-generated sizes.
+      CUDAGRAPH_CAPTURE_SIZES: "${CUDAGRAPH_CAPTURE_SIZES:-}"
+
+      # Current baseline: DCP1. DCP3 provides more KV capacity.
+      DCP: "${DCP:-1}"
+      # Native DCP adapter is guarded off at DCP1; qualified for MTP3/DCP3.
+      VLLM_TP3_PCIE_DCP: "${VLLM_TP3_PCIE_DCP:-1}"
+
+      # Server defaults; requests can override these template settings.
+      REASONING_EFFORT: "${REASONING_EFFORT:-max}"
+      CLEAR_THINKING: "${CLEAR_THINKING:-true}"
+
+      # Prefix caching. It cannot be turned off for this model, and the launcher
+      # rejects 0 rather than accepting it silently: vLLM V1 defaults prefix
+      # caching ON so omitting the flag is a no-op, and forcing
+      # --no-enable-prefix-caching drops mamba_cache_mode from 'align', which
+      # the GLM-5.3 split target/recurrent-state page layout requires, aborting
+      # engine startup.
+      ENABLE_PREFIX_CACHING: "${ENABLE_PREFIX_CACHING:-1}"
+
+      # L2 weight-prefetch budgets (decimal MB). These halves of the image
+      # defaults measured about +2% decode speed on three RTX PRO 6000 at
+      # 300 W and remain enabled in the current baseline.
+      VLLM_GLM53_L2_PREFETCH_BUDGET_A_MB: "10"
+      VLLM_GLM53_L2_PREFETCH_BUDGET_B_MB: "25"
+      VLLM_GLM53_L2_PREFETCH_BUDGET_C_MB: "7.5"
+      VLLM_GLM53_L2_PREFETCH_BUDGET_A_MLA_MB: "18"
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0", "1", "2"]
+              capabilities: [gpu]
+
+    entrypoint:
+      - /bin/bash
+      - -lc
+
+    command:
+      - |
+          set -euo pipefail
+
+          # ============================================================
+          # MODE
+          #
+          # mtp      = MTP depth 3      (default; qualified)
+          # dflash2  = DFlash2 depth 7  (retained incoai BF16 draft)
+          # mtp0     = no speculation
+          # ============================================================
+
+          MODE="$${MODE:-mtp}"
+
+          # ============================================================
+          # R34 TP3 SETTINGS
+          # ============================================================
+
+          export TP=3
+          export DCP="$${DCP:-1}"
+
+          export MAX_MODEL_LEN=$${TP3_MAX_MODEL_LEN:-1048576}
+          export MAX_NUM_SEQS=8
+
+          # Tested memory allocation setting.
+          export GPU_MEMORY_UTILIZATION=0.95
+
+          export CACHE_MODE=vram
+
+          # ============================================================
+          # MODE-SPECIFIC SETTINGS
+          # ============================================================
+
+          case "$$MODE" in
+            mtp)
+              export SPECULATOR=mtp
+              export MTP_DEPTH=3
+              unset DFLASH_DEPTH || true
+              ;;
+
+            mtp0)
+              export VLLM_TP3_PCIE_DCP=0
+              export SPECULATOR=mtp
+              export MTP_DEPTH=0
+              unset DFLASH_DEPTH || true
+              ;;
+
+            dflash2)
+              export VLLM_TP3_PCIE_DCP=0
+              export SPECULATOR=dflash2
+              export DFLASH_DEPTH=7
+
+              # Retained BF16 draft preset, smoke-tested on this TP3 port.
+              # The published MXFP8 alternative is not requalified here.
+              export DFLASH_MODEL=incoai/GLM-5.3-Flash-DFlash2
+              export DFLASH_MODEL_REVISION=dc77ff1c99eeb2df044ee3d4f0094eb033fee410
+
+              unset MTP_DEPTH || true
+              ;;
+
+            *)
+              echo "Invalid MODE=$$MODE"
+              exit 1
+              ;;
+          esac
+
+          # ============================================================
+          # SHOW ACTIVE SETTINGS
+          # ============================================================
+
+          echo "============================================================"
+          echo "GLM-5.3-Flash R34 TP3 (top_p=0.95)"
+          echo "============================================================"
+          echo "CHECKPOINT=$${CHECKPOINT:-default}"
+          echo "MODE=$$MODE"
+          echo "SPECULATOR=$$SPECULATOR"
+          echo "MTP_DEPTH=$${MTP_DEPTH:-N/A}"
+          echo "DFLASH_DEPTH=$${DFLASH_DEPTH:-N/A}"
+          echo "TP=$$TP"
+          echo "DCP=$$DCP"
+          echo "MAX_MODEL_LEN=$$MAX_MODEL_LEN"
+          echo "MAX_NUM_SEQS=$$MAX_NUM_SEQS"
+          echo "GPU_MEMORY_UTILIZATION=$$GPU_MEMORY_UTILIZATION"
+          echo "CACHE_MODE=$$CACHE_MODE"
+          echo "============================================================"
+
+          exec /usr/local/bin/serve-glm53-flash-tp3-r34.sh
+
+volumes:
+  huggingface:
+  runtime-cache:
