@@ -1,0 +1,26 @@
+{
+  "observed_date": "2026-09-15",
+  "image": "glm53-r34-tp3:native-dcp-20260913",
+  "image_id": "sha256:49106c2466d7b7132915b852f6a4b6bff11a8ed564a6e819b723e57ea415ef2f",
+  "environment": {
+    "MODEL": "local-inference-lab/GLM-5.3-Flash-NVFP4",
+    "MODEL_REVISION": "46aaae8a82032f77100f2f03e9cc11b391df3b4d",
+    "MODE": "mtp",
+    "DCP": "1",
+    "REASONING_EFFORT": "max",
+    "CLEAR_THINKING": "true",
+    "ENABLE_PREFIX_CACHING": "1",
+    "MAX_NUM_BATCHED_TOKENS": "4096",
+    "MAX_CUDAGRAPH_CAPTURE_SIZE": "32",
+    "VLLM_TP3_PCIE_DCP": "1"
+  },
+  "cpuset": "8-47",
+  "gpu_power_limit_w": [
+    350,
+    350,
+    350
+  ],
+  "gpu_kv_tokens_from_startup": 2091238,
+  "launcher_sha256": "3839b56513566cba0d26cf50375411af0645b85afe9cd32ae330bf4e172dd0a3",
+  "source_delta_sha256": "5f437f7f2fa8b43be720b3ba4773059db8f044aa16d6f713b14e24dea266622e"
+}
