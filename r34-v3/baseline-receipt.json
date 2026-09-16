@@ -1,0 +1,43 @@
+{
+  "observed_date": "2026-09-16",
+  "image": "azallaza/glm53-r34-tp3:native-dcp-20260916",
+  "image_id": "sha256:8a8415a74bb11ba67f12a29c1b23f3c66ffe46a2f3fb33bbd2edb95bfb3a71f5",
+  "environment": {
+    "MODEL": "local-inference-lab/GLM-5.3-Flash-NVFP4",
+    "MODEL_REVISION": "46aaae8a82032f77100f2f03e9cc11b391df3b4d",
+    "MODE": "mtp",
+    "DCP": "1",
+    "REASONING_EFFORT": "max",
+    "CLEAR_THINKING": "true",
+    "ENABLE_PREFIX_CACHING": "1",
+    "MAX_NUM_BATCHED_TOKENS": "4096",
+    "MAX_CUDAGRAPH_CAPTURE_SIZE": "32",
+    "VLLM_TP3_PCIE_DCP": "1",
+    "CHECKPOINT": "default"
+  },
+  "cpuset": "8-47",
+  "gpu_power_limit_w": [
+    350,
+    350,
+    350
+  ],
+  "gpu_kv_tokens_from_startup": 2091238,
+  "launcher_sha256": "4b250132c0af73382acde1eeaaffd740d6fb5f1edda738eb1ca09e098b957a44",
+  "source_delta_sha256": "f51df58b4846f75fcf496cc266eb04033feaa6aa98a72f4d460d6ceb178b0b64",
+  "checkpoint_variants": {
+    "default": {
+      "model": "local-inference-lab/GLM-5.3-Flash-NVFP4",
+      "revision": "46aaae8a82032f77100f2f03e9cc11b391df3b4d",
+      "note": "all measurements in the guide were taken on this variant"
+    },
+    "uncensored": {
+      "model": "orcarouter/GLM-5.3-Flash-Uncensored-NVFP4",
+      "revision": "ec0adf4f49c9570807cc11a5f650538c1893ae54",
+      "note": "third-party fine-tune; not included in this release"
+    }
+  },
+  "supersedes": {
+    "image": "azallaza/glm53-r34-tp3:native-dcp-20260913",
+    "change": "DFlash2 no longer inherits the target decode-context parallelism, so MODE=dflash2 runs at DCP3"
+  }
+}
