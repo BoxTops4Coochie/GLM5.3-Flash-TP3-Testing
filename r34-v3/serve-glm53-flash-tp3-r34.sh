@@ -24,7 +24,7 @@ export CHECKPOINT=${CHECKPOINT:-default}
 case ${CHECKPOINT} in
   default)
     checkpoint_model=local-inference-lab/GLM-5.3-Flash-NVFP4
-    checkpoint_revision=46aaae8a82032f77100f2f03e9cc11b391df3b4d
+    checkpoint_revision=175ae8ce3b5af842b0d0140dbeb43e9cfc557c49
     ;;
   uncensored)
     checkpoint_model=orcarouter/GLM-5.3-Flash-Uncensored-NVFP4

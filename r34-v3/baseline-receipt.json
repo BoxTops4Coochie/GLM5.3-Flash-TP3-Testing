@@ -4,7 +4,7 @@
   "image_id": "sha256:8a8415a74bb11ba67f12a29c1b23f3c66ffe46a2f3fb33bbd2edb95bfb3a71f5",
   "environment": {
     "MODEL": "local-inference-lab/GLM-5.3-Flash-NVFP4",
-    "MODEL_REVISION": "46aaae8a82032f77100f2f03e9cc11b391df3b4d",
+    "MODEL_REVISION": "175ae8ce3b5af842b0d0140dbeb43e9cfc557c49",
     "MODE": "mtp",
     "DCP": "1",
     "REASONING_EFFORT": "max",
@@ -22,12 +22,12 @@
     350
   ],
   "gpu_kv_tokens_from_startup": 2091238,
-  "launcher_sha256": "4b250132c0af73382acde1eeaaffd740d6fb5f1edda738eb1ca09e098b957a44",
+  "launcher_sha256": "5bee39441d58a36a977b101e2db89ad6e6cee8f731718d2c6aaf06b8a7af28e5",
   "source_delta_sha256": "f51df58b4846f75fcf496cc266eb04033feaa6aa98a72f4d460d6ceb178b0b64",
   "checkpoint_variants": {
     "default": {
       "model": "local-inference-lab/GLM-5.3-Flash-NVFP4",
-      "revision": "46aaae8a82032f77100f2f03e9cc11b391df3b4d",
+      "revision": "175ae8ce3b5af842b0d0140dbeb43e9cfc557c49",
       "note": "all measurements in the guide were taken on this variant"
     },
     "uncensored": {

@@ -16,7 +16,7 @@ image and Compose settings on September 16, 2026. It supersedes the
 | Default serving | MTP depth 3 |
 | Other smoke-tested modes | No speculation; DFlash2 depth 7 with the retained incoai BF16 draft, at DCP1 or DCP3 |
 | Target checkpoint | `local-inference-lab/GLM-5.3-Flash-NVFP4` |
-| Target revision | `46aaae8a82032f77100f2f03e9cc11b391df3b4d` |
+| Target revision | `175ae8ce3b5af842b0d0140dbeb43e9cfc557c49` |
 | Context / request slots | 1,048,576 / 8; capacity depends on request lengths |
 | Sampling | Temperature 1, top_p .95, repetition penalty 1; normal EOS |
 | Reasoning effort | `max` by default; `low`/`high`/`max` are the only distinct tiers; request-overridable |
@@ -27,6 +27,14 @@ image and Compose settings on September 16, 2026. It supersedes the
 | GPU KV capacity at this startup | 2,091,238 tokens |
 | GPU power limit | 350 W per GPU; host setting |
 | CPU affinity on this host | CPUs 8–47 |
+
+This guide pins checkpoint revision `175ae8ce…`, a quantization-aware distilled
+release in which the routed expert weights were retrained. The quantization
+scheme is unchanged from `46aaae8a…` (modelopt `MIXED_PRECISION`, NVFP4 routed
+experts with MXFP8 MTP experts, same producer version), so the kernel selection
+and TP3 geometry are the same. **The measured decode, prefill and quality
+figures below were taken on `46aaae8a…` and have not been re-run on this
+revision.**
 
 Eight request slots do not mean eight simultaneous full-context requests fit.
 At DCP1, startup reports 1.99× capacity for 1,048,576 tokens per request.
