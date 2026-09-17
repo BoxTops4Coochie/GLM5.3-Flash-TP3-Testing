@@ -31,10 +31,13 @@ image and Compose settings on September 16, 2026. It supersedes the
 This guide pins checkpoint revision `175ae8ce…`, a quantization-aware distilled
 release in which the routed expert weights were retrained. The quantization
 scheme is unchanged from `46aaae8a…` (modelopt `MIXED_PRECISION`, NVFP4 routed
-experts with MXFP8 MTP experts, same producer version), so the kernel selection
-and TP3 geometry are the same. **The measured decode, prefill and quality
-figures below were taken on `46aaae8a…` and have not been re-run on this
-revision.**
+experts with MXFP8 MTP experts, same producer version), and MTP3/DCP3 reports
+**7,493,749** tokens of KV — identical to the previous revision — so the kernel
+selection and TP3 geometry are unchanged.
+
+Re-measured on this revision: DCP3 decode and prefill, and both quality
+profiles. The **DCP1** decode and prefill tables are carried over from
+`46aaae8a…` and are marked where they appear.
 
 Eight request slots do not mean eight simultaneous full-context requests fit.
 At DCP1, startup reports 1.99× capacity for 1,048,576 tokens per request.
@@ -162,16 +165,43 @@ other value — `minimal`, `medium`, `xhigh`, `max`, or any typo — as
 keep consistent, scored EXACT / NEAR / FAIL against the pair `72, 46`, where
 NEAR means both totals fall within ±4. Thirty runs per arm at concurrency 10:
 
-| Arm | Exact | Near | Fail | Median completion tokens |
-| --- | ---: | ---: | ---: | ---: |
-| `high` | 18 | 12 | 0 | 6,288 |
-| `max` | 29 | 1 | 0 | 20,287 |
+| Arm | Revision | Exact | Near | Fail | Median completion tokens |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `high` | `46aaae8a…` | 18 | 12 | 0 | 6,288 |
+| `max` | `46aaae8a…` | 29 | 1 | 0 | 20,287 |
+| **`max`** | **`175ae8ce…`** | **29** | **1** | **0** | **17,881** |
 
-60.0% versus 96.7% exact (two-sided Fisher p = 0.001). This is the reason the
-server default is `max`. No run in either arm produced a wrong answer; every
-miss is NEAR, arithmetic drift of a point or two in a long ledger rather than a
-lost fact. Temperature 0 did not help. The full `max` run is transcribed from
-the [lavd-test screenshot](lavdtest.jpeg):
+At `max`, this revision scores exactly as the previous one — 29/30 exact, the
+single miss being the same `73, 46.5` (one ticket and half an hour over), with
+30/30 delivered and no errors or truncations. Two-sided Fisher p = 1.0. It
+reaches that on about 12% fewer completion tokens.
+
+The `high` arm was measured on the previous revision and not re-run. At 60.0%
+versus 96.7% exact (Fisher p = 0.001) it is the reason the server default is
+`max`. No run in any arm produced a wrong answer; every miss is NEAR,
+arithmetic drift of a point or two in a long ledger rather than a lost fact.
+Temperature 0 did not help.
+
+A second profile, `hotel-lights` (compact reasoning, strict EXACT/FAIL on the
+single number 48), 30 runs at `max`, concurrency 8, output capped at 100K
+tokens:
+
+| Revision | Exact | Fail | Runaway generations | Median completion tokens |
+| --- | ---: | ---: | ---: | ---: |
+| `46aaae8a…` | 25 | 3 | 2 | 52,799 |
+| **`175ae8ce…`** | **29** | 1 | **0** | 44,593 |
+
+Three measures moved together: exact rate up, the runaway failure mode gone
+(longest run 75,160 tokens against the 100K cap), and median length down about
+15%. None of those is individually significant at n=30 — 29/30 versus 25/30 is
+Fisher p = 0.195, and the runaway change p = 0.297 — but the runaway behaviour
+had previously reproduced at exactly 2/30 in two separate sessions, so its
+disappearance is worth recording. Quantization-aware distillation retrained the
+routed experts, which is a plausible mechanism; this is a single pair of runs,
+not a demonstration.
+
+The previous revision's `max` run on `lavd` is transcribed from the
+[lavd-test screenshot](lavdtest.jpeg):
 
 | Metric | Result |
 | --- | ---: |
@@ -224,18 +254,20 @@ On `native-dcp-20260913` and earlier, `MODE=dflash2 DCP=3` aborted at startup.
 
 ## Sustained decode benchmark at 350 W
 
-Transcribed from the [DCP1 screenshot](DCP1bench.jpeg) and
-[DCP3 screenshot](DCP3bench.jpeg). The baseline receipt records 350 W per GPU;
-the decode screenshots themselves do not show power, warmup or measurement
-duration. C1 is one concurrent request; C8 is eight, and C8 values are
-aggregate output throughput across requests, not per-user speed.
+DCP3 columns were measured on this revision (`llm-inference-bench` standard
+sweep, 350 W, MTP3, temperature 1 / top_p .95). **DCP1 columns are carried over
+from revision `46aaae8a…`**, transcribed from the
+[DCP1 screenshot](DCP1bench.jpeg); the [DCP3 screenshot](DCP3bench.jpeg) holds
+that revision's DCP3 run for comparison. C1 is one concurrent request; C8 is
+eight, and C8 values are aggregate output throughput across requests, not
+per-user speed.
 
 | Context | DCP1 C1 tok/s | DCP1 C8 aggregate tok/s | DCP3 C1 tok/s | DCP3 C8 aggregate tok/s |
 | --- | ---: | ---: | ---: | ---: |
-| 0 | 199.9 | 636.3 | 191.3 | 619.3 |
-| 8K | 184.9 | 656.6 | 182.0 | 583.4 |
-| 32K | 206.6 | 687.7 | 200.6 | 620.8 |
-| 128K | 195.5 | 643.3 | 198.4 | 688.7 |
+| 0 | 199.9 | 636.3 | 185.7 | 640.2 |
+| 8K | 184.9 | 656.6 | 212.1 | 635.1 |
+| 32K | 206.6 | 687.7 | 185.3 | 642.6 |
+| 128K | 195.5 | 643.3 | 211.7 | 649.1 |
 
 MTP acceptance changes raw output throughput. The next table reports the
 benchmark's MTP-normalized rate, `output tok/s ÷ acceptance length`, with
@@ -244,25 +276,33 @@ engine step. The C8 rate retains the benchmark's aggregate accounting.
 
 | Context | DCP1 C1 steps/s (accept len) | DCP1 C8 steps/s (accept len) | DCP3 C1 steps/s (accept len) | DCP3 C8 steps/s (accept len) |
 | --- | ---: | ---: | ---: | ---: |
-| 0 | 81.9 (2.44) | 259.1 (2.46) | 76.8 (2.49) | 249.3 (2.48) |
-| 8K | 81.1 (2.28) | 263.3 (2.49) | 77.0 (2.36) | 243.7 (2.39) |
-| 32K | 81.4 (2.54) | 263.4 (2.61) | 77.2 (2.60) | 245.9 (2.52) |
-| 128K | 80.4 (2.43) | 255.0 (2.52) | 76.7 (2.59) | 251.7 (2.74) |
+| 0 | 81.9 (2.44) | 259.1 (2.46) | 76.8 (2.42) | 250.7 (2.55) |
+| 8K | 81.1 (2.28) | 263.3 (2.49) | 76.9 (2.76) | 247.8 (2.56) |
+| 32K | 81.4 (2.54) | 263.4 (2.61) | 77.1 (2.40) | 248.8 (2.58) |
+| 128K | 80.4 (2.43) | 255.0 (2.52) | 76.5 (2.77) | 245.7 (2.64) |
 
-DCP1 has the higher normalized rate in all displayed cells. At 128K/C8, DCP3's
-higher raw throughput comes with higher acceptance length (2.74 versus 2.52),
-while its normalized rate remains slightly lower. These screenshots alone do
-not establish repeatability or a controlled DCP-only speed difference.
+DCP1 has the higher normalized rate in all displayed cells. Raw output tok/s
+swings with MTP acceptance, which varies run to run (2.40-2.77 at C1 here), so
+the normalized column is the one to compare.
+
+This revision's DCP3 decode is indistinguishable from `46aaae8a…`: median
+verifier rate 76.9 versus 77.0 steps/s at C1 and 248.3 versus 248.0 at C8, with
+every cell inside 0.4% at C1 and 2.2% at C8. Retraining the expert weights did
+not change execution speed, which is expected — the geometry, quantization
+scheme and kernels are identical. The DCP1 columns were not re-run, so the
+DCP1-versus-DCP3 gap shown here mixes two revisions.
 
 Prefill, one sample per point (`N=1`). TTFT is time to first token; actual
-prompt-token counts differ from the nominal context labels.
+prompt-token counts differ from the nominal context labels. DCP3 prefill was
+re-measured on this revision and matches `46aaae8a…` within noise (+2-3%
+median); DCP1 prefill is carried over and its TTFT column does not apply.
 
 | Context label | Prompt tokens | DCP1 TTFT (s) | DCP1 prefill tok/s | DCP3 TTFT (s) | DCP3 prefill tok/s |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 8K | 8,197 | 0.74 | 11,094 | 0.79 | 10,330 |
-| 32K | 32,313 | 2.86 | 11,300 | 2.97 | 10,865 |
-| 64K | 64,491 | 5.70 | 11,323 | 5.85 | 11,026 |
-| 128K | 128,851 | 12.10 | 10,649 | 12.40 | 10,394 |
+| 8K | 8,197 | 0.74 | 11,094 | — | 11,190 |
+| 32K | 32,313 | 2.86 | 11,300 | — | 11,008 |
+| 64K | 64,491 | 5.70 | 11,323 | — | 11,397 |
+| 128K | 128,851 | 12.10 | 10,649 | — | 10,375 |
 
 For reference, the packaged native image's historical DCP3 results at 300 W,
 using 180 s of load warmup, 30 s of cell warmup and 45 s measured:
@@ -443,7 +483,16 @@ services:
       # Optional space-separated list, or "none" for vLLM-generated sizes.
       CUDAGRAPH_CAPTURE_SIZES: "${CUDAGRAPH_CAPTURE_SIZES:-}"
 
-      # Current baseline: DCP1. DCP3 provides more KV capacity.
+      # Decode-context parallelism. Default 1; 3 shards the attention KV cache
+      # across the three ranks for roughly 3.6x the capacity, at about -8%
+      # decode speed below 128K context and -1% at 512K.
+      # Measured KV capacity on this image, graph max 32:
+      #   default,    MTP3:     DCP1 2,091,238   DCP3 7,493,749
+      #   default,    DFlash2:                   DCP3 6,089,264
+      #   uncensored, MTP3:     DCP1 1,866,544   DCP3 6,900,837
+      #   uncensored, DFlash2:  DCP1 1,972,587   DCP3 6,343,179
+      # DFlash2 runs at either DCP setting on this image; on
+      # native-dcp-20260913 and earlier it required DCP1.
       DCP: "${DCP:-1}"
       # Native DCP adapter is guarded off at DCP1; qualified for MTP3/DCP3.
       VLLM_TP3_PCIE_DCP: "${VLLM_TP3_PCIE_DCP:-1}"
