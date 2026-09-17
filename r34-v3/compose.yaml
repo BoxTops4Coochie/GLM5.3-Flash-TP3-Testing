@@ -117,14 +117,12 @@ services:
           # mtp0     = no speculation
           # ============================================================
 
-          MODE="$${MODE:-mtp}"
 
           # ============================================================
           # R34 TP3 SETTINGS
           # ============================================================
 
           export TP=3
-          export DCP="$${DCP:-1}"
 
           export MAX_MODEL_LEN=$${TP3_MAX_MODEL_LEN:-1048576}
           export MAX_NUM_SEQS=8
