@@ -1,0 +1,89 @@
+# Kraken TP3, baked image: the three source corrections are built into
+# azallaza/glm53-kraken-tp3:20260921 (built locally as
+# glm53-kraken-tp3:baked-20260921), so no source mounts are required. The
+# prefill backend is still selected below. The pre-baked, mounted
+# configuration is kept as compose.mounted.yaml.
+# Defaults preserve the measured MTP3/DCP1 configuration.
+# GPU power is a host setting: tested350W/GPU; never exceed400W.
+services:
+  glm53-kraken-tp3:
+    image: "${GLM53_IMAGE:-azallaza/glm53-kraken-tp3:20260921}"
+    container_name: glm53-kraken-tp3
+    restart: "no"
+    ipc: host
+    shm_size: "64gb"
+    cpuset: "8-47"
+    gpus: all
+    ports:
+      - "15015:8000"
+    volumes:
+      - /m2-2/huggingface:/root/.cache/huggingface:ro
+      - /home/aabduh/vllm_cache/glm53-kraken:/cache
+      - ./serve-glm53-flash-tp3-kraken.py:/usr/local/bin/serve-glm53-flash-tp3-kraken.py:ro
+    environment:
+      # Set here, in .env, or before `docker compose up -d`.
+      # default = released NVFP4; uncensored = orcarouter NVFP4 checkpoint.
+      # Both checkpoints are qualified in all four mode/DCP combinations;
+      # see release/kraken-20260921/VARIATIONS.md.
+      CHECKPOINT: "${CHECKPOINT:-default}"
+      MODEL: "${MODEL:-}"
+      MODEL_REVISION: "${MODEL_REVISION:-}"
+      SERVED_MODEL_NAME: "${SERVED_MODEL_NAME:-GLM-5.3-Flash-TP3}"
+
+      # mtp = depth3; dflash2 (or dflash) = depth7; mtp0 = speculation off.
+      # Draft arguments are added only in DFlash mode.
+      MODE: "${MODE:-mtp}"
+      DFLASH_MODEL: "${DFLASH_MODEL:-local-inference-lab/GLM-5.3-Flash-DFlash2}"
+      DFLASH_MODEL_REVISION: "${DFLASH_MODEL_REVISION:-}"
+
+      # DCP1 = measured speed baseline; DCP3 = shard KV across all3 GPUs.
+      # DCP3 is qualified; its rank-padding correction is baked into the image.
+      DCP: "${DCP:-1}"
+      MAX_NUM_BATCHED_TOKENS: "${MAX_NUM_BATCHED_TOKENS:-4096}"
+      # Empty chooses32 for MTP/off or64 for DFlash (covers C8 verification).
+      MAX_CUDAGRAPH_CAPTURE_SIZE: "${MAX_CUDAGRAPH_CAPTURE_SIZE:-}"
+      # Empty: finer MTP/off captures for default/DCP1, graph32, 8 slots.
+      # Other settings retain their ladder; explicit space-separated lists override.
+      CUDAGRAPH_CAPTURE_SIZES: "${CUDAGRAPH_CAPTURE_SIZES:-}"
+      MAX_NUM_SEQS: "${MAX_NUM_SEQS:-8}"
+      MAX_MODEL_LEN: "${MAX_MODEL_LEN:-1048576}"
+      GPU_MEMORY_UTILIZATION: "${GPU_MEMORY_UTILIZATION:-0.95}"
+      REASONING_EFFORT: "${REASONING_EFFORT:-max}"
+      CLEAR_THINKING: "${CLEAR_THINKING:-true}"
+
+      # Optional256KB: earlier C8 gains used the original capture ladder.
+      # No consistent gain confirmed with the finer default captures.
+      # Empty retains upstream84KiB. No DFlash/uncensored gain claimed.
+      VLLM_PCIE_ONESHOT_ALLREDUCE_MAX_SIZE: "${VLLM_PCIE_ONESHOT_ALLREDUCE_MAX_SIZE:-}"
+
+      # KDA backends. The Kraken profile ships kda_prefill_backend=b12x, which
+      # `resolve_kda_prefill_backend` refuses to select under `auto` because it
+      # is not serving-qualified. It degrades the recurrent state built across
+      # very long prompts: on an 826K history it cost uncensored/DFlash2 one
+      # failure in four, and held uncensored/MTP3 to 38% of the default
+      # checkpoint's output length. flashkda -- what R34 served in all 429
+      # recorded receipts -- takes both arms to 4/4 at full length.
+      # Decode stays on b12x, so this remains a b12x build.
+      # See qualification-20260920/kda-prefill-backend/RESULTS.md.
+      # The image's profile still ships kda_prefill_backend=b12x and is not
+      # patched: /opt/lil/image-contract.json pins the profile hashes and the
+      # entrypoint refuses to start if they change. So the qualified backend is
+      # selected here. Decode stays b12x; only recurrent prefill moves.
+      ADDITIONAL_CONFIG: "${ADDITIONAL_CONFIG:-{\"glm53_kda_decode_backend\":\"b12x\",\"kda_prefill_backend\":\"flashkda\"}}"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      VLLM_NO_USAGE_STATS: "1"
+      # 1 asserts the resolved backend set matches the qualified one. The
+      # baked vllm/v1/worker/utils.py accepts either b12x or flashkda for
+      # prefill and still requires b12x collectives, EP3 and b12x KDA decode,
+      # so this stays on for every supported configuration.
+      GLM53_TP3_REQUIRE_RUNTIME_PROOF: "${GLM53_TP3_REQUIRE_RUNTIME_PROOF:-1}"
+      # Half-L2 budgets retained from R34.
+      VLLM_GLM53_L2_PREFETCH_BUDGET_A_MB: "10"
+      VLLM_GLM53_L2_PREFETCH_BUDGET_B_MB: "25"
+      VLLM_GLM53_L2_PREFETCH_BUDGET_C_MB: "7.5"
+      VLLM_GLM53_L2_PREFETCH_BUDGET_A_MLA_MB: "18"
+      VLLM_GLM53_L2_PREFETCH_PERSIST_MB: "${VLLM_GLM53_L2_PREFETCH_PERSIST_MB:-0}"
+      VLLM_GLM53_L2_PREFETCH_A_NEXT_MB: "${VLLM_GLM53_L2_PREFETCH_A_NEXT_MB:-0}"
+    entrypoint: ["/opt/venv/bin/python", "/usr/local/bin/serve-glm53-flash-tp3-kraken.py"]
+    command: []

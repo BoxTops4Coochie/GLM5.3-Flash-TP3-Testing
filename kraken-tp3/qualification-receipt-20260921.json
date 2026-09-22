@@ -1,0 +1,227 @@
+{
+  "generated": "2026-09-21T06:11:50.651647+00:00",
+  "image": "glm53-kraken-tp3:baked-20260921",
+  "published_image": "azallaza/glm53-kraken-tp3:20260921",
+  "kda_prefill_backend": "flashkda",
+  "kda_decode_backend": "b12x",
+  "runtime_proof": "accepts {b12x, flashkda} for prefill; b12x required elsewhere",
+  "gpu_power_limit_w": 350,
+  "companions": {
+    "compose.yaml": "6bc721c97a9bd64894cc925c800581732f4aba63a0cc978d2bd6e32a7d8fbdb9",
+    "dcp.py": "6a31aab23d965aece4a6b825b4f2db8231c07b5b83b2178328549fd3d8b2e592",
+    "mamba_utils.py": "2e681395445c32774ebaa460c0c3a20407852f35ab83648799c4334d87e42905",
+    "serve-glm53-flash-tp3-kraken.py": "26234c8d85cfac19a8f0703fc533cdd735470887e4b2f510c8e4024098ed5f9d",
+    "utils.py": "1205b6f66df837de9d3c5e39f1a74ac2aa2e7cf2ece83e47c5d4012594307948"
+  },
+  "variations": {
+    "default-mtp-dcp1": {
+      "smoke": "8/8 exact arithmetic, natural EOS",
+      "retrieval": [
+        "128000",
+        "900000"
+      ],
+      "retrieval_all_passed": true,
+      "prefill_tok_per_s": {
+        "8192": 10145.0,
+        "32768": 10306.0,
+        "65536": 10056.0,
+        "131072": 9670.0
+      }
+    },
+    "default-mtp-dcp3": {
+      "smoke": "8/8 exact arithmetic, natural EOS",
+      "retrieval": [
+        "128000",
+        "900000"
+      ],
+      "retrieval_all_passed": true,
+      "prefill_tok_per_s": {
+        "8192": 9725.0,
+        "32768": 10100.0,
+        "65536": 9944.0,
+        "131072": 9690.0
+      }
+    },
+    "default-dflash2-dcp1": {
+      "smoke": "8/8 exact arithmetic, natural EOS",
+      "retrieval": [
+        "128000",
+        "900000"
+      ],
+      "retrieval_all_passed": true,
+      "prefill_tok_per_s": {
+        "8192": 10300.0,
+        "32768": 10518.0,
+        "65536": 10308.0,
+        "131072": 9919.0
+      }
+    },
+    "default-dflash2-dcp3": {
+      "smoke": "8/8 exact arithmetic, natural EOS",
+      "retrieval": [
+        "128000",
+        "900000"
+      ],
+      "retrieval_all_passed": true,
+      "prefill_tok_per_s": {
+        "8192": 9876.0,
+        "32768": 10267.0,
+        "65536": 10136.0,
+        "131072": 9881.0
+      }
+    },
+    "uncensored-mtp-dcp1": {
+      "smoke": "8/8 exact arithmetic, natural EOS",
+      "retrieval": [
+        "128000",
+        "900000"
+      ],
+      "retrieval_all_passed": true,
+      "prefill_tok_per_s": {
+        "8192": 8082.0,
+        "32768": 8187.0,
+        "65536": 7979.0,
+        "131072": 7752.0
+      }
+    },
+    "uncensored-mtp-dcp3": {
+      "smoke": "8/8 exact arithmetic, natural EOS",
+      "retrieval": [
+        "128000",
+        "900000"
+      ],
+      "retrieval_all_passed": true,
+      "prefill_tok_per_s": {
+        "8192": 7867.0,
+        "32768": 8099.0,
+        "65536": 7920.0,
+        "131072": 7725.0
+      }
+    },
+    "uncensored-dflash2-dcp1": {
+      "smoke": "8/8 exact arithmetic, natural EOS",
+      "retrieval": [
+        "128000",
+        "900000"
+      ],
+      "retrieval_all_passed": true,
+      "prefill_tok_per_s": {
+        "8192": 8084.0,
+        "32768": 8286.0,
+        "65536": 8092.0,
+        "131072": 7904.0
+      }
+    },
+    "uncensored-dflash2-dcp3": {
+      "smoke": "8/8 exact arithmetic, natural EOS",
+      "retrieval": [
+        "128000",
+        "900000"
+      ],
+      "retrieval_all_passed": true,
+      "prefill_tok_per_s": {
+        "8192": 7989.0,
+        "32768": 8195.0,
+        "65536": 8052.0,
+        "131072": 7865.0
+      }
+    }
+  },
+  "long_generation_integrity": {
+    "default/dflash2/dcp1": {
+      "trials": 4,
+      "passed": 4,
+      "tool_call_responses": 0,
+      "chars_min": 51727,
+      "chars_max": 84952,
+      "worst_repeat_8gram": 0.0052
+    },
+    "default/dflash2/dcp3": {
+      "trials": 4,
+      "passed": 4,
+      "tool_call_responses": 0,
+      "chars_min": 55331,
+      "chars_max": 80351,
+      "worst_repeat_8gram": 0.0072
+    },
+    "default/mtp/dcp1": {
+      "trials": 12,
+      "passed": 11,
+      "tool_call_responses": 1,
+      "chars_min": 40680,
+      "chars_max": 80308,
+      "worst_repeat_8gram": 0.0074
+    },
+    "default/mtp/dcp3": {
+      "trials": 4,
+      "passed": 4,
+      "tool_call_responses": 1,
+      "chars_min": 54576,
+      "chars_max": 72227,
+      "worst_repeat_8gram": 0.0031
+    },
+    "uncensored/dflash2/dcp1": {
+      "trials": 4,
+      "passed": 4,
+      "tool_call_responses": 0,
+      "chars_min": 23501,
+      "chars_max": 36390,
+      "worst_repeat_8gram": 0.005
+    },
+    "uncensored/dflash2/dcp3": {
+      "trials": 4,
+      "passed": 4,
+      "tool_call_responses": 0,
+      "chars_min": 21350,
+      "chars_max": 39651,
+      "worst_repeat_8gram": 0.003
+    },
+    "uncensored/mtp/dcp1": {
+      "trials": 4,
+      "passed": 4,
+      "tool_call_responses": 0,
+      "chars_min": 23513,
+      "chars_max": 30807,
+      "worst_repeat_8gram": 0.0044
+    },
+    "uncensored/mtp/dcp3": {
+      "trials": 4,
+      "passed": 4,
+      "tool_call_responses": 0,
+      "chars_min": 29999,
+      "chars_max": 48291,
+      "worst_repeat_8gram": 0.0151
+    }
+  },
+  "totals": {
+    "trials": 40,
+    "passed": 39,
+    "genuine_failures": 1,
+    "tool_call_responses": 2,
+    "genuine_failure_rate_pct": 2.6
+  },
+  "image_id": "sha256:a6031e4ad9f0a7cc54f874d63ca8f7f6a1611e5baac0779223a9d26dd97fd9c0",
+  "image_parent": "glm53-kraken-tp3:ported-20260919 (sha256:c7f5aebe998defd34cfc901f8e462eadac5ee90b4180ea965b9dc9e87d23bc3d)",
+  "overlays_baked": [
+    "vllm/v1/attention/ops/dcp.py",
+    "vllm/v1/worker/mamba_utils.py",
+    "vllm/v1/worker/utils.py"
+  ],
+  "profile_unpatched": "kda_prefill_backend stays b12x in the image profile; image-contract.json pins profile hashes, so the qualified backend is set via ADDITIONAL_CONFIG",
+  "baked_image_verification": {
+    "runs_without_source_mounts": true,
+    "runtime_proof": "collective b12x_pcie_oneshot, EP3, kda_decode b12x, kda_prefill flashkda",
+    "default_mtp3_dcp1_arithmetic": "8/8 exact, natural EOS",
+    "default_mtp3_dcp3_arithmetic": "8/8 exact (proves the corrected dcp.py is baked)",
+    "uncensored_dflash2_dcp1_arithmetic": "8/8 exact",
+    "uncensored_dflash2_dcp1_long_generation": {
+      "seed": 201,
+      "content_chars": 34809,
+      "repeat_8gram": 0.0006,
+      "ttr": 0.628,
+      "finish": "stop",
+      "note": "within the mounted-image qualified range for this arm (23,501-36,390)"
+    }
+  },
+  "published_image_verified": "same image id as the qualified local build glm53-kraken-tp3:baked-20260921"
+}

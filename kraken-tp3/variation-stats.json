@@ -1,0 +1,601 @@
+{
+  "default-mtp-dcp1": {
+    "decode": {
+      "1": {
+        "0": [
+          190.1046708968766,
+          79.40096923985475,
+          2.39423614997202
+        ],
+        "32768": [
+          199.21922855134213,
+          79.24779616846631,
+          2.5138772077375946
+        ],
+        "131072": [
+          188.75673988579516,
+          77.88549417802946,
+          2.42351598173516
+        ]
+      },
+      "8": {
+        "0": [
+          654.9873849206292,
+          259.47842231930167,
+          2.524246058944483
+        ],
+        "32768": [
+          663.9597839600096,
+          261.44875470851207,
+          2.5395408163265305
+        ],
+        "131072": [
+          665.7285340682218,
+          255.77768862241328,
+          2.6027623349548294
+        ]
+      }
+    },
+    "prefill": {
+      "8192": [
+        10145.0,
+        0.808,
+        8199
+      ],
+      "32768": [
+        10306.0,
+        3.135,
+        32315
+      ],
+      "65536": [
+        10056.0,
+        6.413,
+        64493
+      ],
+      "131072": [
+        9670.0,
+        13.326,
+        128853
+      ]
+    },
+    "retrieval": [
+      "Idle observations: 1",
+      "Idle observations: 2",
+      "Idle observations: 3",
+      "START 128000 actual prompt 127992",
+      "DONE 128000 {\"passed\": true, \"strict_json\": false, \"actual\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"expected\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"usage\": {\"prompt_tokens\": 127992, \"total_tokens\": 128130, \"completion_tokens\": 138, \"prompt_tokens_details\": null, \"completion_tokens_details\": {\"reasoning_tokens\": 78}}, \"finish_reason\": \"stop\"}",
+      "Idle observations: 0",
+      "Idle observations: 1",
+      "Idle observations: 2",
+      "Idle observations: 3",
+      "START 900000 actual prompt 899994",
+      "DONE 900000 {\"passed\": true, \"strict_json\": false, \"actual\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"expected\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"usage\": {\"prompt_tokens\": 899994, \"total_tokens\": 900169, \"completion_tokens\": 175, \"prompt_tokens_details\": null, \"completion_tokens_details\": {\"reasoning_tokens\": 115}}, \"finish_reason\": \"stop\"}"
+    ],
+    "smoke": "fk-default-mtp-dcp1 8/8 exact arithmetic, natural EOS"
+  },
+  "default-mtp-dcp3": {
+    "decode": {
+      "1": {
+        "0": [
+          172.2057197169818,
+          73.09131657622315,
+          2.356035269078747
+        ],
+        "32768": [
+          189.4646971680532,
+          72.71888435587918,
+          2.605440097799511
+        ],
+        "131072": [
+          186.56267411575095,
+          72.47806531945007,
+          2.5740570377184913
+        ]
+      },
+      "8": {
+        "0": [
+          621.716981832039,
+          246.32139593431282,
+          2.5240072202166064
+        ],
+        "32768": [
+          629.438977426514,
+          244.54592419353847,
+          2.573909090909091
+        ],
+        "131072": [
+          628.2498867828966,
+          243.29677144203893,
+          2.582236842105263
+        ]
+      }
+    },
+    "prefill": {
+      "8192": [
+        9725.0,
+        0.843,
+        8198
+      ],
+      "32768": [
+        10100.0,
+        3.199,
+        32314
+      ],
+      "65536": [
+        9944.0,
+        6.485,
+        64492
+      ],
+      "131072": [
+        9690.0,
+        13.297,
+        128852
+      ]
+    },
+    "retrieval": [
+      "Idle observations: 0",
+      "Idle observations: 1",
+      "Idle observations: 2",
+      "Idle observations: 3",
+      "START 128000 actual prompt 127992",
+      "DONE 128000 {\"passed\": true, \"strict_json\": false, \"actual\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"expected\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"usage\": {\"prompt_tokens\": 127992, \"total_tokens\": 128130, \"completion_tokens\": 138, \"prompt_tokens_details\": null, \"completion_tokens_details\": {\"reasoning_tokens\": 78}}, \"finish_reason\": \"stop\"}",
+      "Idle observations: 0",
+      "Idle observations: 1",
+      "Idle observations: 2",
+      "Idle observations: 3",
+      "START 900000 actual prompt 899994",
+      "DONE 900000 {\"passed\": true, \"strict_json\": false, \"actual\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"expected\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"usage\": {\"prompt_tokens\": 899994, \"total_tokens\": 900162, \"completion_tokens\": 168, \"prompt_tokens_details\": null, \"completion_tokens_details\": {\"reasoning_tokens\": 108}}, \"finish_reason\": \"stop\"}"
+    ],
+    "smoke": "fk-default-mtp-dcp3 8/8 exact arithmetic, natural EOS"
+  },
+  "default-dflash2-dcp1": {
+    "decode": {
+      "1": {
+        "0": [
+          163.81258345635405,
+          64.0715884011218,
+          2.5567117585848074
+        ],
+        "32768": [
+          159.82326174647454,
+          63.65370903099751,
+          2.5108240223463687
+        ],
+        "131072": [
+          163.02380297286274,
+          62.130750363141715,
+          2.6238827314980337
+        ]
+      },
+      "8": {
+        "0": [
+          536.1681992036905,
+          211.82612273552942,
+          2.5311712846347607
+        ],
+        "32768": [
+          538.9426312490318,
+          209.50358276165804,
+          2.572474533106961
+        ],
+        "131072": [
+          544.7964853220712,
+          200.613869401223,
+          2.7156471631205674
+        ]
+      }
+    },
+    "prefill": {
+      "8192": [
+        10300.0,
+        0.796,
+        8199
+      ],
+      "32768": [
+        10518.0,
+        3.072,
+        32315
+      ],
+      "65536": [
+        10308.0,
+        6.257,
+        64493
+      ],
+      "131072": [
+        9919.0,
+        12.99,
+        128853
+      ]
+    },
+    "retrieval": [
+      "Idle observations: 0",
+      "Idle observations: 1",
+      "Idle observations: 2",
+      "Idle observations: 3",
+      "START 128000 actual prompt 127992",
+      "DONE 128000 {\"passed\": true, \"strict_json\": false, \"actual\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"expected\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"usage\": {\"prompt_tokens\": 127992, \"total_tokens\": 128184, \"completion_tokens\": 192, \"prompt_tokens_details\": null, \"completion_tokens_details\": {\"reasoning_tokens\": 137}}, \"finish_reason\": \"stop\"}",
+      "Idle observations: 0",
+      "Idle observations: 1",
+      "Idle observations: 2",
+      "Idle observations: 3",
+      "START 900000 actual prompt 899994",
+      "DONE 900000 {\"passed\": true, \"strict_json\": false, \"actual\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"expected\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"usage\": {\"prompt_tokens\": 899994, \"total_tokens\": 900178, \"completion_tokens\": 184, \"prompt_tokens_details\": null, \"completion_tokens_details\": {\"reasoning_tokens\": 124}}, \"finish_reason\": \"stop\"}"
+    ],
+    "smoke": "fk-default-dflash2-dcp1 8/8 exact arithmetic, natural EOS"
+  },
+  "default-dflash2-dcp3": {
+    "decode": {
+      "1": {
+        "0": [
+          146.93276800145014,
+          60.57754470235225,
+          2.425531914893617
+        ],
+        "32768": [
+          145.6210328707562,
+          59.599513224380914,
+          2.443325876211782
+        ],
+        "131072": [
+          147.93086147458328,
+          59.24340114292828,
+          2.497001499250375
+        ]
+      },
+      "8": {
+        "0": [
+          506.98907105018515,
+          198.4827198568758,
+          2.5543234767025087
+        ],
+        "32768": [
+          512.3935752338696,
+          194.42672373914925,
+          2.6354071363220495
+        ],
+        "131072": [
+          505.41977375905685,
+          193.01525083499553,
+          2.6185483870967743
+        ]
+      }
+    },
+    "prefill": {
+      "8192": [
+        9876.0,
+        0.83,
+        8199
+      ],
+      "32768": [
+        10267.0,
+        3.148,
+        32315
+      ],
+      "65536": [
+        10136.0,
+        6.363,
+        64493
+      ],
+      "131072": [
+        9881.0,
+        13.04,
+        128853
+      ]
+    },
+    "retrieval": [
+      "Idle observations: 0",
+      "Idle observations: 1",
+      "Idle observations: 2",
+      "Idle observations: 3",
+      "START 128000 actual prompt 127992",
+      "DONE 128000 {\"passed\": true, \"strict_json\": false, \"actual\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"expected\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"usage\": {\"prompt_tokens\": 127992, \"total_tokens\": 128208, \"completion_tokens\": 216, \"prompt_tokens_details\": null, \"completion_tokens_details\": {\"reasoning_tokens\": 156}}, \"finish_reason\": \"stop\"}",
+      "Idle observations: 0",
+      "Idle observations: 1",
+      "Idle observations: 2",
+      "Idle observations: 3",
+      "START 900000 actual prompt 899994",
+      "DONE 900000 {\"passed\": true, \"strict_json\": false, \"actual\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"expected\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"usage\": {\"prompt_tokens\": 899994, \"total_tokens\": 900197, \"completion_tokens\": 203, \"prompt_tokens_details\": null, \"completion_tokens_details\": {\"reasoning_tokens\": 143}}, \"finish_reason\": \"stop\"}"
+    ],
+    "smoke": "fk-default-dflash2-dcp3 8/8 exact arithmetic, natural EOS"
+  },
+  "uncensored-mtp-dcp1": {
+    "decode": {
+      "1": {
+        "0": [
+          200.14111894710723,
+          79.32761126248172,
+          2.52296918767507
+        ],
+        "32768": [
+          197.5631169543394,
+          78.7852915789572,
+          2.5076142131979697
+        ],
+        "131072": [
+          192.34892813681975,
+          77.3040873653639,
+          2.48821161587119
+        ]
+      },
+      "8": {
+        "0": [
+          657.6175767908965,
+          258.23622500939973,
+          2.546573691460055
+        ],
+        "32768": [
+          667.475462206191,
+          258.36612629652893,
+          2.5834480385409497
+        ],
+        "131072": [
+          665.133571112278,
+          250.07261449580182,
+          2.65976173541963
+        ]
+      }
+    },
+    "prefill": {
+      "8192": [
+        8082.0,
+        1.014,
+        8198
+      ],
+      "32768": [
+        8187.0,
+        3.947,
+        32314
+      ],
+      "65536": [
+        7979.0,
+        8.083,
+        64492
+      ],
+      "131072": [
+        7752.0,
+        16.621,
+        128852
+      ]
+    },
+    "retrieval": [
+      "Idle observations: 0",
+      "Idle observations: 1",
+      "Idle observations: 2",
+      "Idle observations: 3",
+      "START 128000 actual prompt 127992",
+      "DONE 128000 {\"passed\": true, \"strict_json\": false, \"actual\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"expected\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"usage\": {\"prompt_tokens\": 127992, \"total_tokens\": 128158, \"completion_tokens\": 166, \"prompt_tokens_details\": null, \"completion_tokens_details\": {\"reasoning_tokens\": 106}}, \"finish_reason\": \"stop\"}",
+      "Idle observations: 0",
+      "Idle observations: 1",
+      "Idle observations: 2",
+      "Idle observations: 3",
+      "START 900000 actual prompt 899994",
+      "DONE 900000 {\"passed\": true, \"strict_json\": false, \"actual\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"expected\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"usage\": {\"prompt_tokens\": 899994, \"total_tokens\": 900126, \"completion_tokens\": 132, \"prompt_tokens_details\": null, \"completion_tokens_details\": {\"reasoning_tokens\": 72}}, \"finish_reason\": \"stop\"}"
+    ],
+    "smoke": "fk-uncensored-mtp-dcp1 8/8 exact arithmetic, natural EOS"
+  },
+  "uncensored-mtp-dcp3": {
+    "decode": {
+      "1": {
+        "0": [
+          179.45880674657832,
+          74.52630406505786,
+          2.407992842230838
+        ],
+        "32768": [
+          196.52977014393488,
+          73.8875492682704,
+          2.6598496240601506
+        ],
+        "131072": [
+          184.47344670771713,
+          73.40723448419817,
+          2.513014527845036
+        ]
+      },
+      "8": {
+        "0": [
+          623.4675754056016,
+          241.42257410915508,
+          2.5824742268041234
+        ],
+        "32768": [
+          639.6109380512363,
+          244.04246727327737,
+          2.6209001457725947
+        ],
+        "131072": [
+          623.3414282398512,
+          240.07158637010173,
+          2.596481481481481
+        ]
+      }
+    },
+    "prefill": {
+      "8192": [
+        7867.0,
+        1.042,
+        8199
+      ],
+      "32768": [
+        8099.0,
+        3.99,
+        32315
+      ],
+      "65536": [
+        7920.0,
+        8.143,
+        64493
+      ],
+      "131072": [
+        7725.0,
+        16.68,
+        128853
+      ]
+    },
+    "retrieval": [
+      "Idle observations: 0",
+      "Idle observations: 1",
+      "Idle observations: 2",
+      "Idle observations: 3",
+      "START 128000 actual prompt 127992",
+      "DONE 128000 {\"passed\": true, \"strict_json\": false, \"actual\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"expected\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"usage\": {\"prompt_tokens\": 127992, \"total_tokens\": 128136, \"completion_tokens\": 144, \"prompt_tokens_details\": null, \"completion_tokens_details\": {\"reasoning_tokens\": 84}}, \"finish_reason\": \"stop\"}",
+      "Idle observations: 0",
+      "Idle observations: 1",
+      "Idle observations: 2",
+      "Idle observations: 3",
+      "START 900000 actual prompt 899994",
+      "DONE 900000 {\"passed\": true, \"strict_json\": false, \"actual\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"expected\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"usage\": {\"prompt_tokens\": 899994, \"total_tokens\": 900126, \"completion_tokens\": 132, \"prompt_tokens_details\": null, \"completion_tokens_details\": {\"reasoning_tokens\": 72}}, \"finish_reason\": \"stop\"}"
+    ],
+    "smoke": "fk-uncensored-mtp-dcp3 8/8 exact arithmetic, natural EOS"
+  },
+  "uncensored-dflash2-dcp1": {
+    "decode": {
+      "1": {
+        "0": [
+          156.9434355055799,
+          64.61330789048588,
+          2.4289645682834538
+        ],
+        "32768": [
+          160.18047246110757,
+          63.654346209048434,
+          2.5164106145251397
+        ],
+        "131072": [
+          154.2276397420275,
+          61.97995493379174,
+          2.488347077805665
+        ]
+      },
+      "8": {
+        "0": [
+          536.1257822436448,
+          205.89790426602792,
+          2.6038428324697755
+        ],
+        "32768": [
+          535.6088128770567,
+          202.0762575318288,
+          2.6505281690140845
+        ],
+        "131072": [
+          535.9981475239298,
+          196.8482870727346,
+          2.72289972899729
+        ]
+      }
+    },
+    "prefill": {
+      "8192": [
+        8084.0,
+        1.014,
+        8199
+      ],
+      "32768": [
+        8286.0,
+        3.9,
+        32315
+      ],
+      "65536": [
+        8092.0,
+        7.97,
+        64493
+      ],
+      "131072": [
+        7904.0,
+        16.302,
+        128853
+      ]
+    },
+    "retrieval": [
+      "Idle observations: 0",
+      "Idle observations: 1",
+      "Idle observations: 2",
+      "Idle observations: 3",
+      "START 128000 actual prompt 127992",
+      "DONE 128000 {\"passed\": true, \"strict_json\": false, \"actual\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"expected\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"usage\": {\"prompt_tokens\": 127992, \"total_tokens\": 128140, \"completion_tokens\": 148, \"prompt_tokens_details\": null, \"completion_tokens_details\": {\"reasoning_tokens\": 88}}, \"finish_reason\": \"stop\"}",
+      "Idle observations: 0",
+      "Idle observations: 1",
+      "Idle observations: 2",
+      "Idle observations: 3",
+      "START 900000 actual prompt 899994",
+      "DONE 900000 {\"passed\": true, \"strict_json\": false, \"actual\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"expected\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"usage\": {\"prompt_tokens\": 899994, \"total_tokens\": 900136, \"completion_tokens\": 142, \"prompt_tokens_details\": null, \"completion_tokens_details\": {\"reasoning_tokens\": 82}}, \"finish_reason\": \"stop\"}"
+    ],
+    "smoke": "fk-uncensored-dflash2-dcp1 8/8 exact arithmetic, natural EOS"
+  },
+  "uncensored-dflash2-dcp3": {
+    "decode": {
+      "1": {
+        "0": [
+          150.1106988814089,
+          61.440244588807076,
+          2.4431982633863965
+        ],
+        "32768": [
+          151.71618508021638,
+          60.55758083251642,
+          2.505321100917431
+        ],
+        "131072": [
+          146.93008271287977,
+          60.172425704049246,
+          2.4418175101588475
+        ]
+      },
+      "8": {
+        "0": [
+          514.9997059727355,
+          197.03718032382284,
+          2.6137184115523464
+        ],
+        "32768": [
+          543.0199878157267,
+          193.50853526911303,
+          2.8061810661764706
+        ],
+        "131072": [
+          535.4666363125298,
+          190.06809752811,
+          2.8172357343311507
+        ]
+      }
+    },
+    "prefill": {
+      "8192": [
+        7989.0,
+        1.026,
+        8200
+      ],
+      "32768": [
+        8195.0,
+        3.944,
+        32316
+      ],
+      "65536": [
+        8052.0,
+        8.01,
+        64494
+      ],
+      "131072": [
+        7865.0,
+        16.384,
+        128854
+      ]
+    },
+    "retrieval": [
+      "Idle observations: 0",
+      "Idle observations: 1",
+      "Idle observations: 2",
+      "Idle observations: 3",
+      "START 128000 actual prompt 127992",
+      "DONE 128000 {\"passed\": true, \"strict_json\": false, \"actual\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"expected\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"usage\": {\"prompt_tokens\": 127992, \"total_tokens\": 128157, \"completion_tokens\": 165, \"prompt_tokens_details\": null, \"completion_tokens_details\": {\"reasoning_tokens\": 105}}, \"finish_reason\": \"stop\"}",
+      "Idle observations: 0",
+      "Idle observations: 1",
+      "Idle observations: 2",
+      "Idle observations: 3",
+      "START 900000 actual prompt 899994",
+      "DONE 900000 {\"passed\": true, \"strict_json\": false, \"actual\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"expected\": {\"A\": \"ALPHA-R34-7K2M9Q\", \"B\": \"BETA-R34-8P6V3X\", \"C\": \"GAMMA-R34-4T9N2Z\"}, \"usage\": {\"prompt_tokens\": 899994, \"total_tokens\": 900160, \"completion_tokens\": 166, \"prompt_tokens_details\": null, \"completion_tokens_details\": {\"reasoning_tokens\": 106}}, \"finish_reason\": \"stop\"}"
+    ],
+    "smoke": "fk-uncensored-dflash2-dcp3 8/8 exact arithmetic, natural EOS"
+  }
+}
