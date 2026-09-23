@@ -1,0 +1,142 @@
+[
+ {
+  "arm": "A-v1-pdl",
+  "state": {
+   "projections": 90,
+   "lm_head": false,
+   "mtp": false
+  },
+  "decode": {
+   "c1": [
+    [
+     0,
+     205.9,
+     85.76,
+     2.4,
+     false
+    ]
+   ],
+   "c8": [
+    [
+     0,
+     709.2,
+     278.01,
+     2.551,
+     false
+    ]
+   ]
+  }
+ },
+ {
+  "arm": "B-v2-pdl",
+  "state": {
+   "projections": 96,
+   "lm_head": true,
+   "mtp": true
+  },
+  "decode": {
+   "c1": [
+    [
+     0,
+     211.0,
+     88.16,
+     2.394,
+     false
+    ]
+   ],
+   "c8": [
+    [
+     0,
+     693.8,
+     273.2,
+     2.54,
+     false
+    ]
+   ]
+  }
+ },
+ {
+  "arm": "C-v2-pdl-cut256",
+  "state": {
+   "projections": 96,
+   "lm_head": true,
+   "mtp": true
+  },
+  "decode": {
+   "c1": [
+    [
+     0,
+     212.6,
+     87.94,
+     2.418,
+     false
+    ]
+   ],
+   "c8": [
+    [
+     0,
+     713.6,
+     283.35,
+     2.518,
+     false
+    ]
+   ]
+  }
+ },
+ {
+  "arm": "B-v2-pdl-2",
+  "state": {
+   "projections": 96,
+   "lm_head": true,
+   "mtp": true
+  },
+  "decode": {
+   "c1": [
+    [
+     0,
+     222.2,
+     88.25,
+     2.518,
+     false
+    ]
+   ],
+   "c8": [
+    [
+     0,
+     698.5,
+     277.16,
+     2.52,
+     false
+    ]
+   ]
+  }
+ },
+ {
+  "arm": "A-v1-pdl-2",
+  "state": {
+   "projections": 90,
+   "lm_head": false,
+   "mtp": false
+  },
+  "decode": {
+   "c1": [
+    [
+     0,
+     210.2,
+     86.12,
+     2.441,
+     false
+    ]
+   ],
+   "c8": [
+    [
+     0,
+     697.4,
+     274.42,
+     2.541,
+     false
+    ]
+   ]
+  }
+ }
+]

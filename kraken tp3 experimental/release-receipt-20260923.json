@@ -1,0 +1,257 @@
+{
+  "generated": "2026-09-23T16:06:26.104913+00:00",
+  "image": {
+    "local": "glm53-kraken-tp3:20260923",
+    "registry": "azallaza/glm53-kraken-tp3:20260923",
+    "id": "sha256:9b3b342159382972e94b07f56ccce8679bc7d43c58cb2aaa30dd84f1788719c2",
+    "created": "2026-09-23T11:47:48.277533408-04:00",
+    "built_from": "kraken-port/src via build.py; Dockerfile FROM ghcr.io/local-inference-lab/vllm@sha256:5927520c447fdcbc0990567f9237756ff66a54e360438915a5f70cd5cf9d530d",
+    "previous": "glm53-kraken-tp3:baked-20260921 / azallaza/glm53-kraken-tp3:20260921",
+    "pushed": false
+  },
+  "changed_files_in_image": {
+    "vllm/models/glm5next/nvidia/glm53_fp8_dense.py": "e647bffabbee89f4b96bdc2faf1d2724667daf35ac1ae5fa32607a59130073e9",
+    "vllm/models/glm5next/nvidia/model.py": "a9a15de051085db84b318e6fcf279a749b014456eedfa19ad1fdb091a91dac91",
+    "vllm/models/glm5next/nvidia/mtp.py": "89dffa04074c352e6f530b1deee7f5b3d34474ae6f04613aa3ec95a22e2f0407",
+    "b12x/comm/pcie/_oneshot_cute.py": "7a551de0a9ea9d52a2681480095077bfdffee3a0154e65ebdef762c987c28e12",
+    "b12x/norm/mhc/_kernels.py": "e731c748d618117a5c0cb7bf6d8027adb01775f4124a907178fc3273fc85b32c"
+  },
+  "companions": {
+    "compose.yaml": "8dfa8f1ad1f2fe9f8c5829f509f081548a89e9227180f8e2af37000460cd0bc4",
+    "glm53_fp8_dense.py": "e647bffabbee89f4b96bdc2faf1d2724667daf35ac1ae5fa32607a59130073e9",
+    "serve-glm53-flash-tp3-kraken.py": "e9d42743951f6a18719dde947effd579ec99379e7fa033a1dc13214ea44f8af0",
+    "source-changes-20260923.patch": "64a7805562feb3acae864e6bbfb6d5b93db1bcc4e152e77f5fc1947ad426c712"
+  },
+  "observed_server": {
+    "image": "glm53-kraken-tp3:20260923",
+    "mounts_besides_caches": [
+      "launcher only"
+    ],
+    "kv_cache_tokens": "3,169,983",
+    "fp8_log": [
+      "GLM-5.3 FP8 decode (MTP draft): 2 projections [DSA o_proj x1, DSA q_b_proj x1]",
+      "GLM-5.3 FP8 decode: 96 BF16 projections use Marlin FP8 W8A16 for batches of at most 32 rows, prefill w8a8 [DSA o_proj x11, DSA q_b_proj x11, KDA in_proj_qkvgfab x34, KDA o_proj x34, dense FFN down x3,",
+      "GLM-5.3 FP8 decode: LM head packed to Marlin FP8",
+      "GLM-5.3 FP8 decode: LM head uses Marlin FP8 W8A16 for decode"
+    ],
+    "oneshot_cutoff": "256KB",
+    "l2_budgets": "10/25/7.5/18 MB",
+    "power_limit_w": 350,
+    "arithmetic": "8/8 exact, natural EOS"
+  },
+  "speed_claims": {
+    "note": "Bracketed on the mounted stack (identical files, verified by sha256), 350 W/GPU, default/MTP3/DCP1, context 0",
+    "original_baseline": {
+      "c1_steps": 79.2,
+      "c8_steps": 262.1
+    },
+    "fp8_v1": {
+      "c1_pct": 8.6,
+      "c1_32k_pct": 8.4,
+      "c8_pct": 4.5
+    },
+    "pdl_on_fp8": {
+      "c1_pct": 0.56
+    },
+    "fp8_v2_additions": {
+      "c1_pct": 2.64,
+      "c8_pct": -0.37
+    },
+    "oneshot_cutoff_256kb": {
+      "c8_pct": 2.97,
+      "c1_pct": -0.3
+    },
+    "full_stack": {
+      "c1_steps": 88.2,
+      "c1_pct": 11.4,
+      "c8_steps": 283.35,
+      "c8_pct": 8.1
+    },
+    "fp8_prefill_w8a8": {
+      "prefill_pct_vs_better_control": {
+        "8K": 5.5,
+        "32K": 5.6,
+        "64K": 6.3,
+        "128K": 6.5
+      },
+      "kv_tokens_before": 2989001,
+      "kv_tokens_after": 3169983
+    }
+  },
+  "release_image_sanity_bench": {
+    "note": "single pass on a fresh container of the built image; not a controlled comparison",
+    "c1": [
+      {
+        "context": 0,
+        "tok_s": 227.8,
+        "steps_s": 92.63,
+        "acceptance": 2.459
+      },
+      {
+        "context": 32768,
+        "tok_s": 222.5,
+        "steps_s": 92.47,
+        "acceptance": 2.406
+      },
+      {
+        "context": 131072,
+        "tok_s": 231.0,
+        "steps_s": 90.45,
+        "acceptance": 2.554
+      }
+    ],
+    "c8": [
+      {
+        "context": 0,
+        "tok_s": 725.5,
+        "steps_s": 290.35,
+        "acceptance": 2.499
+      },
+      {
+        "context": 32768,
+        "tok_s": 758.2,
+        "steps_s": 289.89,
+        "acceptance": 2.615
+      },
+      {
+        "context": 131072,
+        "tok_s": 736.0,
+        "steps_s": 278.96,
+        "acceptance": 2.638
+      }
+    ],
+    "prefill_tok_s": {
+      "8192": 11218.0,
+      "32768": 11431.0,
+      "65536": 11157.0,
+      "131072": 10655.0
+    }
+  },
+  "quality": {
+    "protocol": "identical to the production kraken qualification: lavd and hotel-lights 30 runs at C8, max reasoning, seed 103, 100K cap; retrieval 128K/900K; 826K long generation, natural EOS",
+    "production_reference": {
+      "lavd": {
+        "n": 30,
+        "exact": 27,
+        "near": 3,
+        "cap_hits": 0
+      },
+      "hotel_lights": {
+        "n": 30,
+        "exact": 27,
+        "truncated": 3,
+        "cap_hits": 3
+      },
+      "long_generation": "1 genuine failure in 12 (default/MTP3/DCP1), worst clean repeat_8gram 0.0151"
+    },
+    "full_stack_bf16_prefill": {
+      "lavd": {
+        "n": 30,
+        "exact": 30,
+        "cap_hits": 0
+      },
+      "hotel_lights": {
+        "n": 30,
+        "exact": 30,
+        "cap_hits": 0
+      },
+      "retrieval": "128K pass, 900K pass",
+      "long_generation": [
+        {
+          "seed": 201,
+          "chars": 64250,
+          "repeat_8gram": 0.0052,
+          "fail": false
+        },
+        {
+          "seed": 202,
+          "chars": 49929,
+          "repeat_8gram": 0.0006,
+          "fail": false
+        },
+        {
+          "seed": 203,
+          "chars": 45265,
+          "repeat_8gram": 0.002,
+          "fail": false
+        },
+        {
+          "seed": 204,
+          "chars": 36206,
+          "repeat_8gram": 0.0,
+          "fail": false
+        }
+      ]
+    },
+    "fp8_prefill_additional": {
+      "lavd": {
+        "n": 30,
+        "near": 1,
+        "exact": 29,
+        "cap_hits": 0
+      },
+      "retrieval": "128K pass, 900K pass",
+      "long_generation": [
+        {
+          "seed": 201,
+          "chars": 54431,
+          "repeat_8gram": 0.0025,
+          "fail": false
+        },
+        {
+          "seed": 202,
+          "chars": 61441,
+          "repeat_8gram": 0.001,
+          "fail": false
+        },
+        {
+          "seed": 203,
+          "chars": 73278,
+          "repeat_8gram": 0.0026,
+          "fail": false
+        },
+        {
+          "seed": 204,
+          "chars": 65180,
+          "repeat_8gram": 0.0004,
+          "fail": false
+        },
+        {
+          "seed": 205,
+          "chars": 54715,
+          "repeat_8gram": 0.0009,
+          "fail": false
+        },
+        {
+          "seed": 206,
+          "chars": 73474,
+          "repeat_8gram": 0.0092,
+          "fail": false
+        }
+      ],
+      "prompt_nll": {
+        "prose": {
+          "controls": [
+            1.45488,
+            1.45361
+          ],
+          "w8a8": 1.45952
+        },
+        "code": {
+          "controls": [
+            0.76752,
+            0.77142
+          ],
+          "w8a8": 0.77001
+        }
+      }
+    },
+    "not_covered": [
+      "MTP0",
+      "DFlash2",
+      "DCP3",
+      "uncensored checkpoint",
+      "same-day production control"
+    ]
+  }
+}

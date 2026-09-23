@@ -1,0 +1,77 @@
+[
+ {
+  "arm": "fp8-1",
+  "mxfp8_head": true,
+  "decode": {
+   "c1": [
+    [
+     0,
+     210.5,
+     85.98,
+     2.448,
+     false
+    ]
+   ]
+  }
+ },
+ {
+  "arm": "fp8-pdl-1",
+  "mxfp8_head": true,
+  "decode": {
+   "c1": [
+    [
+     0,
+     212.8,
+     86.36,
+     2.464,
+     false
+    ]
+   ]
+  }
+ },
+ {
+  "arm": "fp8-2",
+  "mxfp8_head": true,
+  "decode": {
+   "c1": [
+    [
+     0,
+     208.6,
+     85.72,
+     2.434,
+     false
+    ]
+   ]
+  }
+ },
+ {
+  "arm": "fp8-pdl-2",
+  "mxfp8_head": true,
+  "decode": {
+   "c1": [
+    [
+     0,
+     214.2,
+     86.44,
+     2.478,
+     false
+    ]
+   ]
+  }
+ },
+ {
+  "arm": "fp8-3",
+  "mxfp8_head": true,
+  "decode": {
+   "c1": [
+    [
+     0,
+     208.1,
+     86.06,
+     2.418,
+     false
+    ]
+   ]
+  }
+ }
+]

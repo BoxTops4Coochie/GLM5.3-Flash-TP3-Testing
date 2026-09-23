@@ -1,0 +1,109 @@
+# Kraken TP3 release example, image azallaza/glm53-kraken-tp3:20260923.
+# Defaults: the qualified default/MTP3/DCP1 configuration with FP8 decode,
+# FP8 prefill and the 256 KiB one-shot cutoff. PDL and all source corrections
+# are built into the image; only the launcher is mounted.
+# GPU power is a host setting: tested350W/GPU; never exceed400W.
+services:
+  glm53-kraken-tp3:
+    image: "${GLM53_IMAGE:-azallaza/glm53-kraken-tp3:20260923}"
+    container_name: glm53-kraken-tp3
+    restart: "no"
+    ipc: host
+    shm_size: "64gb"
+    cpuset: "${CPUSET:-8-47}"
+    gpus: all
+    ports:
+      - "15015:8000"
+    volumes:
+      - ${HF_CACHE_DIR:?Set HF_CACHE_DIR to your populated Hugging Face cache}:/root/.cache/huggingface:ro
+      - runtime-cache:/cache
+      - ./serve-glm53-flash-tp3-kraken.py:/usr/local/bin/serve-glm53-flash-tp3-kraken.py:ro
+    environment:
+      # Set here, in .env, or before `docker compose up -d`.
+      # default = released NVFP4; uncensored = orcarouter NVFP4 checkpoint.
+      # Both checkpoints are qualified in all four mode/DCP combinations;
+      # see release/kraken-20260921/VARIATIONS.md.
+      CHECKPOINT: "${CHECKPOINT:-default}"
+      MODEL: "${MODEL:-}"
+      MODEL_REVISION: "${MODEL_REVISION:-}"
+      SERVED_MODEL_NAME: "${SERVED_MODEL_NAME:-GLM-5.3-Flash-TP3}"
+
+      # mtp = depth3; dflash2 (or dflash) = depth7; mtp0 = speculation off.
+      # Draft arguments are added only in DFlash mode.
+      MODE: "${MODE:-mtp}"
+      DFLASH_MODEL: "${DFLASH_MODEL:-local-inference-lab/GLM-5.3-Flash-DFlash2}"
+      DFLASH_MODEL_REVISION: "${DFLASH_MODEL_REVISION:-}"
+
+      # DCP1 = measured speed baseline; DCP3 = shard KV across all3 GPUs.
+      # DCP3 is qualified; its rank-padding correction is baked into the image.
+      DCP: "${DCP:-1}"
+      MAX_NUM_BATCHED_TOKENS: "${MAX_NUM_BATCHED_TOKENS:-4096}"
+      # Empty chooses32 for MTP/off or64 for DFlash (covers C8 verification).
+      MAX_CUDAGRAPH_CAPTURE_SIZE: "${MAX_CUDAGRAPH_CAPTURE_SIZE:-}"
+      # Empty: finer MTP/off captures for default/DCP1, graph32, 8 slots.
+      # Other settings retain their ladder; explicit space-separated lists override.
+      CUDAGRAPH_CAPTURE_SIZES: "${CUDAGRAPH_CAPTURE_SIZES:-}"
+      MAX_NUM_SEQS: "${MAX_NUM_SEQS:-8}"
+      MAX_MODEL_LEN: "${MAX_MODEL_LEN:-1048576}"
+      GPU_MEMORY_UTILIZATION: "${GPU_MEMORY_UTILIZATION:-0.95}"
+      REASONING_EFFORT: "${REASONING_EFFORT:-max}"
+      CLEAR_THINKING: "${CLEAR_THINKING:-true}"
+
+      # 256KB keeps C8's 256 KiB all-reduces on the b12x one-shot instead of
+      # the NCCL ring: +3.0% C8 steps/s, neutral at C1 (measured 2026-09-23 on
+      # the FP8 stack). Empty restores the upstream 84KiB cutoff.
+      VLLM_PCIE_ONESHOT_ALLREDUCE_MAX_SIZE: "${VLLM_PCIE_ONESHOT_ALLREDUCE_MAX_SIZE-256KB}"
+
+      # KDA backends. The Kraken profile ships kda_prefill_backend=b12x, which
+      # `resolve_kda_prefill_backend` refuses to select under `auto` because it
+      # is not serving-qualified. It degrades the recurrent state built across
+      # very long prompts: on an 826K history it cost uncensored/DFlash2 one
+      # failure in four, and held uncensored/MTP3 to 38% of the default
+      # checkpoint's output length. flashkda -- what R34 served in all 429
+      # recorded receipts -- takes both arms to 4/4 at full length.
+      # Decode stays on b12x, so this remains a b12x build.
+      # See qualification-20260920/kda-prefill-backend/RESULTS.md.
+      # The image's profile still ships kda_prefill_backend=b12x and is not
+      # patched: /opt/lil/image-contract.json pins the profile hashes and the
+      # entrypoint refuses to start if they change. So the qualified backend is
+      # selected here. Decode stays b12x; only recurrent prefill moves.
+      ADDITIONAL_CONFIG: "${ADDITIONAL_CONFIG:-{\"glm53_kda_decode_backend\":\"b12x\",\"kda_prefill_backend\":\"flashkda\"}}"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      VLLM_NO_USAGE_STATS: "1"
+      # 1 asserts the resolved backend set matches the qualified one. The
+      # baked vllm/v1/worker/utils.py accepts either b12x or flashkda for
+      # prefill and still requires b12x collectives, EP3 and b12x KDA decode,
+      # so this stays on for every supported configuration.
+      GLM53_TP3_REQUIRE_RUNTIME_PROOF: "${GLM53_TP3_REQUIRE_RUNTIME_PROOF:-1}"
+
+      # MTP acceptance-length adaptation. Empty = disabled, the qualified
+      # configuration. A positive integer averages accepted draft lengths over
+      # that many verification steps and trims the speculative-token count,
+      # with depth 3 as the upper bound. Measured 0.0% at C1, where the
+      # controller never trims; under evaluation at C8.
+      MTP_ADAPTIVE_WINDOW: "${MTP_ADAPTIVE_WINDOW:-}"
+      # FP8 weight-only decode (Marlin W8A16) for the large BF16 projections:
+      # KDA in_proj/o_proj, DSA o_proj/q_b_proj, dense FFN, LM head, MTP draft.
+      # +11.4% C1 / +8.1% C8 steps/s with PDL and the cutoff. 0 = BF16 as in
+      # 20260921. Sub-flags switch parts off individually.
+      VLLM_GLM53_FP8_DENSE: "${VLLM_GLM53_FP8_DENSE:-1}"
+      VLLM_GLM53_FP8_LM_HEAD: "${VLLM_GLM53_FP8_LM_HEAD:-1}"
+      VLLM_GLM53_FP8_FFN: "${VLLM_GLM53_FP8_FFN:-1}"
+      VLLM_GLM53_FP8_MTP: "${VLLM_GLM53_FP8_MTP:-1}"
+      # w8a8: prefill on CUTLASS FP8, BF16 copies dropped (+5.5-6.5% prefill,
+      # +6% KV). bf16: prefill keeps the BF16 weights (more memory, unchanged
+      # prefill numerics). Only read when VLLM_GLM53_FP8_DENSE=1.
+      VLLM_GLM53_FP8_PREFILL: "${VLLM_GLM53_FP8_PREFILL:-w8a8}"
+      # Half-L2 budgets retained from R34; re-tested with FP8 weights and kept.
+      VLLM_GLM53_L2_PREFETCH_BUDGET_A_MB: "10"
+      VLLM_GLM53_L2_PREFETCH_BUDGET_B_MB: "25"
+      VLLM_GLM53_L2_PREFETCH_BUDGET_C_MB: "7.5"
+      VLLM_GLM53_L2_PREFETCH_BUDGET_A_MLA_MB: "18"
+      VLLM_GLM53_L2_PREFETCH_PERSIST_MB: "${VLLM_GLM53_L2_PREFETCH_PERSIST_MB:-0}"
+      VLLM_GLM53_L2_PREFETCH_A_NEXT_MB: "${VLLM_GLM53_L2_PREFETCH_A_NEXT_MB:-0}"
+    entrypoint: ["/opt/venv/bin/python", "/usr/local/bin/serve-glm53-flash-tp3-kraken.py"]
+    command: []
+
+volumes:
+  runtime-cache:

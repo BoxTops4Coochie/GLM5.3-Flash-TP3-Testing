@@ -1,0 +1,74 @@
+[
+ {
+  "arm": "cur-open",
+  "kv_tokens": 2989001,
+  "prefill_mode": "bf16",
+  "lm_head": true,
+  "arithmetic": 8,
+  "prefill": {
+   "8192": 11294.0,
+   "32768": 11307.0,
+   "65536": 10756.0,
+   "131072": 10105.0
+  },
+  "c1_steps": 87.77,
+  "nll": {
+   "prose": {
+    "tokens": 21518,
+    "mean_nll": 1.45488
+   },
+   "code": {
+    "tokens": 14347,
+    "mean_nll": 0.76752
+   }
+  }
+ },
+ {
+  "arm": "w8a8",
+  "kv_tokens": 3169983,
+  "prefill_mode": "w8a8",
+  "lm_head": true,
+  "arithmetic": 8,
+  "prefill": {
+   "8192": 11912.0,
+   "32768": 11941.0,
+   "65536": 11432.0,
+   "131072": 10760.0
+  },
+  "c1_steps": 87.36,
+  "nll": {
+   "prose": {
+    "tokens": 21518,
+    "mean_nll": 1.45952
+   },
+   "code": {
+    "tokens": 14347,
+    "mean_nll": 0.77001
+   }
+  }
+ },
+ {
+  "arm": "cur-close",
+  "kv_tokens": 2989001,
+  "prefill_mode": "bf16",
+  "lm_head": true,
+  "arithmetic": 8,
+  "prefill": {
+   "8192": 10854.0,
+   "32768": 10803.0,
+   "65536": 10377.0,
+   "131072": 9859.0
+  },
+  "c1_steps": 87.73,
+  "nll": {
+   "prose": {
+    "tokens": 21518,
+    "mean_nll": 1.45361
+   },
+   "code": {
+    "tokens": 14347,
+    "mean_nll": 0.77142
+   }
+  }
+ }
+]
