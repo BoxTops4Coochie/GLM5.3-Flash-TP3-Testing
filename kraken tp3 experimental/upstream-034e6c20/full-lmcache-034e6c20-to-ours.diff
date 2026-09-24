@@ -1,0 +1,2901 @@
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lmcache/integration/vllm/checkpoint_scheduler.py b/lmcache/integration/vllm/checkpoint_scheduler.py
+--- a/lmcache/integration/vllm/checkpoint_scheduler.py	2026-09-24 14:03:11.000000000 -0400
++++ b/lmcache/integration/vllm/checkpoint_scheduler.py	2026-09-19 07:27:17.000000000 -0400
+@@ -5,8 +5,6 @@
+ from dataclasses import dataclass, field
+ from typing import TYPE_CHECKING, Any, Literal
+ import json
+-import math
+-import time
+ import uuid
+ 
+ # First Party
+@@ -24,15 +22,6 @@
+ 
+ logger = init_logger(__name__)
+ 
+-# Directory lookups per request, including the first. A failed restore makes
+-# the server invalidate the missing generation, so each retry receives the
+-# longest candidate that is still listed rather than recomputing the prompt.
+-_MAX_LOOKUP_ATTEMPTS = 4
+-
+-# Restores slower than this many seconds are logged even when they succeed;
+-# the request waits in the scheduler, deferred, for the whole restore.
+-_SLOW_RESTORE_SECONDS = 10.0
+-
+ if TYPE_CHECKING:
+     # Third Party
+     from vllm.v1.core.boundary_checkpoint import BoundaryCheckpoint
+@@ -58,9 +47,6 @@
+     begin: MessagingFuture[bool] | None = None
+     acknowledgements: dict[int, bool] = field(default_factory=dict)
+     sent: bool = False
+-    created: float = field(default_factory=time.monotonic)
+-    # Roots of the producing sequence, for superseding its older checkpoints.
+-    roots: CheckpointTokenRoots | None = None
+ 
+ 
+ @dataclass
+@@ -70,9 +56,6 @@
+     done: bool = False
+     task_id: str | None = None
+     checkpoint_id: int | None = None
+-    attempts: int = 1
+-    started: float = field(default_factory=time.monotonic)
+-    capacity_refusal_logged: bool = False
+ 
+ 
+ class CheckpointSchedulerBridge:
+@@ -85,11 +68,6 @@
+             Worker layout is added after all ranks report identical descriptors.
+         world_size: Number of engine ranks contributing to one atomic generation.
+         max_tasks: Admission limit for collective stores and restores.
+-        lookup_timeout: Seconds a request may wait for directory replies,
+-            including shorter-checkpoint retries, and a store for its begin
+-            reply. A request whose lookup has not been answered by then is
+-            admitted to recompute its prompt; an unanswered store is aborted.
+-            A started worker copy is never abandoned.
+ 
+     The scheduler must keep issuing connector-only steps while has_pending is
+     true, including after a producer request finishes. Request cancellation
+@@ -104,15 +82,11 @@
+         world_size: int,
+         *,
+         max_tasks: int = 32,
+-        lookup_timeout: float = 60.0,
+     ) -> None:
+         if manager.boundary_checkpoints is None or world_size < 1 or max_tasks < 1:
+             raise ValueError(
+                 "Semantic transfers require a boundary allocator and ranks"
+             )
+-        if not 0 < lookup_timeout < math.inf:
+-            raise ValueError("Checkpoint lookup timeout must be finite and positive")
+-        self._lookup_timeout = lookup_timeout
+         self._manager = manager
+         self._cache = manager.boundary_checkpoints
+         self._client = client
+@@ -193,43 +167,15 @@
+             return False
+         if state.done:
+             return True
+-        if state.task_id is not None:
++        if state.task_id is not None or not state.future.query():
+             return False
+-        if not state.future.query():
+-            if time.monotonic() - state.started < self._lookup_timeout:
+-                return False
+-            # An unanswered lookup must not park the request indefinitely.
+-            logger.warning(
+-                "Recurrent checkpoint lookup for request %s got no reply within "
+-                "%.0f s; recomputing its prompt",
+-                request.request_id,
+-                self._lookup_timeout,
+-            )
+-            state.done = True
+-            return True
+-        try:
+-            manifest = state.future.result()
+-        except Exception:
+-            logger.exception(
+-                "Recurrent checkpoint lookup failed for request %s; recomputing "
+-                "its prompt",
+-                request.request_id,
+-            )
+-            state.done = True
+-            return True
++        manifest = state.future.result()
+         if manifest is None or (
+             local is not None and manifest.prefix.num_tokens <= local.num_tokens
+         ):
+             state.done = True
+             return True
+         if len(self._tasks) >= self._max_tasks:
+-            logger.info(
+-                "Recurrent checkpoint restore of %d tokens skipped for request %s: "
+-                "%d checkpoint copies in flight; recomputing its prompt",
+-                manifest.prefix.num_tokens,
+-                request.request_id,
+-                len(self._tasks),
+-            )
+             state.done = True
+             return True
+         try:
+@@ -243,29 +189,12 @@
+                 num_ranks=self._world_size,
+             )
+         except (ValueError, KeyError, TypeError):
+-            logger.warning(
+-                "Recurrent checkpoint restore of %d tokens rejected for request "
+-                "%s; recomputing its prompt",
+-                manifest.prefix.num_tokens,
+-                request.request_id,
+-                exc_info=True,
+-            )
+             state.done = True
+             return True
+         if checkpoint is None:
+             # Insufficient GPU capacity is not an external-cache miss. Permit
+             # ordinary admission, but retain the manifest so an unadmitted
+             # request can retry its import after other owners release pages.
+-            if not state.capacity_refusal_logged:
+-                state.capacity_refusal_logged = True
+-                logger.info(
+-                    "Recurrent checkpoint restore of %d tokens deferred for "
+-                    "request %s: not enough free GPU blocks (%d free); it is "
+-                    "admitted without the restore unless capacity returns first",
+-                    manifest.prefix.num_tokens,
+-                    request.request_id,
+-                    self._manager.block_pool.get_num_free_blocks(),
+-                )
+             return True
+         task = self._make_task(manifest, checkpoint, "RETRIEVE")
+         self._tasks[task.task_id] = _PendingTask(task, checkpoint, request.request_id)
+@@ -356,7 +285,6 @@
+                 begin=self._client.submit_request(
+                     RequestType.CHECKPOINT_BEGIN, [manifest]
+                 ),
+-                roots=roots,
+             )
+         except BaseException:
+             self._cache.release(pinned)
+@@ -414,30 +342,14 @@
+             if pending.sent:
+                 continue
+             if pending.begin is not None:
+-                answered = pending.begin.query()
+-                if (
+-                    not answered
+-                    and time.monotonic() - pending.created < self._lookup_timeout
+-                ):
++                if not pending.begin.query():
+                     continue
+-                accepted = False
+-                abort = not answered
+-                if answered:
+-                    try:
+-                        accepted = pending.begin.result()
+-                    except Exception:
+-                        logger.exception("Recurrent checkpoint begin operation failed")
+-                        abort = True
+-                else:
+-                    logger.warning(
+-                        "Recurrent checkpoint store of %d tokens got no begin reply "
+-                        "within %.0f s; aborting it",
+-                        pending.task.manifest.prefix.num_tokens,
+-                        self._lookup_timeout,
+-                    )
+-                if abort:
++                try:
++                    accepted = pending.begin.result()
++                except Exception:
++                    logger.exception("Recurrent checkpoint begin operation failed")
+                     # No worker has received this task. Its GPU source pin can
+-                    # be released even if the server's begin reply is lost.
++                    # be released even if the server's begin reply was lost.
+                     try:
+                         self._client.submit_request(
+                             RequestType.CHECKPOINT_ABORT,
+@@ -445,6 +357,7 @@
+                         )
+                     except Exception:
+                         logger.exception("Recurrent checkpoint abort submission failed")
++                    accepted = False
+                 if not accepted:
+                     self._cache.release(pending.checkpoint)
+                     del self._tasks[task_id]
+@@ -480,27 +393,9 @@
+                     self._client.submit_request(
+                         RequestType.CHECKPOINT_ABORT, [pending.task.manifest.generation]
+                     )
+-                elif pending.roots is not None:
+-                    # Published: a new prompt supersedes older checkpoints of
+-                    # its sequence, and the server links this request's
+-                    # checkpoints. The reply is not needed.
+-                    try:
+-                        self._client.submit_request(
+-                            RequestType.CHECKPOINT_SUPERSEDE,
+-                            [
+-                                pending.roots.roots,
+-                                pending.task.manifest.generation,
+-                                pending.request_id,
+-                            ],
+-                        )
+-                    except Exception:
+-                        logger.warning(
+-                            "Could not report superseded checkpoints", exc_info=True
+-                        )
+                 self._cache.release(pending.checkpoint)
+             else:
+                 state = self._lookups.get(pending.request_id)
+-                retry = False
+                 if (
+                     all(pending.acknowledgements.values())
+                     and pending.request_id not in self._cancelled
+@@ -513,54 +408,11 @@
+                         )
+                     if published and state is not None:
+                         state.checkpoint_id = pending.checkpoint.checkpoint_id
+-                    elapsed = time.monotonic() - pending.created
+-                    if elapsed > _SLOW_RESTORE_SECONDS:
+-                        logger.info(
+-                            "Recurrent checkpoint restore of %d tokens for request "
+-                            "%s took %.1f s",
+-                            pending.task.manifest.prefix.num_tokens,
+-                            pending.request_id,
+-                            elapsed,
+-                        )
+                 else:
+                     self._manager.discard_external_boundary_checkpoint(
+                         pending.checkpoint.checkpoint_id
+                     )
+-                    retry = (
+-                        state is not None
+-                        and pending.request_id not in self._cancelled
+-                        and state.attempts < _MAX_LOOKUP_ATTEMPTS
+-                        and time.monotonic() - state.started < self._lookup_timeout
+-                    )
+-                    logger.info(
+-                        "Recurrent checkpoint restore of %d tokens failed for "
+-                        "request %s on ranks %s after %.1f s%s",
+-                        pending.task.manifest.prefix.num_tokens,
+-                        pending.request_id,
+-                        sorted(
+-                            rank
+-                            for rank, success in pending.acknowledgements.items()
+-                            if not success
+-                        ),
+-                        time.monotonic() - pending.created,
+-                        "" if retry else "; recomputing its prompt",
+-                    )
+-                if state is not None and retry:
+-                    # A shorter checkpoint can survive eviction or a restart
+-                    # when the longest one did not; look it up again.
+-                    logger.info(
+-                        "Recurrent checkpoint restore of %d tokens missed for "
+-                        "request %s; looking up a shorter checkpoint (attempt %d)",
+-                        pending.task.manifest.prefix.num_tokens,
+-                        pending.request_id,
+-                        state.attempts + 1,
+-                    )
+-                    state.task_id = None
+-                    state.attempts += 1
+-                    state.future = self._client.submit_request(
+-                        RequestType.CHECKPOINT_FIND, [state.roots.roots]
+-                    )
+-                elif state is not None:
++                if state is not None:
+                     state.done = True
+             del self._tasks[task_id]
+             if pending.request_id in self._cancelled:
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lmcache/integration/vllm/recurrent_checkpoint_connector.py b/lmcache/integration/vllm/recurrent_checkpoint_connector.py
+--- a/lmcache/integration/vllm/recurrent_checkpoint_connector.py	2026-09-24 14:03:11.000000000 -0400
++++ b/lmcache/integration/vllm/recurrent_checkpoint_connector.py	2026-09-19 07:27:17.000000000 -0400
+@@ -176,7 +176,6 @@
+             raise ValueError(
+                 "LMCache message-queue timeout must be finite and positive"
+             )
+-        self._mq_timeout = timeout
+         self._client = MessageQueueClient(url, zmq.Context.instance())
+         try:
+             capability_reply: MessagingFuture[CheckpointCapabilities] = (
+@@ -216,11 +215,7 @@
+             "cp_interleave": parallel.cp_kv_cache_interleave_size,
+         }
+         self._scheduler = CheckpointSchedulerBridge(
+-            manager,
+-            self._client,
+-            identity,
+-            parallel.world_size,
+-            lookup_timeout=self._mq_timeout,
++            manager, self._client, identity, parallel.world_size
+         )
+ 
+     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lmcache/integration/vllm/tests/test_mm_hash_utils.py b/lmcache/integration/vllm/tests/test_mm_hash_utils.py
+--- a/lmcache/integration/vllm/tests/test_mm_hash_utils.py	1969-12-31 19:00:00.000000000 -0500
++++ b/lmcache/integration/vllm/tests/test_mm_hash_utils.py	2026-09-19 07:27:17.000000000 -0400
+@@ -0,0 +1,112 @@
++# SPDX-License-Identifier: Apache-2.0
++# Standard
++import dataclasses
++
++# Third Party
++import torch
++
++# First Party
++from lmcache.integration.vllm.utils import (
++    apply_mm_hashes_to_token_ids,
++    hex_hash_to_int16,
++)
++
++
++@dataclasses.dataclass(frozen=True)
++class DummyPlaceholderRange:
++    offset: int
++    length: int
++
++
++def test_hex_hash_to_int16_accepts_hex_and_non_hex() -> None:
++    # Hex behavior preserved (with and without 0x prefix).
++    assert hex_hash_to_int16("0000") == 0
++    assert hex_hash_to_int16("ffff") == 0xFFFF
++    assert hex_hash_to_int16("0xFFFF") == 0xFFFF
++    assert hex_hash_to_int16("0x0001") == 1
++
++    # Non-hex identifiers must not raise and must be deterministic.
++    s = "chatcmpl-a2a48871c4aad192-image-0"
++    v1 = hex_hash_to_int16(s)
++    v2 = hex_hash_to_int16(s)
++    assert isinstance(v1, int)
++    assert 0 <= v1 <= 0xFFFF
++    assert v1 == v2
++
++
++def test_hex_hash_to_int16_hex_variants_whitespace_and_truncation() -> None:
++    # Whitespace should be ignored and case should not matter.
++    assert hex_hash_to_int16(" FfFf ") == 0xFFFF
++    assert hex_hash_to_int16("\n0x00aB\t") == 0x00AB
++
++    # Long hex should be truncated to 16 bits via masking.
++    assert hex_hash_to_int16("123456") == 0x3456
++    assert hex_hash_to_int16("0x123456") == 0x3456
++
++
++def test_hex_hash_to_int16_empty_and_invalid_hex_are_safe_and_deterministic() -> None:
++    # Empty (or effectively empty) values should not raise.
++    for s in ("", "   ", "0x"):
++        v1 = hex_hash_to_int16(s)
++        v2 = hex_hash_to_int16(s)
++        assert isinstance(v1, int)
++        assert 0 <= v1 <= 0xFFFF
++        assert v1 == v2
++
++    # Invalid "hex-looking" strings must fall back to hashing.
++    for s in ("0xGG", "deadbeeg", "0x12xz"):
++        v1 = hex_hash_to_int16(s)
++        v2 = hex_hash_to_int16(s)
++        assert isinstance(v1, int)
++        assert 0 <= v1 <= 0xFFFF
++        assert v1 == v2
++
++
++def test_hex_hash_to_int16_non_string_inputs_are_safe() -> None:
++    # Be defensive: callers may pass None or other non-string types.
++    for val in (None, 0, 12345, 3.14, b"deadbeef"):
++        v1 = hex_hash_to_int16(val)  # type: ignore[arg-type]
++        v2 = hex_hash_to_int16(val)  # type: ignore[arg-type]
++        assert isinstance(v1, int)
++        assert 0 <= v1 <= 0xFFFF
++        assert v1 == v2
++
++
++def test_apply_mm_hashes_to_token_ids_handles_non_hex_mm_hash() -> None:
++    token_ids = torch.arange(0, 10, dtype=torch.long)
++    mm_hashes = ["chatcmpl-a2a48871c4aad192-image-0"]
++    mm_positions = [DummyPlaceholderRange(offset=2, length=4)]
++
++    out = apply_mm_hashes_to_token_ids(token_ids.clone(), mm_hashes, mm_positions)
++    expected_val = hex_hash_to_int16(mm_hashes[0])
++    assert out[2:6].tolist() == [expected_val] * 4
++
++
++def test_apply_mm_hashes_to_token_ids_out_of_bounds_is_safe() -> None:
++    token_ids = torch.zeros(5, dtype=torch.long)
++    mm_hashes = ["deadbeef"]
++    mm_positions = [DummyPlaceholderRange(offset=999, length=10)]
++
++    out = apply_mm_hashes_to_token_ids(token_ids.clone(), mm_hashes, mm_positions)
++    assert out.tolist() == token_ids.tolist()
++
++
++def test_apply_mm_hashes_to_token_ids_multiple_placeholders_and_length_mismatch() -> (
++    None
++):
++    token_ids = torch.zeros(12, dtype=torch.long)
++    mm_hashes = ["deadbeef", "chatcmpl-a2a48871c4aad192-image-0", "EXTRA_HASH_IGNORED"]
++    mm_positions = [
++        DummyPlaceholderRange(offset=0, length=3),
++        DummyPlaceholderRange(offset=5, length=4),
++    ]
++
++    out = apply_mm_hashes_to_token_ids(token_ids.clone(), mm_hashes, mm_positions)
++    v0 = hex_hash_to_int16(mm_hashes[0])
++    v1 = hex_hash_to_int16(mm_hashes[1])
++
++    assert out[0:3].tolist() == [v0] * 3
++    assert out[5:9].tolist() == [v1] * 4
++    # Other regions remain unchanged.
++    assert out[3:5].tolist() == [0, 0]
++    assert out[9:12].tolist() == [0, 0, 0]
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lmcache/v1/distributed/api.py b/lmcache/v1/distributed/api.py
+--- a/lmcache/v1/distributed/api.py	2026-09-24 14:03:11.000000000 -0400
++++ b/lmcache/v1/distributed/api.py	2026-09-19 07:27:17.000000000 -0400
+@@ -219,26 +219,6 @@
+         )
+ 
+ 
+-RECURRENT_CHECKPOINT_MODEL_PREFIX = "recurrent-checkpoint-"
+-"""``ObjectKey.model_name`` prefix of recurrent checkpoint payload pages.
+-
+-Checkpoint pages carry a complete recurrent-state snapshot. Store policies
+-use this prefix to treat them differently from ordinary KV chunks."""
+-
+-
+-def is_recurrent_checkpoint_key(key: ObjectKey) -> bool:
+-    """Return whether ``key`` names a recurrent checkpoint payload page.
+-
+-    Args:
+-        key: Any storage object key.
+-
+-    Returns:
+-        True for keys created for atomic recurrent checkpoint generations,
+-        False for ordinary KV chunks and every other object.
+-    """
+-    return key.model_name.startswith(RECURRENT_CHECKPOINT_MODEL_PREFIX)
+-
+-
+ @dataclass(frozen=True)
+ class EncodedObjectKey:
+     """JSON-safe wire form of :class:`ObjectKey` — ``chunk_hash`` is
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lmcache/v1/distributed/checkpoint_retention.py b/lmcache/v1/distributed/checkpoint_retention.py
+--- a/lmcache/v1/distributed/checkpoint_retention.py	2026-09-24 14:03:11.000000000 -0400
++++ b/lmcache/v1/distributed/checkpoint_retention.py	1969-12-31 19:00:00.000000000 -0500
+@@ -1,313 +0,0 @@
+-# SPDX-License-Identifier: Apache-2.0
+-"""
+-Decide which recurrent checkpoint pages deserve L1 memory and L2 storage.
+-
+-A conversation publishes new request-boundary checkpoints every turn, and
+-each one supersedes the previous turn's endpoint state. Pages shared with the
+-newer checkpoint stay alive through it, so only the pages unique to the older
+-checkpoint (recurrent endpoint state, a partial attention page, auxiliary
+-state) become dead weight. This module keeps that knowledge:
+-
+-* Superseded pages are dropped first from L1 and L2 and are never written to
+-  L2 when they leave L1.
+-* With write-on-evict storage, a current checkpoint page is written to L2
+-  once, when L1 is about to evict it, instead of on every request.
+-* L2 residency per adapter is tracked so a page that already reached L2 is
+-  not written again.
+-
+-Everything is bounded in memory and safe to call from the store, eviction and
+-request-handler threads. Forgetting an entry only costs an extra write or a
+-later eviction; correctness never depends on this state, because restores
+-validate every page and fall back to a shorter checkpoint when one is gone.
+-"""
+-
+-# Standard
+-from collections import OrderedDict
+-from collections.abc import Callable, Iterable
+-import threading
+-import time
+-
+-# First Party
+-from lmcache.logging import init_logger
+-from lmcache.v1.distributed.api import ObjectKey, is_recurrent_checkpoint_key
+-from lmcache.v1.distributed.internal_api import L2AdapterListener
+-
+-logger = init_logger(__name__)
+-
+-
+-class _BoundedSet:
+-    """Insertion-ordered set that forgets its oldest entries beyond a bound."""
+-
+-    def __init__(self, bound: int) -> None:
+-        self._bound = bound
+-        self._items: OrderedDict[object, None] = OrderedDict()
+-
+-    def add(self, item: object) -> None:
+-        self._items[item] = None
+-        self._items.move_to_end(item)
+-        while len(self._items) > self._bound:
+-            self._items.popitem(last=False)
+-
+-    def discard(self, item: object) -> None:
+-        self._items.pop(item, None)
+-
+-    def __contains__(self, item: object) -> bool:
+-        return item in self._items
+-
+-    def __len__(self) -> int:
+-        return len(self._items)
+-
+-    def items(self) -> list:
+-        return list(self._items)
+-
+-
+-class _AdapterResidencyListener(L2AdapterListener):
+-    """Record which checkpoint pages one L2 adapter holds."""
+-
+-    def __init__(self, retention: "CheckpointRetention", adapter_id: int) -> None:
+-        self._retention = retention
+-        self._adapter_id = adapter_id
+-
+-    def on_l2_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
+-        self._retention.record_l2_present(self._adapter_id, keys, sizes)
+-
+-    def on_l2_keys_accessed(self, keys: list[ObjectKey]) -> None:
+-        pass
+-
+-    def on_l2_keys_deleted(self, keys: list[ObjectKey]) -> None:
+-        self._retention.record_l2_absent(self._adapter_id, keys)
+-
+-
+-class CheckpointRetention:
+-    """
+-    Track superseded and persisted recurrent checkpoint pages.
+-
+-    Args:
+-        write_on_evict: Whether current checkpoint pages are written to L2
+-            only when L1 evicts them. Without it, checkpoint pages follow the
+-            store policy and this object only orders eviction.
+-        persist: Callback that asynchronously stores keys to L2; installed by
+-            the storage manager once its store controller exists.
+-        max_superseded: Bound on remembered superseded pages.
+-        max_tracked: Bound on remembered L2-resident pages per adapter.
+-        persist_timeout: Seconds after which a page whose write never
+-            completed may be evicted from L1 without reaching L2.
+-    """
+-
+-    def __init__(
+-        self,
+-        *,
+-        write_on_evict: bool = False,
+-        persist: Callable[[list[ObjectKey]], None] | None = None,
+-        max_superseded: int = 262144,
+-        max_tracked: int = 1048576,
+-        max_generations: int = 65536,
+-        persist_timeout: float = 120.0,
+-    ) -> None:
+-        self._write_on_evict = write_on_evict
+-        self._persist = persist
+-        self._max_tracked = max_tracked
+-        self._persist_timeout = persist_timeout
+-        self._lock = threading.Lock()
+-        self._superseded = _BoundedSet(max_superseded)
+-        self._superseded_generations = _BoundedSet(max_generations)
+-        # adapter id -> key -> size in bytes
+-        self._resident: dict[int, OrderedDict[ObjectKey, int]] = {}
+-        # key -> monotonic time its write was requested
+-        self._pending: dict[ObjectKey, float] = {}
+-        self._stats = {
+-            "superseded_checkpoints": 0,
+-            "superseded_pages": 0,
+-            "l1_superseded_drops": 0,
+-            "l2_superseded_evictions": 0,
+-            "l2_superseded_eviction_bytes": 0,
+-            "write_on_evict_requests": 0,
+-            "write_on_evict_persisted": 0,
+-            "write_on_evict_timeouts": 0,
+-        }
+-
+-    @property
+-    def write_on_evict(self) -> bool:
+-        return self._write_on_evict
+-
+-    def set_persist(self, persist: Callable[[list[ObjectKey]], None]) -> None:
+-        """Install the asynchronous L2 store callback."""
+-        self._persist = persist
+-
+-    def listener_for(self, adapter_id: int) -> L2AdapterListener:
+-        """Return a listener that records one adapter's checkpoint pages."""
+-        with self._lock:
+-            self._resident.setdefault(adapter_id, OrderedDict())
+-        return _AdapterResidencyListener(self, adapter_id)
+-
+-    def forget_adapter(self, adapter_id: int) -> None:
+-        with self._lock:
+-            self._resident.pop(adapter_id, None)
+-
+-    # ----- supersession ---------------------------------------------------
+-
+-    def is_superseded_generation(self, generation: str) -> bool:
+-        with self._lock:
+-            return generation in self._superseded_generations
+-
+-    def mark_superseded(self, generation: str, keys: Iterable[ObjectKey]) -> int:
+-        """Mark one older checkpoint's unique pages as superseded.
+-
+-        Args:
+-            generation: The older checkpoint's generation, remembered so the
+-                same ancestor is not processed again.
+-            keys: Pages that no current checkpoint references.
+-
+-        Returns:
+-            Number of pages newly marked.
+-        """
+-        added = 0
+-        with self._lock:
+-            self._superseded_generations.add(generation)
+-            for key in keys:
+-                if key not in self._superseded:
+-                    added += 1
+-                self._superseded.add(key)
+-            self._stats["superseded_checkpoints"] += 1
+-            self._stats["superseded_pages"] += added
+-        return added
+-
+-    def mark_current(self, keys: Iterable[ObjectKey]) -> None:
+-        """Clear the superseded mark from pages a new checkpoint references."""
+-        with self._lock:
+-            for key in keys:
+-                self._superseded.discard(key)
+-
+-    def is_superseded(self, key: ObjectKey) -> bool:
+-        with self._lock:
+-            return key in self._superseded
+-
+-    def superseded_keys(self) -> list[ObjectKey]:
+-        with self._lock:
+-            return self._superseded.items()
+-
+-    # ----- L2 residency ---------------------------------------------------
+-
+-    def record_l2_present(
+-        self, adapter_id: int, keys: list[ObjectKey], sizes: list[int]
+-    ) -> None:
+-        with self._lock:
+-            resident = self._resident.setdefault(adapter_id, OrderedDict())
+-            for key, size in zip(keys, sizes, strict=False):
+-                if not is_recurrent_checkpoint_key(key):
+-                    continue
+-                resident[key] = size
+-                resident.move_to_end(key)
+-                if self._pending.pop(key, None) is not None:
+-                    self._stats["write_on_evict_persisted"] += 1
+-            while len(resident) > self._max_tracked:
+-                resident.popitem(last=False)
+-
+-    def record_l2_absent(self, adapter_id: int, keys: list[ObjectKey]) -> None:
+-        with self._lock:
+-            resident = self._resident.get(adapter_id)
+-            if resident is None:
+-                return
+-            for key in keys:
+-                resident.pop(key, None)
+-
+-    def is_l2_resident(self, key: ObjectKey) -> bool:
+-        with self._lock:
+-            return any(key in resident for resident in self._resident.values())
+-
+-    def superseded_in_adapter(
+-        self, adapter_id: int, max_bytes: int
+-    ) -> tuple[list[ObjectKey], int]:
+-        """Return superseded pages one adapter holds, up to ``max_bytes``."""
+-        victims: list[ObjectKey] = []
+-        total = 0
+-        with self._lock:
+-            resident: dict[ObjectKey, int] = self._resident.get(adapter_id, {})
+-            for key in self._superseded.items():
+-                size = resident.get(key)
+-                if size is None:
+-                    continue
+-                victims.append(key)
+-                total += size
+-                if total >= max_bytes:
+-                    break
+-        return victims, total
+-
+-    def record_l2_superseded_evictions(self, count: int, size: int) -> None:
+-        with self._lock:
+-            self._stats["l2_superseded_evictions"] += count
+-            self._stats["l2_superseded_eviction_bytes"] += size
+-
+-    def record_l1_superseded_drops(self, count: int) -> None:
+-        with self._lock:
+-            self._stats["l1_superseded_drops"] += count
+-
+-    # ----- write on evict -------------------------------------------------
+-
+-    def needs_persist_before_evict(self, key: ObjectKey) -> bool:
+-        """Whether L1 must keep ``key`` until its L2 write completes.
+-
+-        True for a current checkpoint page that is not in L2 yet, while its
+-        write is still expected to finish. A superseded page, an ordinary KV
+-        chunk or a page whose write timed out may be evicted.
+-        """
+-        if not self._write_on_evict or not is_recurrent_checkpoint_key(key):
+-            return False
+-        now = time.monotonic()
+-        with self._lock:
+-            if key in self._superseded:
+-                return False
+-            if any(key in resident for resident in self._resident.values()):
+-                self._pending.pop(key, None)
+-                return False
+-            requested = self._pending.get(key)
+-            if requested is not None and now - requested > self._persist_timeout:
+-                del self._pending[key]
+-                self._stats["write_on_evict_timeouts"] += 1
+-                logger.warning(
+-                    "Checkpoint page write to L2 did not complete within %.0f s; "
+-                    "evicting it from L1 without an L2 copy",
+-                    self._persist_timeout,
+-                )
+-                return False
+-            return True
+-
+-    def request_persist(self, keys: list[ObjectKey]) -> int:
+-        """Ask the store controller to write pages not already requested."""
+-        now = time.monotonic()
+-        with self._lock:
+-            fresh = [key for key in keys if key not in self._pending]
+-            for key in fresh:
+-                self._pending[key] = now
+-            self._stats["write_on_evict_requests"] += len(fresh)
+-        if fresh and self._persist is not None:
+-            self._persist(fresh)
+-        return len(fresh)
+-
+-    def pending_count(self) -> int:
+-        with self._lock:
+-            return len(self._pending)
+-
+-    def l2_checkpoint_bytes(self) -> int:
+-        """Bytes of tracked checkpoint pages held across L2 adapters."""
+-        with self._lock:
+-            return sum(sum(resident.values()) for resident in self._resident.values())
+-
+-    def observations(self) -> list[tuple[int | float, dict[str, object]]]:
+-        """Counters and sizes in OTel-observation shape, one per ``stat``."""
+-        status = self.report_status()
+-        status.pop("write_on_evict")
+-        status["l2_checkpoint_bytes"] = self.l2_checkpoint_bytes()
+-        return [(value, {"stat": name}) for name, value in status.items()]
+-
+-    def report_status(self) -> dict:
+-        with self._lock:
+-            return {
+-                "write_on_evict": self._write_on_evict,
+-                "superseded_pages_tracked": len(self._superseded),
+-                "l2_resident_pages_tracked": sum(
+-                    len(resident) for resident in self._resident.values()
+-                ),
+-                "write_on_evict_pending": len(self._pending),
+-                **self._stats,
+-            }
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lmcache/v1/distributed/config.py b/lmcache/v1/distributed/config.py
+--- a/lmcache/v1/distributed/config.py	2026-09-24 14:03:11.000000000 -0400
++++ b/lmcache/v1/distributed/config.py	2026-09-19 07:27:17.000000000 -0400
+@@ -331,21 +331,9 @@
+     store_admission_timeout_seconds: float = 8.0
+     """ Total deadline for capacity-only L1 store admission retries. """
+ 
+-    checkpoint_shutdown_flush_seconds: float = 30.0
+-    """ With write-on-evict checkpoint storage, time budget for writing
+-    current checkpoint pages still in L1 to L2 during a clean shutdown. """
+-
+-    checkpoint_write_timeout_seconds: float = 120.0
+-    """ With write-on-evict checkpoint storage, how long L1 keeps a page
+-    whose L2 write has not completed before evicting it without a copy. """
+-
+     def __post_init__(self) -> None:
+         if self.store_admission_timeout_seconds < 0:
+             raise ValueError("store_admission_timeout_seconds must be >= 0")
+-        if self.checkpoint_shutdown_flush_seconds < 0:
+-            raise ValueError("checkpoint_shutdown_flush_seconds must be >= 0")
+-        if self.checkpoint_write_timeout_seconds <= 0:
+-            raise ValueError("checkpoint_write_timeout_seconds must be > 0")
+         normalize_storage_manager_config(self)
+         validate_storage_manager_config(self)
+ 
+@@ -597,22 +585,6 @@
+         default=8.0,
+         help="Total deadline for capacity-only atomic L1 store retries.",
+     )
+-    parser.add_argument(
+-        "--checkpoint-shutdown-flush-seconds",
+-        type=float,
+-        default=30.0,
+-        help="With --l2-store-policy checkpoint_on_evict, time budget for "
+-        "writing current recurrent checkpoints still in L1 to L2 on a clean "
+-        "shutdown. 0 skips the flush.",
+-    )
+-    parser.add_argument(
+-        "--checkpoint-write-timeout-seconds",
+-        type=float,
+-        default=120.0,
+-        help="With --l2-store-policy checkpoint_on_evict, how long L1 keeps a "
+-        "checkpoint page whose L2 write has not completed before evicting it "
+-        "without an L2 copy.",
+-    )
+ 
+     # L2 Policies
+     # Import here to break circular dependency:
+@@ -757,12 +729,6 @@
+         prefetch_max_in_flight=args.l2_prefetch_max_in_flight,
+         periodic_notifier_interval_ms=args.periodic_notifier_interval_ms,
+         store_admission_timeout_seconds=args.store_admission_timeout_seconds,
+-        checkpoint_shutdown_flush_seconds=getattr(
+-            args, "checkpoint_shutdown_flush_seconds", 30.0
+-        ),
+-        checkpoint_write_timeout_seconds=getattr(
+-            args, "checkpoint_write_timeout_seconds", 120.0
+-        ),
+     )
+     return config
+ 
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lmcache/v1/distributed/l1_manager.py b/lmcache/v1/distributed/l1_manager.py
+--- a/lmcache/v1/distributed/l1_manager.py	2026-09-24 14:03:11.000000000 -0400
++++ b/lmcache/v1/distributed/l1_manager.py	2026-09-19 07:27:17.000000000 -0400
+@@ -52,18 +52,13 @@
+     is_temporary: bool
+     """ Whether the object is temporary (need to be deleted after read). """
+ 
+-    committed: bool = False
+-    """ Whether the last write finished. An expired write lock releases the
+-    object but never makes an unfinished write readable. """
+-
+     def available_for_read(self) -> bool:
+         """Check if the object is available for read.
+ 
+         Returns:
+-            True if the last write finished and the object is not
+-            write-locked, False otherwise.
++            True if the object is not write-locked, False otherwise.
+         """
+-        return self.committed and not self.write_lock.is_locked()
++        return not self.write_lock.is_locked()
+ 
+     def available_for_write(self) -> bool:
+         """Check if the object is available for write.
+@@ -218,9 +213,6 @@
+         )
+         self._write_ttl_seconds = config.write_ttl_seconds
+         self._read_ttl_seconds = config.read_ttl_seconds
+-        # Keys whose current write has not finished; reclaimed once the
+-        # writer's lock expires. Bounded by in-flight writes.
+-        self._uncommitted: set[ObjectKey] = set()
+ 
+         self._registered_listeners: list[L1ManagerListener] = []
+ 
+@@ -424,7 +416,6 @@
+                 need_to_free.append(entry.memory_obj)
+                 need_to_free_keys.append(key)
+                 del self._objects[key]
+-                self._uncommitted.discard(key)
+ 
+             ret[key] = L1Error.SUCCESS
+             successful_keys.append(key)
+@@ -502,8 +493,6 @@
+                 continue
+ 
+             entry.write_lock.lock()
+-            entry.committed = False
+-            self._uncommitted.add(key)
+             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
+             successful_keys.append(key)
+ 
+@@ -560,7 +549,6 @@
+                     is_temporary=is_temp,
+                 )
+                 self._objects[key].write_lock.lock()
+-                self._uncommitted.add(key)
+                 ret[key] = (L1Error.SUCCESS, mem_obj)
+                 successful_keys.append(key)
+ 
+@@ -658,8 +646,6 @@
+                 continue
+ 
+             entry.write_lock.unlock()
+-            entry.committed = True
+-            self._uncommitted.discard(key)
+             ret[key] = L1Error.SUCCESS
+             successful_keys.append(key)
+             successful_keys_meta.append(self._object_meta(entry.memory_obj))
+@@ -697,7 +683,6 @@
+             aborted_keys.append(key)
+             aborted_objs.append(entry.memory_obj)
+             del self._objects[key]
+-            self._uncommitted.discard(key)
+             ret[key] = L1Error.SUCCESS
+ 
+         aborted_meta = [self._object_meta(obj) for obj in aborted_objs]
+@@ -771,8 +756,6 @@
+                 continue
+ 
+             entry.write_lock.unlock()
+-            entry.committed = True
+-            self._uncommitted.discard(key)
+             for _ in range(total):
+                 entry.read_lock.lock()
+             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
+@@ -828,7 +811,6 @@
+ 
+             need_to_free.append(entry.memory_obj)
+             del self._objects[key]
+-            self._uncommitted.discard(key)
+             ret[key] = L1Error.SUCCESS
+             successful_keys.append(key)
+ 
+@@ -847,53 +829,6 @@
+         )
+         return ret
+ 
+-    @l1_mgr_synchronized
+-    def reclaim_abandoned_writes(self) -> int:
+-        """Free objects whose writer never finished before its lock expired.
+-
+-        A writer that dies between ``reserve_write`` and ``finish_write``
+-        leaves an object that is neither readable nor tracked by the
+-        eviction policy, so nothing else would free it.
+-
+-        Returns:
+-            The number of objects freed.
+-        """
+-        freed_keys: list[ObjectKey] = []
+-        freed_objs: list[MemoryObj] = []
+-        for key in list(self._uncommitted):
+-            entry = self._objects.get(key)
+-            if entry is not None and (
+-                entry.write_lock.is_locked() or entry.read_lock.is_locked()
+-            ):
+-                continue
+-            self._uncommitted.discard(key)
+-            if entry is None:
+-                continue
+-            del self._objects[key]
+-            freed_keys.append(key)
+-            freed_objs.append(entry.memory_obj)
+-        if not freed_objs:
+-            return 0
+-
+-        freed_meta = [self._object_meta(obj) for obj in freed_objs]
+-        self._memory_manager.free(freed_objs)
+-        self._notify_capacity_change()
+-        for listener in self._registered_listeners:
+-            listener.on_l1_keys_deleted_by_manager(freed_keys)
+-        self._event_bus.publish(
+-            Event(
+-                event_type=EventType.L1_KEYS_EVICTED,
+-                metadata={"keys": freed_keys, "meta": freed_meta},
+-            )
+-        )
+-        logger.warning(
+-            "L1Manager: freed %d objects whose write did not finish within "
+-            "the %d s write lock",
+-            len(freed_keys),
+-            self._write_ttl_seconds,
+-        )
+-        return len(freed_keys)
+-
+     def touch_keys(self, keys: list[ObjectKey]):
+         """Touch the given keys, marking the keys as accessed(retrieved or stored).
+ 
+@@ -932,7 +867,6 @@
+             all_meta = [self._object_meta(obj) for obj in all_memory_objs]
+             self._memory_manager.free(all_memory_objs)
+             self._objects.clear()
+-            self._uncommitted.clear()
+             if all_memory_objs:
+                 self._notify_capacity_change()
+             for listener in self._registered_listeners:
+@@ -962,7 +896,6 @@
+ 
+         for key in keys_to_clear:
+             del self._objects[key]
+-            self._uncommitted.discard(key)
+ 
+         cleared_meta = [self._object_meta(obj) for obj in objs_to_free]
+         self._memory_manager.free(objs_to_free)
+@@ -1101,7 +1034,6 @@
+             all_memory_objs = [entry.memory_obj for entry in self._objects.values()]
+             self._memory_manager.free(all_memory_objs)
+             self._objects.clear()
+-            self._uncommitted.clear()
+             if all_memory_objs:
+                 self._notify_capacity_change()
+ 
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lmcache/v1/distributed/storage_controllers/checkpoint_evict_store_policy.py b/lmcache/v1/distributed/storage_controllers/checkpoint_evict_store_policy.py
+--- a/lmcache/v1/distributed/storage_controllers/checkpoint_evict_store_policy.py	2026-09-24 14:03:11.000000000 -0400
++++ b/lmcache/v1/distributed/storage_controllers/checkpoint_evict_store_policy.py	1969-12-31 19:00:00.000000000 -0500
+@@ -1,49 +0,0 @@
+-# SPDX-License-Identifier: Apache-2.0
+-"""
+-Store recurrent checkpoints to L2 only when L1 evicts them.
+-
+-Every request publishes request-boundary checkpoints of the complete
+-recurrent state. Writing each one through to L2 wears flash storage with
+-states that the next turn of the same conversation supersedes within
+-seconds, and pushes still-useful checkpoints out of L2 by capacity.
+-
+-This policy keeps new checkpoint pages in L1 only. When L1 is about to evict
+-a page that is still current (not superseded by a newer checkpoint of the
+-same conversation) and not yet in L2, the page is written to L2 first and
+-evicted after the write completes. A conversation that stays active never
+-writes its checkpoints; one that goes idle writes its latest checkpoint once.
+-Superseded pages are evicted without a write. Ordinary KV chunks keep
+-write-through behavior. On a clean shutdown, current checkpoint pages still
+-in L1 are written to L2 within the configured time budget.
+-
+-Select it with ``--l2-store-policy checkpoint_on_evict``.
+-"""
+-
+-# First Party
+-from lmcache.v1.distributed.storage_controllers.checkpoint_reuse_store_policy import (  # noqa: E501
+-    CheckpointReuseStorePolicy,
+-)
+-from lmcache.v1.distributed.storage_controllers.store_policy import (
+-    register_store_policy,
+-)
+-
+-
+-class CheckpointEvictStorePolicy(CheckpointReuseStorePolicy):
+-    """
+-    Write ordinary keys through; store checkpoint pages when L1 evicts them.
+-
+-    ``select_reuse_targets`` (inherited) stores the checkpoint pages that the
+-    eviction path asks to persist.
+-    """
+-
+-    def writes_checkpoints_on_evict(self) -> bool:
+-        """
+-        Report that checkpoint pages reach L2 on L1 eviction.
+-
+-        Returns:
+-            True.
+-        """
+-        return True
+-
+-
+-register_store_policy("checkpoint_on_evict", CheckpointEvictStorePolicy)
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lmcache/v1/distributed/storage_controllers/checkpoint_reuse_store_policy.py b/lmcache/v1/distributed/storage_controllers/checkpoint_reuse_store_policy.py
+--- a/lmcache/v1/distributed/storage_controllers/checkpoint_reuse_store_policy.py	2026-09-24 14:03:11.000000000 -0400
++++ b/lmcache/v1/distributed/storage_controllers/checkpoint_reuse_store_policy.py	1969-12-31 19:00:00.000000000 -0500
+@@ -1,86 +0,0 @@
+-# SPDX-License-Identifier: Apache-2.0
+-"""
+-Store recurrent checkpoints to L2 only after their first reuse.
+-
+-A request-boundary recurrent checkpoint holds the complete recurrent state,
+-about 167 MB for Qwen3.8 Flash Next at TP1, and most are never restored: the
+-next chat turn usually cannot match the previous prompt or response endpoint
+-because the chat template rewrites that history. Writing every checkpoint
+-through to L2 therefore wears flash storage for data that is not read back.
+-
+-This policy keeps new checkpoint pages in L1 and stores a page to L2 the first
+-time a completed restore reads it. Ordinary KV chunks keep write-through
+-behavior. After a restart or an L1 eviction, only checkpoints that were reused
+-at least once remain available; the checkpoint scheduler then falls back to
+-the longest one that still exists.
+-
+-Select it with ``--l2-store-policy checkpoint_on_reuse``.
+-"""
+-
+-# First Party
+-from lmcache.v1.distributed.api import ObjectKey, is_recurrent_checkpoint_key
+-from lmcache.v1.distributed.storage_controllers.store_policy import (
+-    AdapterDescriptor,
+-    DefaultStorePolicy,
+-    register_store_policy,
+-)
+-
+-
+-class CheckpointReuseStorePolicy(DefaultStorePolicy):
+-    """
+-    Write ordinary keys through; store checkpoint pages on their first reuse.
+-
+-    L1 deletions follow ``DefaultStorePolicy``: keys stay in L1.
+-    """
+-
+-    def uses_reuse_admission(self) -> bool:
+-        """
+-        Report that checkpoint pages are stored only after reuse.
+-
+-        Returns:
+-            True.
+-        """
+-        return True
+-
+-    def select_store_targets(
+-        self,
+-        keys: list[ObjectKey],
+-        adapters: list[AdapterDescriptor],
+-    ) -> dict[int, list[ObjectKey]]:
+-        """
+-        Store ordinary keys to every adapter and hold back checkpoint pages.
+-
+-        Args:
+-            keys: Keys that were just written to L1.
+-            adapters: Descriptors of available L2 adapters.
+-
+-        Returns:
+-            Mapping from every adapter index to the keys that are not
+-            recurrent checkpoint pages.
+-        """
+-        ordinary = [key for key in keys if not is_recurrent_checkpoint_key(key)]
+-        return {adapter.index: list(ordinary) for adapter in adapters}
+-
+-    def select_reuse_targets(
+-        self,
+-        keys: list[ObjectKey],
+-        adapters: list[AdapterDescriptor],
+-    ) -> dict[int, list[ObjectKey]]:
+-        """
+-        Store reused checkpoint pages to every adapter.
+-
+-        Ordinary keys were already stored when they were written.
+-
+-        Args:
+-            keys: Keys that a completed restore read from L1.
+-            adapters: Descriptors of available L2 adapters.
+-
+-        Returns:
+-            Mapping from every adapter index to the recurrent checkpoint
+-            pages among ``keys``.
+-        """
+-        pages = [key for key in keys if is_recurrent_checkpoint_key(key)]
+-        return {adapter.index: list(pages) for adapter in adapters}
+-
+-
+-register_store_policy("checkpoint_on_reuse", CheckpointReuseStorePolicy)
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lmcache/v1/distributed/storage_controllers/eviction_controller.py b/lmcache/v1/distributed/storage_controllers/eviction_controller.py
+--- a/lmcache/v1/distributed/storage_controllers/eviction_controller.py	2026-09-24 14:03:11.000000000 -0400
++++ b/lmcache/v1/distributed/storage_controllers/eviction_controller.py	2026-09-19 07:27:17.000000000 -0400
+@@ -33,7 +33,6 @@
+ 
+ if TYPE_CHECKING:
+     # First Party
+-    from lmcache.v1.distributed.checkpoint_retention import CheckpointRetention
+     from lmcache.v1.distributed.quota_manager import QuotaManager
+ 
+ logger = init_logger(__name__)
+@@ -100,10 +99,6 @@
+         pass
+ 
+ 
+-# Superseded checkpoint pages dropped per eviction pass, before LRU victims.
+-_SUPERSEDED_DROP_BATCH = 4096
+-
+-
+ class L1EvictionController(EvictionController):
+     """
+     Eviction controller for L1 cache.
+@@ -154,7 +149,6 @@
+         self._last_backup_flush = time.monotonic()
+         self._backup_flush_cursor = 0
+         self._emergency_evict_lock = threading.Lock()
+-        self._retention: "CheckpointRetention | None" = None
+         if self._write_back_enabled:
+             # Register the durable destination even when no adapter is
+             # currently compatible. This is the fail-closed invariant: policy
+@@ -165,69 +159,6 @@
+         if l2_adapters:
+             self.set_l2_adapters(l2_adapters)
+ 
+-    def set_checkpoint_retention(self, retention: "CheckpointRetention") -> None:
+-        """Order eviction by checkpoint supersession and write-on-evict state."""
+-        self._retention = retention
+-
+-    def touch_keys(self, keys: list[ObjectKey]) -> None:
+-        """Move keys to the most recently used position without an L1 read.
+-
+-        Keys that L1 does not hold are ignored.
+-
+-        Args:
+-            keys: Keys a lookup proved are still wanted.
+-        """
+-        self._listener.on_l1_keys_accessed(keys)
+-
+-    def _eligibility_filter(
+-        self, to_persist: list[ObjectKey]
+-    ) -> Callable[[ObjectKey], bool]:
+-        """Return the key filter for one eviction pass.
+-
+-        With write-on-evict checkpoint storage, a current checkpoint page that
+-        is not in L2 yet is skipped and collected in ``to_persist``; the caller
+-        requests its L2 write, and a later pass evicts it once stored.
+-        """
+-        base = (
+-            self._is_writeback_evictable
+-            if self._write_back_enabled
+-            else self._l1_manager.is_key_evictable
+-        )
+-        retention = self._retention
+-        if retention is None or not retention.write_on_evict:
+-            return base
+-
+-        def eligible(key: ObjectKey) -> bool:
+-            if not base(key):
+-                return False
+-            if retention.needs_persist_before_evict(key):
+-                to_persist.append(key)
+-                return False
+-            return True
+-
+-        return eligible
+-
+-    def _request_persist(self, to_persist: list[ObjectKey]) -> None:
+-        if self._retention is not None and to_persist:
+-            self._retention.request_persist(list(dict.fromkeys(to_persist)))
+-
+-    def _drop_superseded(self) -> int:
+-        """Evict superseded checkpoint pages from L1 before any LRU victim."""
+-        retention = self._retention
+-        if retention is None:
+-            return 0
+-        victims = [
+-            key
+-            for key in retention.superseded_keys()
+-            if self._l1_manager.is_key_evictable(key)
+-        ][:_SUPERSEDED_DROP_BATCH]
+-        if not victims:
+-            return 0
+-        result = self._l1_manager.delete(victims)
+-        dropped = sum(1 for error in result.values() if error == L1Error.SUCCESS)
+-        retention.record_l1_superseded_drops(dropped)
+-        return dropped
+-
+     def request_immediate_eviction(self) -> None:
+         """Wake the eviction loop for a capacity-blocked store."""
+         self._immediate_request.set()
+@@ -424,7 +355,6 @@
+             self._immediate_request.clear()
+             if self._stop_flag.is_set():
+                 break
+-            self._l1_manager.reclaim_abandoned_writes()
+             used_bytes, total_bytes = self._l1_manager.get_memory_usage()
+             if self._eviction_config.extra_logging_enabled:
+                 self._maybe_log_memory_usage(used_bytes, total_bytes)
+@@ -459,19 +389,16 @@
+                 watermark,
+                 " immediately" if immediate else "",
+             )
+-            if self._drop_superseded():
+-                used_bytes, total_bytes = self._l1_manager.get_memory_usage()
+-                if total_bytes and used_bytes / total_bytes < watermark:
+-                    self._publish_triggered(usage, watermark)
+-                    continue
+-            to_persist: list[ObjectKey] = []
+             actions = self._eviction_policy.get_eviction_actions(
+                 eviction_ratio,
+-                key_eligible_filter=self._eligibility_filter(to_persist),
++                key_eligible_filter=(
++                    self._is_writeback_evictable
++                    if self._write_back_enabled
++                    else self._l1_manager.is_key_evictable
++                ),
+             )
+             for action in actions:
+                 self.execute_eviction_action(action)
+-            self._request_persist(to_persist)
+             self._publish_triggered(usage, watermark)
+ 
+     def execute_eviction_action(self, action: EvictionAction):
+@@ -529,10 +456,6 @@
+             start = time.monotonic()
+             initial_free = free
+             initial_objects = self._l1_manager.num_objects()
+-            to_persist: list[ObjectKey] = []
+-            if self._drop_superseded():
+-                used, total = self._l1_manager.get_memory_usage()
+-                free = max(0, total - used)
+             while free < target_free_bytes and time.monotonic() < deadline:
+                 num_objects = self._l1_manager.num_objects()
+                 if num_objects <= 0:
+@@ -560,7 +483,11 @@
+                     )
+                 actions = self._eviction_policy.get_eviction_actions(
+                     min(1.0, need_keys / max(1, tracked)),
+-                    key_eligible_filter=self._eligibility_filter(to_persist),
++                    key_eligible_filter=(
++                        self._is_writeback_evictable
++                        if self._write_back_enabled
++                        else self._l1_manager.is_key_evictable
++                    ),
+                     cache_salt=cache_salt,
+                 )
+                 if not actions:
+@@ -587,7 +514,6 @@
+                 if free <= free_before_pass:
+                     break
+ 
+-            self._request_persist(to_persist)
+             evicted_keys = max(0, initial_objects - self._l1_manager.num_objects())
+ 
+             logger.info(
+@@ -866,7 +792,6 @@
+     ):
+         self._adapter_states = l2_adapter_states
+         self._quota_manager = quota_manager
+-        self._retention: "CheckpointRetention | None" = None
+         # Guards _adapter_states against concurrent runtime add/remove.
+         self._states_lock = threading.Lock()
+         self._stop_flag = threading.Event()
+@@ -883,51 +808,6 @@
+         self._stop_flag.set()
+         self._thread.join()
+ 
+-    def set_checkpoint_retention(self, retention: "CheckpointRetention") -> None:
+-        """Evict superseded checkpoint pages before LRU victims."""
+-        self._retention = retention
+-
+-    def _evict_superseded(self, state: L2AdapterEvictionState) -> bool:
+-        """Delete superseded checkpoint pages first; return True if any went."""
+-        retention = self._retention
+-        if retention is None:
+-            return False
+-        usage = state.adapter.get_usage()
+-        budget = int(usage.total_bytes_used * state.eviction_config.eviction_ratio)
+-        victims, size = retention.superseded_in_adapter(
+-            state.adapter_id, max(1, budget)
+-        )
+-        if not victims:
+-            return False
+-        self._execute_eviction_action(
+-            state.adapter,
+-            EvictionAction(keys=victims, destination=EvictionDestination.DISCARD),
+-        )
+-        retention.record_l2_superseded_evictions(len(victims), size)
+-        logger.info(
+-            "L2 eviction removed %d superseded checkpoint pages (%.1f MB) first",
+-            len(victims),
+-            size / 1e6,
+-        )
+-        return True
+-
+-    def touch_keys(self, keys: list[ObjectKey]) -> None:
+-        """Move keys to the most recently used position in every adapter.
+-
+-        Only eviction order changes. An adapter ignores keys it does not
+-        hold, and store admission is not told that the keys are in L2.
+-
+-        Args:
+-            keys: Keys a lookup proved are still wanted.
+-        """
+-        if not keys:
+-            return
+-        # The eviction loop holds _states_lock for a whole pass, so read the
+-        # list without it. Removal replaces the list; touching a removed
+-        # adapter's policy only reorders memory that is about to be dropped.
+-        for state in list(self._adapter_states):
+-            state.listener.on_l2_keys_accessed(keys)
+-
+     def add_adapter_state(self, state: L2AdapterEvictionState) -> None:
+         """Register a new adapter's eviction state at runtime."""
+         with self._states_lock:
+@@ -1014,10 +894,6 @@
+             current_usage,
+             watermark,
+         )
+-        if self._evict_superseded(state):
+-            current_usage = state.adapter.get_usage().usage_fraction
+-            if current_usage < watermark:
+-                return
+         actions = state.eviction_policy.get_eviction_actions(eviction_ratio)
+         for action in actions:
+             self._execute_eviction_action(state.adapter, action)
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lmcache/v1/distributed/storage_controllers/prefetch_controller.py b/lmcache/v1/distributed/storage_controllers/prefetch_controller.py
+--- a/lmcache/v1/distributed/storage_controllers/prefetch_controller.py	2026-09-24 14:03:11.000000000 -0400
++++ b/lmcache/v1/distributed/storage_controllers/prefetch_controller.py	2026-09-19 07:27:17.000000000 -0400
+@@ -1489,7 +1489,8 @@
+ 
+         # Clean up failed keys
+         if failed_keys:
+-            self._discard_unloaded_buffers(failed_keys)
++            l1_mgr.finish_write(failed_keys)
++            l1_mgr.delete(failed_keys)
+ 
+         self._event_bus.publish(
+             Event(
+@@ -1616,31 +1617,14 @@
+             result.popcount(),
+         )
+ 
+-    def _discard_unloaded_buffers(self, keys: list[ObjectKey]) -> None:
+-        """Drop write reservations whose bytes were never loaded from L2.
+-
+-        ``abort_write`` removes them without ever making them readable.
+-        Finishing the write before deleting would briefly publish the
+-        buffer, and a reader that locked it in between (the store
+-        controller or another engine's lookup) would keep bytes of some
+-        earlier object resident as a valid entry. A reservation whose write
+-        lock already expired can no longer be aborted and is deleted unless
+-        a reader holds it.
+-        """
+-        results = self._l1_manager.abort_write(keys)
+-        expired = [
+-            key for key, error in results.items() if error == L1Error.KEY_IN_WRONG_STATE
+-        ]
+-        if expired:
+-            self._l1_manager.delete(expired)
+-
+     def _cleanup_in_flight_requests(self) -> None:
+         """Release resources for any in-flight requests during shutdown."""
+         l1_mgr = self._l1_manager
+         for request in self._in_flight_requests.values():
+             if request.phase == PrefetchPhase.PLAN_AND_LOAD:
+                 if request.write_reserved_keys:
+-                    self._discard_unloaded_buffers(request.write_reserved_keys)
++                    l1_mgr.finish_write(request.write_reserved_keys)
++                    l1_mgr.delete(request.write_reserved_keys)
+             self._release_l2_locks(request, keep={})
+             if request.l1_readlocks.popcount() > 0:
+                 l1_mgr.finish_read(
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lmcache/v1/distributed/storage_controllers/store_controller.py b/lmcache/v1/distributed/storage_controllers/store_controller.py
+--- a/lmcache/v1/distributed/storage_controllers/store_controller.py	2026-09-24 14:03:11.000000000 -0400
++++ b/lmcache/v1/distributed/storage_controllers/store_controller.py	2026-09-19 07:27:17.000000000 -0400
+@@ -10,7 +10,7 @@
+ """
+ 
+ # Standard
+-from collections import Counter, OrderedDict, defaultdict
++from collections import Counter, defaultdict
+ from dataclasses import dataclass
+ import enum
+ import select
+@@ -20,7 +20,7 @@
+ from lmcache.logging import init_logger
+ from lmcache.v1.distributed.api import ObjectKey
+ from lmcache.v1.distributed.error import L1Error
+-from lmcache.v1.distributed.internal_api import L1ManagerListener, L2AdapterListener
++from lmcache.v1.distributed.internal_api import L1ManagerListener
+ from lmcache.v1.distributed.l1_manager import L1Manager
+ from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
+ from lmcache.v1.distributed.storage_controller import StorageControllerInterface
+@@ -67,14 +67,7 @@
+ # Helper classes (module-level, before main class)
+ 
+ 
+-class L2Residency(enum.Enum):
+-    """Whether an event shows that keys are in L2 or no longer are."""
+-
+-    PRESENT = enum.auto()
+-    ABSENT = enum.auto()
+-
+-
+-class StoreListener(L1ManagerListener, L2AdapterListener):
++class StoreListener(L1ManagerListener):
+     """
+     Listener that receives L1 write-completion callbacks and enqueues
+     keys for the StoreController's background loop.
+@@ -82,17 +75,10 @@
+     The ``on_keys_write_finished`` callback is invoked inside L1Manager's
+     lock, so it must be non-blocking. It appends keys to an internal list
+     and signals an eventfd to wake up the controller's select.poll().
+-
+-    For reuse-admission policies it also queues reused keys and records
+-    which keys enter or leave L2 (loads from L2, L2 stores and deletions),
+-    so the controller stores a reused key once rather than on every reuse.
+     """
+ 
+     def __init__(self) -> None:
+         self._pending_keys: list[ObjectKey] = []
+-        self._reused_keys: list[ObjectKey] = []
+-        self._residency_events: list[tuple[L2Residency, list[ObjectKey]]] = []
+-        self._tracks_l2_residency = False
+         self._lock = threading.Lock()
+         self._event_fd = create_event_notifier()
+ 
+@@ -130,49 +116,6 @@
+         with self._lock:
+             return len(self._pending_keys)
+ 
+-    def pending_reused_count(self) -> int:
+-        """Return the number of reused keys waiting to be processed."""
+-        with self._lock:
+-            return len(self._reused_keys)
+-
+-    def enable_l2_residency_tracking(self) -> None:
+-        """Start recording L2 residency events and accepting reused keys."""
+-        with self._lock:
+-            self._tracks_l2_residency = True
+-
+-    def enqueue_reused_keys(self, keys: list[ObjectKey]) -> None:
+-        """
+-        Enqueue keys read by a completed restore and signal the notifier.
+-
+-        Ignored until ``enable_l2_residency_tracking`` is called.
+-
+-        Args:
+-            keys (list[ObjectKey]): Keys whose restore has completed.
+-        """
+-        with self._lock:
+-            if not self._tracks_l2_residency:
+-                return
+-            self._reused_keys.extend(keys)
+-        self._event_fd.notify()
+-
+-    def pop_reuse_events(
+-        self,
+-    ) -> tuple[list[tuple[L2Residency, list[ObjectKey]]], list[ObjectKey]]:
+-        """
+-        Pop residency events and reused keys in one atomic step.
+-
+-        A key loaded from L2 is recorded before its restore can complete,
+-        so popping both lists together never returns a reused key without
+-        the residency event that precedes it.
+-
+-        Returns:
+-            Residency events in arrival order, and the reused keys.
+-        """
+-        with self._lock:
+-            residency, reused = self._residency_events, self._reused_keys
+-            self._residency_events, self._reused_keys = [], []
+-        return residency, reused
+-
+     # L1ManagerListener implementation
+ 
+     def on_l1_keys_write_finished(self, keys: list[ObjectKey]) -> None:
+@@ -202,40 +145,17 @@
+         pass
+ 
+     def on_l1_keys_finish_write_and_reserve_read(self, keys: list[ObjectKey]) -> None:
+-        # Never trigger a store for objects prefetched to L1; they came from
+-        # L2, so reuse admission records them as already stored.
+-        self._record_residency(L2Residency.PRESENT, keys)
+-
+-    def on_l1_keys_accessed(self, keys: list[ObjectKey]) -> None:
++        # No op here because we don't want to trigger store when the
++        # objects are prefetched to L1.
+         pass
+ 
+-    # L2AdapterListener implementation
+-
+-    def on_l2_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
+-        """Record keys that an L2 adapter now holds."""
+-        self._record_residency(L2Residency.PRESENT, keys)
+-
+-    def on_l2_keys_accessed(self, keys: list[ObjectKey]) -> None:
++    def on_l1_keys_accessed(self, keys: list[ObjectKey]) -> None:
+         pass
+ 
+-    def on_l2_keys_deleted(self, keys: list[ObjectKey]) -> None:
+-        """Record keys that an L2 adapter no longer holds."""
+-        self._record_residency(L2Residency.ABSENT, keys)
+-
+     def close(self) -> None:
+         """Close the notifier."""
+         self._event_fd.close()
+ 
+-    def _record_residency(self, state: L2Residency, keys: list[ObjectKey]) -> None:
+-        """Queue a residency change when tracking is enabled; non-blocking."""
+-        if not keys:
+-            return
+-        with self._lock:
+-            if not self._tracks_l2_residency:
+-                return
+-            self._residency_events.append((state, list(keys)))
+-        self._event_fd.notify()
+-
+ 
+ class StorePhase(enum.Enum):
+     """Phases a store task may be in. Currently there is only an
+@@ -303,10 +223,6 @@
+     _gauge_registered: bool = False
+     _gauge_target: "StoreController | None" = None
+ 
+-    # Bound on remembered L2-resident keys for reuse admission. A forgotten
+-    # key that is still in L2 is stored once more on its next reuse.
+-    _MAX_TRACKED_L2_KEYS = 131072
+-
+     def __init__(
+         self,
+         l1_manager: L1Manager,
+@@ -324,11 +240,6 @@
+         }
+         self._policy = policy
+ 
+-        # Reuse admission state, touched only by the store loop thread.
+-        self._tracks_l2_residency = policy.uses_reuse_admission()
+-        self._l2_resident: OrderedDict[ObjectKey, None] = OrderedDict()
+-        self._reuse_in_flight: set[ObjectKey] = set()
+-
+         # Adapters that are being drained and will be removed after all
+         # the in-flight operations are done.
+         self._draining: dict[int, threading.Event] = {}
+@@ -341,10 +252,6 @@
+ 
+         self._listener = StoreListener()
+         self._l1_manager.register_listener(self._listener)
+-        if self._tracks_l2_residency:
+-            self._listener.enable_l2_residency_tracking()
+-            for adapter in self._l2_adapters.values():
+-                adapter.register_listener(self._listener)
+         self._event_bus = get_event_bus()
+ 
+         # (adapter_index, task_id) -> InFlightStoreTask
+@@ -421,28 +328,12 @@
+             "is_healthy": is_healthy,
+             "thread_alive": is_healthy,
+             "pending_keys_count": self._listener.pending_count(),
+-            "pending_reused_keys_count": self._listener.pending_reused_count(),
+             "in_flight_task_count": self._status_in_flight_count,
+             "num_l2_adapters": len(self._l2_adapters),
+             "num_active_adapters": len(self._l2_adapters) - num_draining,
+             "num_draining_adapters": num_draining,
+         }
+ 
+-    def submit_reused_keys(self, keys: list[ObjectKey]) -> None:
+-        """
+-        Report keys that a completed restore read from L1.
+-
+-        With a reuse-admission policy, keys not yet known to be in L2 are
+-        offered to ``StorePolicy.select_reuse_targets`` by the background
+-        loop. Other policies ignore the report. Non-blocking.
+-
+-        Args:
+-            keys: Keys whose restore, including the consumer's copy, has
+-                completed.
+-        """
+-        if keys:
+-            self._listener.enqueue_reused_keys(keys)
+-
+     def add_adapter(
+         self,
+         adapter_id: int,
+@@ -578,7 +469,6 @@
+                         keys = self._listener.pop_pending_keys()
+                         if keys:
+                             self._process_new_keys(keys)
+-                        self._process_reuse_events()
+                     else:
+                         adapter_idx = self._efd_to_adapter_index.get(fd)
+                         if adapter_idx is not None:
+@@ -618,8 +508,6 @@
+             self._pending_adapter_ops = []
+         for op in ops:
+             if isinstance(op, AddAdapterOp):
+-                if self._tracks_l2_residency:
+-                    op.adapter.register_listener(self._listener)
+                 self._l2_adapters[op.adapter_id] = op.adapter
+                 self._adapter_descriptors[op.adapter_id] = op.descriptor
+                 efd = op.adapter.get_store_event_fd()
+@@ -682,43 +570,19 @@
+         for group in _group_keys_by_shape(keys).values():
+             self._submit_store_for_single_shape(group)
+ 
+-    def _process_reuse_events(self) -> None:
+-        """Apply L2 residency changes, then store keys reused for the first time."""
+-        residency, reused = self._listener.pop_reuse_events()
+-        for state, keys in residency:
+-            if state is L2Residency.PRESENT:
+-                self._remember_l2_resident(keys)
+-            else:
+-                for key in keys:
+-                    self._l2_resident.pop(key, None)
+-        fresh = [
+-            key
+-            for key in dict.fromkeys(reused)
+-            if key not in self._l2_resident and key not in self._reuse_in_flight
+-        ]
+-        for group in _group_keys_by_shape(fresh).values():
+-            plan = self._policy.select_reuse_targets(group, self._routing_descriptors())
+-            self._reuse_in_flight.update(self._submit_plan(plan))
+-
+-    def _routing_descriptors(self) -> list[AdapterDescriptor]:
+-        """Return descriptors of live adapters that may receive new stores."""
+-        # Descriptors for draining adapters are kept for in-flight completion
+-        # handling but excluded here so no new task targets them.
+-        return [
++    def _submit_store_for_single_shape(self, keys: list[ObjectKey]) -> None:
++        """Submit ``keys`` (all same shape) to their target adapters."""
++        # Only route to adapters that are live (not draining). Descriptors
++        # for draining adapters are kept for in-flight completion handling
++        # but excluded here so no new task targets them.
++        routing_descriptors = [
+             desc
+             for adapter_id, desc in self._adapter_descriptors.items()
+             if adapter_id not in self._draining
+         ]
++        plan = self._policy.select_store_targets(keys, routing_descriptors)
+ 
+-    def _submit_store_for_single_shape(self, keys: list[ObjectKey]) -> None:
+-        """Submit ``keys`` (all same shape) to their target adapters."""
+-        plan = self._policy.select_store_targets(keys, self._routing_descriptors())
+-        self._submit_plan(plan)
+-
+-    def _submit_plan(self, plan: dict[int, list[ObjectKey]]) -> list[ObjectKey]:
+-        """Submit one store task per adapter in ``plan``; return submitted keys."""
+         l1_mgr = self._l1_manager
+-        submitted: list[ObjectKey] = []
+ 
+         for adapter_index, target_keys in plan.items():
+             if not target_keys:
+@@ -760,8 +624,8 @@
+                 successful_objs.append(obj)
+ 
+             # L1 read-failure anomaly reporting: target_keys come from an
+-            # L1_WRITE_FINISHED notification or a just-completed restore, so
+-            # failing to reserve_read them means an eviction or lock race.
++            # L1_WRITE_FINISHED notification, so failing to reserve_read them
++            # immediately after means an unexpected eviction or lock race.
+             if not_found_keys:
+                 self._event_bus.publish(
+                     Event(
+@@ -790,7 +654,6 @@
+ 
+             adapter = self._l2_adapters[adapter_index]
+             task_id = adapter.submit_store_task(successful_keys, successful_objs)
+-            submitted.extend(successful_keys)
+ 
+             self._in_flight_tasks[(adapter_index, task_id)] = InFlightStoreTask(
+                 adapter_index=adapter_index,
+@@ -825,7 +688,6 @@
+                 adapter_index,
+                 len(successful_keys),
+             )
+-        return submitted
+ 
+     def _drain_l2_store_completions(self, signaled_adapters: set[int]) -> None:
+         """Deposit each signaled adapter's L2 outcomes onto their in-flight
+@@ -871,7 +733,6 @@
+         l1_mgr.finish_read(task.read_locked_keys)
+         del self._in_flight_tasks[task_key]
+         self._status_in_flight_count -= 1
+-        self._reuse_in_flight.difference_update(task.keys)
+ 
+         l2_name = self._adapter_descriptors[adapter_index].type_name
+         completion_meta: dict[str, object] = {
+@@ -898,8 +759,6 @@
+                 adapter_index,
+                 len(task.keys),
+             )
+-            if self._tracks_l2_residency:
+-                self._remember_l2_resident(task.keys)
+             delete_keys = self._policy.select_l1_deletions(task.keys)
+             if delete_keys:
+                 l1_mgr.delete(delete_keys)
+@@ -921,14 +780,6 @@
+                 task.keys,
+             )
+ 
+-    def _remember_l2_resident(self, keys: list[ObjectKey]) -> None:
+-        """Record keys as present in L2, forgetting the oldest beyond the bound."""
+-        for key in keys:
+-            self._l2_resident[key] = None
+-            self._l2_resident.move_to_end(key)
+-        while len(self._l2_resident) > self._MAX_TRACKED_L2_KEYS:
+-            self._l2_resident.popitem(last=False)
+-
+     def _cleanup_in_flight_tasks(self) -> None:
+         """
+         Release all held read locks for any in-flight tasks that
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lmcache/v1/distributed/storage_controllers/store_policy.py b/lmcache/v1/distributed/storage_controllers/store_policy.py
+--- a/lmcache/v1/distributed/storage_controllers/store_policy.py	2026-09-24 14:03:11.000000000 -0400
++++ b/lmcache/v1/distributed/storage_controllers/store_policy.py	2026-09-19 07:27:17.000000000 -0400
+@@ -91,55 +91,6 @@
+             Keys to delete from L1. Empty list means keep all.
+         """
+ 
+-    def uses_reuse_admission(self) -> bool:
+-        """
+-        Whether this policy stores some keys only after they are reused.
+-
+-        The store controller tracks which keys are already in L2 only for
+-        such policies, so write-through policies pay no bookkeeping cost.
+-
+-        Returns:
+-            False for the base class; policies that override
+-            ``select_reuse_targets`` return True.
+-        """
+-        return False
+-
+-    def writes_checkpoints_on_evict(self) -> bool:
+-        """
+-        Whether checkpoint pages reach L2 only when L1 evicts them.
+-
+-        Such policies hold checkpoint pages back at write time, store a page
+-        through ``select_reuse_targets`` when L1 is about to evict it, and do
+-        not store pages merely because a restore read them.
+-
+-        Returns:
+-            False for the base class.
+-        """
+-        return False
+-
+-    def select_reuse_targets(
+-        self,
+-        keys: list[ObjectKey],
+-        adapters: list[AdapterDescriptor],
+-    ) -> dict[int, list[ObjectKey]]:
+-        """
+-        Decide which keys to store to which L2 adapters after their reuse.
+-
+-        Called once a consumer has restored these keys from L1. A key is
+-        offered at most once while the controller knows it is in L2.
+-        Write-through policies already stored every key, so the base class
+-        stores nothing.
+-
+-        Args:
+-            keys: Keys that a completed restore read from L1.
+-            adapters: Descriptors of available L2 adapters.
+-
+-        Returns:
+-            Mapping from adapter index to keys to store. An empty mapping
+-            stores nothing.
+-        """
+-        return {}
+-
+ 
+ # -----------------------------------------------------------------------------
+ # Registry: store policy name -> policy class
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lmcache/v1/distributed/storage_manager.py b/lmcache/v1/distributed/storage_manager.py
+--- a/lmcache/v1/distributed/storage_manager.py	2026-09-24 14:03:11.000000000 -0400
++++ b/lmcache/v1/distributed/storage_manager.py	2026-09-19 07:27:17.000000000 -0400
+@@ -27,10 +27,8 @@
+     PrefetchRequestSpec,
+     Tier,
+     TrimPolicy,
+-    is_recurrent_checkpoint_key,
+ )
+ from lmcache.v1.distributed.bitmap_ops import fold_unfold_ranked
+-from lmcache.v1.distributed.checkpoint_retention import CheckpointRetention
+ from lmcache.v1.distributed.config import (
+     EvictionConfig,
+     StorageManagerConfig,
+@@ -112,23 +110,11 @@
+         self._l1_config = config.l1_manager_config
+         self._event_bus = get_event_bus()
+ 
+-        # Checkpoint supersession and write-on-evict state, shared by the
+-        # eviction controllers, the store controller and checkpoint RPCs.
+-        store_policy = create_store_policy(config.store_policy)
+-        self._checkpoint_shutdown_flush_seconds = (
+-            config.checkpoint_shutdown_flush_seconds
+-        )
+-        self._checkpoint_retention = CheckpointRetention(
+-            write_on_evict=store_policy.writes_checkpoints_on_evict(),
+-            persist_timeout=config.checkpoint_write_timeout_seconds,
+-        )
+-
+         # L1 eviction controller
+         self._eviction_controller = L1EvictionController(
+             l1_manager=self._l1_manager,
+             eviction_config=config.eviction_config,
+         )
+-        self._eviction_controller.set_checkpoint_retention(self._checkpoint_retention)
+         self._eviction_controller.start()
+ 
+         # L2 adapters and store controller. When an adapter config carries
+@@ -148,7 +134,6 @@
+             adapter_id, adapter, descriptor = self._build_l2_adapter(ac)
+             self._l2_adapters[adapter_id] = adapter
+             self._adapter_descriptors[adapter_id] = descriptor
+-            self._track_checkpoint_residency(adapter_id, adapter)
+ 
+         PeriodicEventNotifier.create(
+             interval_ms=config.periodic_notifier_interval_ms,
+@@ -187,9 +172,6 @@
+         self._l2_eviction_controller = L2EvictionController(
+             l2_eviction_states, quota_manager=self._quota_manager
+         )
+-        self._l2_eviction_controller.set_checkpoint_retention(
+-            self._checkpoint_retention
+-        )
+         self._l2_eviction_controller.start()
+ 
+         # Controllers receive the initial set as ordered lists; they key
+@@ -199,12 +181,9 @@
+             l1_manager=self._l1_manager,
+             l2_adapters=list(self._l2_adapters.values()),
+             adapter_descriptors=list(self._adapter_descriptors.values()),
+-            policy=store_policy,
++            policy=create_store_policy(config.store_policy),
+         )
+         self._store_controller.start()
+-        self._checkpoint_retention.set_persist(
+-            self._store_controller.submit_reused_keys
+-        )
+ 
+         # Prefetch controller
+         self._prefetch_controller = PrefetchController(
+@@ -255,17 +234,6 @@
+             ),
+             self.get_l2_usages,
+         )
+-        register_gauge(
+-            "lmcache.l2",
+-            "lmcache_mp.checkpoint_retention",
+-            (
+-                "Recurrent checkpoint retention counters and sizes, tagged by "
+-                "``stat``: superseded pages, L1 drops and L2 evictions of "
+-                "superseded pages, write-on-evict requests, completions and "
+-                "timeouts, and checkpoint bytes held in L2."
+-            ),
+-            self._checkpoint_retention.observations,
+-        )
+ 
+     # External APIs for serving engine integration code to call
+     @enable_tracing()
+@@ -569,91 +537,6 @@
+             )
+         )
+ 
+-    def notify_keys_reused(self, keys: list[ObjectKey]) -> None:
+-        """Report objects that a completed restore just read from L1.
+-
+-        With a store policy that stores keys only after reuse (such as
+-        ``checkpoint_on_reuse``), the first report of a key not yet in L2
+-        stores it there. Write-through policies ignore the report. The call
+-        is non-blocking; the store controller's loop does the work.
+-
+-        Args:
+-            keys: Keys read by a restore whose consumer copy has completed.
+-                Call this before releasing the restore's read locks.
+-        """
+-        if self._checkpoint_retention.write_on_evict:
+-            # Write-on-evict policies store checkpoint pages when L1 evicts
+-            # them, not because a restore read them.
+-            return
+-        self._store_controller.submit_reused_keys(keys)
+-
+-    @property
+-    def checkpoint_retention(self) -> CheckpointRetention:
+-        """Checkpoint supersession and write-on-evict state."""
+-        return self._checkpoint_retention
+-
+-    def _track_checkpoint_residency(
+-        self, adapter_id: int, adapter: L2AdapterInterface
+-    ) -> None:
+-        """Record which checkpoint pages ``adapter`` holds, now and later."""
+-        retention = self._checkpoint_retention
+-        listener = retention.listener_for(adapter_id)
+-        adapter.register_listener(listener)
+-        try:
+-            inventory = adapter.get_existing_key_sizes()
+-        except Exception:
+-            logger.exception(
+-                "Could not read the checkpoint inventory of L2 adapter %d",
+-                adapter_id,
+-            )
+-            return
+-        if inventory:
+-            retention.record_l2_present(
+-                adapter_id, list(inventory), list(inventory.values())
+-            )
+-
+-    def _flush_current_checkpoints(self) -> None:
+-        """Write current checkpoint pages still only in L1 to L2 on shutdown."""
+-        retention = self._checkpoint_retention
+-        budget = self._checkpoint_shutdown_flush_seconds
+-        if not retention.write_on_evict or budget <= 0 or not self._has_l2_adapters():
+-            return
+-        count = self._l1_manager.num_objects()
+-        keys, _ = self._l1_manager.get_evictable_keys(limit=count, scan_limit=count)
+-        pending = [
+-            key
+-            for key in keys
+-            if is_recurrent_checkpoint_key(key)
+-            and not retention.is_superseded(key)
+-            and not retention.is_l2_resident(key)
+-        ]
+-        if not pending:
+-            return
+-        logger.info(
+-            "Writing %d current checkpoint pages to L2 before shutdown (budget %.0f s)",
+-            len(pending),
+-            budget,
+-        )
+-        start = time.monotonic()
+-        retention.request_persist(pending)
+-        while time.monotonic() - start < budget:
+-            pending = [key for key in pending if not retention.is_l2_resident(key)]
+-            if not pending:
+-                break
+-            time.sleep(0.2)
+-        if pending:
+-            logger.warning(
+-                "Shutdown checkpoint flush left %d pages without an L2 copy "
+-                "after %.0f s",
+-                len(pending),
+-                time.monotonic() - start,
+-            )
+-        else:
+-            logger.info(
+-                "Shutdown checkpoint flush completed in %.1f s",
+-                time.monotonic() - start,
+-            )
+-
+     @enable_tracing()
+     def submit_prefetch_task(
+         self,
+@@ -995,20 +878,6 @@
+         """
+         self._l1_manager.touch_keys(keys)
+ 
+-    def touch_keys(self, keys: list[ObjectKey]) -> None:
+-        """Refresh keys in L1 and L2 eviction order without reading them.
+-
+-        Use this when a lookup proves data is still wanted but no tier is
+-        read, for example because the engine already holds it. Each tier
+-        ignores keys it does not hold. No access event is published and
+-        store admission is unchanged.
+-
+-        Args:
+-            keys: Keys to move to the most recently used position.
+-        """
+-        self._eviction_controller.touch_keys(keys)
+-        self._l2_eviction_controller.touch_keys(keys)
+-
+     def delete_l1_keys(
+         self, keys: list[ObjectKey], force: bool = False
+     ) -> tuple[int, int]:
+@@ -1284,7 +1153,6 @@
+             adapter_id, adapter, descriptor = self._build_l2_adapter(config)
+             for listener in self._registered_l2_listeners:
+                 adapter.register_listener(listener)
+-            self._track_checkpoint_residency(adapter_id, adapter)
+             with self._adapters_lock:
+                 self._l2_adapters[adapter_id] = adapter
+                 self._adapter_descriptors[adapter_id] = descriptor
+@@ -1345,7 +1213,6 @@
+             # before detaching eviction state or closing native resources.
+             self._eviction_controller.remove_l2_adapter(adapter_id)
+             self._l2_eviction_controller.remove_adapter_state(adapter_id)
+-            self._checkpoint_retention.forget_adapter(adapter_id)
+             with self._adapters_lock:
+                 adapter = self._l2_adapters.pop(adapter_id)
+                 self._adapter_descriptors.pop(adapter_id, None)
+@@ -1385,10 +1252,6 @@
+         """
+         Close the storage manager and release all resources.
+         """
+-        try:
+-            self._flush_current_checkpoints()
+-        except Exception:
+-            logger.exception("Shutdown checkpoint flush failed")
+         self._l1_manager.begin_shutdown()
+         self._prefetch_controller.stop()
+         self._store_controller.stop()
+@@ -1418,7 +1281,6 @@
+             "prefetch_controller": prefetch,
+             "l1_eviction_controller": l1_eviction,
+             "l2_eviction_controller": l2_eviction,
+-            "checkpoint_retention": self._checkpoint_retention.report_status(),
+             "l2_adapters": adapters,
+             "num_l2_adapters": len(adapters),
+             "store_admission": self.get_admission_stats(),
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lmcache/v1/multiprocess/checkpoint_index.py b/lmcache/v1/multiprocess/checkpoint_index.py
+--- a/lmcache/v1/multiprocess/checkpoint_index.py	2026-09-24 14:03:11.000000000 -0400
++++ b/lmcache/v1/multiprocess/checkpoint_index.py	2026-09-19 07:27:17.000000000 -0400
+@@ -14,52 +14,6 @@
+ import sqlite3
+ import threading
+ 
+-# Every checkpoint that ends inside the same hash block shares one lookup
+-# bucket, so a lookup must not scan the bucket. Each published tail also gets
+-# a polynomial hash in checkpoint_tails; a query hashes each of its own
+-# prefixes and probes only those. The hash only selects candidates.
+-_TAIL_HASH_BASE = 1_000_003
+-_TAIL_HASH_MODULUS = (1 << 61) - 1
+-
+-# Stored tails are JSON token arrays. A candidate's tail is a token prefix of
+-# the :tail query exactly when the query repeats it without the closing
+-# bracket and continues with "," or "]". This confirms every hash candidate.
+-_TAIL_IS_PREFIX_OF_QUERY = (
+-    "substr(:tail, 1, length(c.tail) - 1) = substr(c.tail, 1, length(c.tail) - 1) "
+-    "AND substr(:tail, length(c.tail), 1) IN (x'2c', x'5d')"
+-)
+-
+-# Published candidates whose tail hash equals one of the query's prefix hashes.
+-_CANDIDATES = (
+-    "SELECT c.tail,c.generation,c.world_size,c.payload FROM checkpoint_tails t "
+-    "JOIN checkpoints c ON c.generation=t.generation "
+-    "WHERE t.namespace=:namespace AND t.start_tokens=:start "
+-    "AND t.prefix_hash=:prefix_hash "
+-    "AND t.tail_hash IN (SELECT value FROM json_each(:prefix_hashes)) "
+-    f"AND c.num_tokens<=:num_tokens AND {_TAIL_IS_PREFIX_OF_QUERY}"
+-)
+-
+-
+-def _prefix_hashes(tokens: tuple[int, ...]) -> list[int]:
+-    """Return the tail hash of every nonempty prefix of ``tokens``."""
+-    hashes = []
+-    value = 0
+-    for token in tokens:
+-        value = (value * _TAIL_HASH_BASE + token + 1) % _TAIL_HASH_MODULUS
+-        hashes.append(value)
+-    return hashes
+-
+-
+-def _query_parameters(query: "CheckpointPrefix") -> dict[str, object]:
+-    return {
+-        "namespace": query.namespace,
+-        "start": query.start_tokens,
+-        "prefix_hash": query.prefix_hash,
+-        "num_tokens": query.num_tokens,
+-        "tail": json.dumps(query.tail_tokens).encode(),
+-        "prefix_hashes": json.dumps(_prefix_hashes(query.tail_tokens)),
+-    }
+-
+ 
+ @dataclass(frozen=True)
+ class CheckpointPrefix:
+@@ -143,13 +97,11 @@
+         path: SQLite database file, or ``None`` for a RAM-only directory. The
+             containing directory must already exist and be trusted server data.
+         max_entries: Maximum published manifests, evicting least-recently-used
+-            entries. Payload eviction is independently owned by storage tiers,
+-            so this should cover at least as many generations as L2 retains.
++            entries. Payload eviction is independently owned by storage tiers.
+         max_pending: Maximum unpublished generations admitted concurrently.
+ 
+     Raises:
+-        ValueError: If either capacity is not a positive integer or the schema
+-            is unknown.
++        ValueError: If either capacity is not positive or the schema is unknown.
+         sqlite3.Error: If the database cannot be opened or committed.
+     """
+ 
+@@ -157,16 +109,11 @@
+         self,
+         path: Path | None = None,
+         *,
+-        max_entries: int = 65536,
++        max_entries: int = 8192,
+         max_pending: int = 128,
+     ) -> None:
+-        if any(
+-            type(capacity) is not int or capacity <= 0
+-            for capacity in (max_entries, max_pending)
+-        ):
+-            raise ValueError(
+-                "checkpoint directory capacities must be positive integers"
+-            )
++        if max_entries <= 0 or max_pending <= 0:
++            raise ValueError("checkpoint directory capacities must be positive")
+         self._max_entries = max_entries
+         self._max_pending = max_pending
+         self._pending: dict[str, _PendingManifest] = {}
+@@ -192,41 +139,6 @@
+                 "access_order INTEGER NOT NULL, "
+                 "PRIMARY KEY(namespace, start_tokens, prefix_hash, tail))"
+             )
+-            # Capacity trimming walks entries by recency on every publication.
+-            self._db.execute(
+-                "CREATE INDEX IF NOT EXISTS checkpoints_access_order "
+-                "ON checkpoints(access_order)"
+-            )
+-            # A separate table keeps the checkpoints schema readable and
+-            # writable by older builds. Rows they add or replace are
+-            # reconciled here on the next open; lookups join on generation,
+-            # so a stale row never matches.
+-            self._db.execute(
+-                "CREATE TABLE IF NOT EXISTS checkpoint_tails ("
+-                "generation TEXT PRIMARY KEY, namespace TEXT NOT NULL, "
+-                "start_tokens INTEGER NOT NULL, prefix_hash BLOB NOT NULL, "
+-                "tail_hash INTEGER NOT NULL)"
+-            )
+-            self._db.execute(
+-                "CREATE INDEX IF NOT EXISTS checkpoint_tails_lookup ON "
+-                "checkpoint_tails(namespace, start_tokens, prefix_hash, tail_hash)"
+-            )
+-            self._db.execute(
+-                "DELETE FROM checkpoint_tails WHERE generation NOT IN "
+-                "(SELECT generation FROM checkpoints)"
+-            )
+-            missing = self._db.execute(
+-                "SELECT generation,namespace,start_tokens,prefix_hash,tail "
+-                "FROM checkpoints WHERE generation NOT IN "
+-                "(SELECT generation FROM checkpoint_tails)"
+-            ).fetchall()
+-            self._db.executemany(
+-                "INSERT INTO checkpoint_tails VALUES (?,?,?,?,?)",
+-                (
+-                    (*row[:4], _prefix_hashes(tuple(json.loads(row[4])))[-1])
+-                    for row in missing
+-                ),
+-            )
+             self._db.execute("PRAGMA user_version=1")
+         self._access_order = self._db.execute(
+             "SELECT COALESCE(MAX(access_order), 0) FROM checkpoints"
+@@ -305,22 +217,14 @@
+                 return False
+             prefix = manifest.prefix
+             self._access_order += 1
+-            tail = json.dumps(prefix.tail_tokens).encode()
+             with self._db:
+-                # The generation replaced for this exact prefix, if any.
+-                self._db.execute(
+-                    "DELETE FROM checkpoint_tails WHERE generation IN ("
+-                    "SELECT generation FROM checkpoints WHERE namespace=? "
+-                    "AND start_tokens=? AND prefix_hash=? AND tail=?)",
+-                    (prefix.namespace, prefix.start_tokens, prefix.prefix_hash, tail),
+-                )
+                 self._db.execute(
+                     "INSERT OR REPLACE INTO checkpoints VALUES (?,?,?,?,?,?,?,?,?)",
+                     (
+                         prefix.namespace,
+                         prefix.start_tokens,
+                         prefix.prefix_hash,
+-                        tail,
++                        json.dumps(prefix.tail_tokens).encode(),
+                         prefix.num_tokens,
+                         generation,
+                         manifest.world_size,
+@@ -329,22 +233,11 @@
+                     ),
+                 )
+                 self._db.execute(
+-                    "INSERT OR REPLACE INTO checkpoint_tails VALUES (?,?,?,?,?)",
+-                    (
+-                        generation,
+-                        prefix.namespace,
+-                        prefix.start_tokens,
+-                        prefix.prefix_hash,
+-                        _prefix_hashes(prefix.tail_tokens)[-1],
+-                    ),
++                    "DELETE FROM checkpoints WHERE generation IN ("
++                    "SELECT generation FROM checkpoints ORDER BY access_order DESC "
++                    "LIMIT -1 OFFSET ?)",
++                    (self._max_entries,),
+                 )
+-                for table in ("checkpoint_tails", "checkpoints"):
+-                    self._db.execute(
+-                        f"DELETE FROM {table} WHERE generation IN ("
+-                        "SELECT generation FROM checkpoints "
+-                        "ORDER BY access_order DESC LIMIT -1 OFFSET ?)",
+-                        (self._max_entries,),
+-                    )
+             del self._pending[generation]
+             return True
+ 
+@@ -391,21 +284,29 @@
+             ):
+                 if best is not None and query.num_tokens <= best.prefix.num_tokens:
+                     break
+-                row = self._db.execute(
+-                    f"{_CANDIDATES} ORDER BY c.num_tokens DESC LIMIT 1",
+-                    _query_parameters(query),
+-                ).fetchone()
+-                if row is None:
+-                    continue
+-                tail_blob, generation, world_size, payload = row
+-                prefix = CheckpointPrefix(
+-                    query.namespace,
+-                    query.start_tokens,
+-                    query.prefix_hash,
+-                    tuple(json.loads(tail_blob)),
++                rows = self._db.execute(
++                    "SELECT tail,generation,world_size,payload FROM checkpoints "
++                    "WHERE namespace=? AND start_tokens=? AND prefix_hash=? "
++                    "AND num_tokens<=? ORDER BY num_tokens DESC",
++                    (
++                        query.namespace,
++                        query.start_tokens,
++                        query.prefix_hash,
++                        query.num_tokens,
++                    ),
+                 )
+-                if best is None or prefix.num_tokens > best.prefix.num_tokens:
+-                    best = CheckpointManifest(generation, prefix, world_size, payload)
++                for tail_blob, generation, world_size, payload in rows:
++                    tail = tuple(json.loads(tail_blob))
++                    if query.tail_tokens[: len(tail)] != tail:
++                        continue
++                    prefix = CheckpointPrefix(
++                        query.namespace, query.start_tokens, query.prefix_hash, tail
++                    )
++                    if best is None or prefix.num_tokens > best.prefix.num_tokens:
++                        best = CheckpointManifest(
++                            generation, prefix, world_size, payload
++                        )
++                    break
+             if best is not None:
+                 self._access_order += 1
+                 with self._db:
+@@ -415,60 +316,6 @@
+                     )
+             return best
+ 
+-    def get(self, generation: str) -> CheckpointManifest | None:
+-        """Return one published manifest by generation, without touching LRU."""
+-        with self._lock:
+-            row = self._db.execute(
+-                "SELECT namespace,start_tokens,prefix_hash,tail,world_size,payload "
+-                "FROM checkpoints WHERE generation=?",
+-                (generation,),
+-            ).fetchone()
+-        if row is None:
+-            return None
+-        namespace, start_tokens, prefix_hash, tail_blob, world_size, payload = row
+-        prefix = CheckpointPrefix(
+-            namespace, start_tokens, prefix_hash, tuple(json.loads(tail_blob))
+-        )
+-        return CheckpointManifest(generation, prefix, world_size, payload)
+-
+-    def ancestors(
+-        self, prefixes: tuple[CheckpointPrefix, ...], below_tokens: int
+-    ) -> list[CheckpointManifest]:
+-        """Return every published manifest that is a proper prefix of a sequence.
+-
+-        Args:
+-            prefixes: The sequence's hash-block roots, as for :meth:`find`.
+-            below_tokens: Only manifests shorter than this are returned.
+-
+-        Returns:
+-            Matching manifests, shortest first. Access order is unchanged.
+-
+-        Raises:
+-            ValueError: If the query mixes isolation namespaces.
+-        """
+-        if len({prefix.namespace for prefix in prefixes}) > 1:
+-            raise ValueError("checkpoint lookup cannot mix namespaces")
+-        found: list[CheckpointManifest] = []
+-        with self._lock:
+-            for query in prefixes:
+-                if query.start_tokens >= below_tokens:
+-                    continue
+-                rows = self._db.execute(
+-                    f"{_CANDIDATES} AND c.num_tokens<:below",
+-                    {**_query_parameters(query), "below": below_tokens},
+-                )
+-                for tail_blob, generation, world_size, payload in rows:
+-                    prefix = CheckpointPrefix(
+-                        query.namespace,
+-                        query.start_tokens,
+-                        query.prefix_hash,
+-                        tuple(json.loads(tail_blob)),
+-                    )
+-                    found.append(
+-                        CheckpointManifest(generation, prefix, world_size, payload)
+-                    )
+-        return sorted(found, key=lambda manifest: manifest.prefix.num_tokens)
+-
+     def abort(self, generation: str) -> None:
+         """Discard an unpublished generation after its payload writers drain.
+ 
+@@ -486,10 +333,9 @@
+                 Invalidating a replaced generation cannot remove its replacement.
+         """
+         with self._lock, self._db:
+-            for table in ("checkpoint_tails", "checkpoints"):
+-                self._db.execute(
+-                    f"DELETE FROM {table} WHERE generation=?", (generation,)
+-                )
++            self._db.execute(
++                "DELETE FROM checkpoints WHERE generation=?", (generation,)
++            )
+ 
+     def report_status(self) -> dict[str, int]:
+         """Return directory counts without asserting that payload pages are resident.
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lmcache/v1/multiprocess/checkpoint_storage.py b/lmcache/v1/multiprocess/checkpoint_storage.py
+--- a/lmcache/v1/multiprocess/checkpoint_storage.py	2026-09-24 14:03:11.000000000 -0400
++++ b/lmcache/v1/multiprocess/checkpoint_storage.py	2026-09-19 07:27:17.000000000 -0400
+@@ -7,26 +7,23 @@
+ """
+ 
+ # Standard
+-from dataclasses import dataclass, field
++from dataclasses import dataclass
+ from typing import TYPE_CHECKING
+ import hashlib
+ import json
+ import threading
+-import time
+ import uuid
+ 
+ # Third Party
+ import torch
+ 
+ # First Party
+-from lmcache.logging import init_logger
+ from lmcache.v1.distributed.admission import (
+     AdmissionAttempt,
+     AdmissionFailure,
+     reserve_with_eviction_backpressure,
+ )
+ from lmcache.v1.distributed.api import (
+-    RECURRENT_CHECKPOINT_MODEL_PREFIX,
+     MemoryLayoutDesc,
+     ObjectKey,
+     PrefetchHandle,
+@@ -42,8 +39,6 @@
+     from lmcache.v1.distributed.storage_manager import StorageManager
+     from lmcache.v1.memory_management import MemoryObj
+ 
+-logger = init_logger(__name__)
+-
+ 
+ @dataclass(frozen=True)
+ class CheckpointPageGroup:
+@@ -170,8 +165,8 @@
+                         json.dumps([manifest.generation, group.name, position]).encode()
+                     ).digest()
+                 ),
+-                f"{RECURRENT_CHECKPOINT_MODEL_PREFIX}"
+-                f"v{3 if group.content_keys else 2}-{namespaces[group_id]}",
++                f"recurrent-checkpoint-v{3 if group.content_keys else 2}-"
++                f"{namespaces[group_id]}",
+                 rank,
+                 group_id,
+             )
+@@ -219,7 +214,6 @@
+     handle: PrefetchHandle
+     slots: CheckpointSlots | None = None
+     cancelled: bool = False
+-    started: float = field(default_factory=time.monotonic)
+ 
+ 
+ class CheckpointPayloadStore:
+@@ -515,18 +509,6 @@
+                 del self._retrieves[lease_id]
+                 if not lease.cancelled:
+                     self._index.invalidate(lease.manifest.generation)
+-                logger.info(
+-                    "Checkpoint retrieve of %d tokens for rank %d %s after %.1f s: "
+-                    "%d of %d pages were readable",
+-                    lease.manifest.prefix.num_tokens,
+-                    lease.rank,
+-                    "was cancelled by the engine"
+-                    if lease.cancelled
+-                    else "missed; its checkpoint is no longer listed",
+-                    time.monotonic() - lease.started,
+-                    len(readable_keys),
+-                    len(lease.keys),
+-                )
+                 return False
+             try:
+                 keys, objects = self._storage.unsafe_read(lease.keys)
+@@ -567,9 +549,6 @@
+             if lease.slots is None:
+                 raise ValueError("checkpoint retrieval has not produced a read lease")
+             del self._retrieves[lease_id]
+-        # A completed restore proves reuse; reuse-admission store policies
+-        # store checkpoint pages to L2 only after such a report.
+-        self._storage.notify_keys_reused(lease.keys)
+         self._storage.finish_read_prefetched(lease.keys)
+ 
+     def cancel_retrieve(self, lease_id: str) -> None:
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lmcache/v1/multiprocess/checkpoint_transfer.py b/lmcache/v1/multiprocess/checkpoint_transfer.py
+--- a/lmcache/v1/multiprocess/checkpoint_transfer.py	2026-09-24 14:03:11.000000000 -0400
++++ b/lmcache/v1/multiprocess/checkpoint_transfer.py	2026-09-19 07:27:17.000000000 -0400
+@@ -10,7 +10,6 @@
+ import time
+ 
+ # First Party
+-from lmcache.logging import init_logger
+ from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
+ from lmcache.v1.multiprocess.checkpoint_index import CheckpointManifest
+ from lmcache.v1.multiprocess.mq import MessageQueueClient
+@@ -20,8 +19,6 @@
+     CheckpointLeaseResponse,
+ )
+ 
+-logger = init_logger(__name__)
+-
+ 
+ class UnsafeCheckpointCopyError(RuntimeError):
+     """A copy or SHM lease could not drain; its resources must remain owned.
+@@ -243,23 +240,13 @@
+         if not store:
+             # Poll in the background; the scheduler can continue serving other
+             # requests. A pending lookup owns no worker-visible byte slots yet.
+-            started = time.monotonic()
+-            deadline = started + self._rpc_timeout
++            deadline = time.monotonic() + self._rpc_timeout
+             cancelled = False
+             try:
+                 while lease.status == "pending":
+                     if not cancelled and (
+                         self._closing or time.monotonic() >= deadline
+                     ):
+-                        if not self._closing:
+-                            logger.warning(
+-                                "Checkpoint retrieve of %d tokens for rank %d is "
+-                                "still waiting for storage after %.0f s; cancelling "
+-                                "it, so the request recomputes its prompt",
+-                                job.manifest.prefix.num_tokens,
+-                                job.rank,
+-                                time.monotonic() - started,
+-                            )
+                         self._call(
+                             RequestType.CHECKPOINT_CANCEL_RETRIEVE, lease.lease_id
+                         )
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lmcache/v1/multiprocess/config.py b/lmcache/v1/multiprocess/config.py
+--- a/lmcache/v1/multiprocess/config.py	2026-09-24 14:03:11.000000000 -0400
++++ b/lmcache/v1/multiprocess/config.py	2026-09-19 07:27:17.000000000 -0400
+@@ -96,14 +96,6 @@
+     None keeps manifests in RAM. The parent directory must exist and be trusted.
+     Tensor payload durability is independently configured through L2 storage."""
+ 
+-    checkpoint_index_max_entries: int | None = None
+-    """Published checkpoint manifests kept by the directory before the least
+-    recently used are dropped. A dropped manifest cannot be restored even when
+-    its payload is still in L2, so this should cover L2's retained generations.
+-    None selects 65536 for a directory at ``checkpoint_index_path`` and 8192
+-    for a RAM-only directory, whose manifests live in server memory and whose
+-    payloads live only in L1."""
+-
+     script_allowed_imports: list[str] = field(default_factory=list)
+     """Modules that /run_script endpoint is allowed to import."""
+ 
+@@ -444,16 +436,6 @@
+         "directory must exist. Configure filesystem L2 separately for payloads.",
+     )
+     mp_group.add_argument(
+-        "--checkpoint-index-max-entries",
+-        type=int,
+-        default=None,
+-        help="Recurrent checkpoint manifests kept before the least recently "
+-        "used are dropped. A dropped manifest cannot be restored even when its "
+-        "payload is still in L2, so size this to cover L2's retained checkpoints. "
+-        "Default: 65536 with --checkpoint-index-path, 8192 for a RAM-only "
+-        "directory.",
+-    )
+-    mp_group.add_argument(
+         "--enable",
+         type=str,
+         nargs="*",
+@@ -506,7 +488,6 @@
+         p2p_config=parse_args_to_p2p_config(args),
+         shm_name=args.shm_name,
+         checkpoint_index_path=args.checkpoint_index_path,
+-        checkpoint_index_max_entries=args.checkpoint_index_max_entries,
+         script_allowed_imports=args.script_allowed_imports or [],
+         worker_reap_timeout_seconds=args.worker_reap_timeout_seconds,
+         worker_registration_grace_seconds=args.worker_registration_grace_seconds,
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lmcache/v1/multiprocess/modules/checkpoint.py b/lmcache/v1/multiprocess/modules/checkpoint.py
+--- a/lmcache/v1/multiprocess/modules/checkpoint.py	2026-09-24 14:03:11.000000000 -0400
++++ b/lmcache/v1/multiprocess/modules/checkpoint.py	2026-09-19 07:27:17.000000000 -0400
+@@ -2,15 +2,10 @@
+ """CPU-only SHM service for atomic recurrent checkpoint generations."""
+ 
+ # Standard
+-from collections import OrderedDict
+ from pathlib import Path
+-import json
+-import threading
+ 
+ # First Party
+-from lmcache.logging import init_logger
+ from lmcache.v1.distributed.admission import AdmissionFailure
+-from lmcache.v1.distributed.api import ObjectKey
+ from lmcache.v1.multiprocess.checkpoint_index import (
+     CheckpointIndex,
+     CheckpointManifest,
+@@ -19,7 +14,6 @@
+ from lmcache.v1.multiprocess.checkpoint_storage import (
+     CheckpointPayloadStore,
+     CheckpointSlots,
+-    checkpoint_object_keys,
+     checkpoint_page_groups,
+ )
+ from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
+@@ -30,36 +24,6 @@
+     CheckpointLeaseResponse,
+ )
+ 
+-logger = init_logger(__name__)
+-
+-# Checkpoints superseded per call, newest first. Older ones were handled by
+-# earlier turns or have long left the cache tiers.
+-_MAX_SUPERSEDED_ANCESTORS = 32
+-# Requests whose published generations are remembered for supersession.
+-_MAX_TRACKED_REQUESTS = 65536
+-# Default manifest capacity. A persistent directory should cover what L2
+-# retains; a RAM-only directory holds manifests in server memory (tens to
+-# hundreds of KiB each for long GLM prompts) while its payloads live only in
+-# L1, which holds far fewer checkpoints.
+-_PERSISTENT_INDEX_MAX_ENTRIES = 65536
+-_RAM_INDEX_MAX_ENTRIES = 8192
+-
+-
+-def _kind(manifest: CheckpointManifest) -> str | None:
+-    try:
+-        return json.loads(manifest.payload).get("kind")
+-    except (ValueError, AttributeError):
+-        return None
+-
+-
+-def _payload_keys(manifest: CheckpointManifest) -> list[ObjectKey]:
+-    return [
+-        key
+-        for rank in range(manifest.world_size)
+-        for group in checkpoint_object_keys(manifest, rank)
+-        for key in group
+-    ]
+-
+ 
+ def _ready(slots: CheckpointSlots) -> CheckpointLeaseResponse:
+     return CheckpointLeaseResponse(
+@@ -84,9 +48,6 @@
+             a RAM-only directory. Filesystem payloads alone do not imply a
+             durable manifest directory.
+         max_leases: Shared limit for pending rank stores and retrieves.
+-        index_max_entries: Published manifests kept before LRU removal, or
+-            None for 65536 with ``index_path`` and 8192 for a RAM-only
+-            directory.
+ 
+     Shutdown requires workers to finish or abort all submitted copy leases.
+     A timeout must not recycle SHM while a worker can still access its bytes.
+@@ -98,18 +59,11 @@
+         index_path: Path | None = None,
+         *,
+         max_leases: int = 1024,
+-        index_max_entries: int | None = None,
+     ) -> None:
+         if not ctx.shm_pool_info["shm_name"] or ctx.shm_pool_info["pool_size"] <= 0:
+             raise ValueError("Recurrent checkpoint transfers require an SHM pool")
+         self._ctx = ctx
+-        if index_max_entries is None:
+-            index_max_entries = (
+-                _PERSISTENT_INDEX_MAX_ENTRIES
+-                if index_path is not None
+-                else _RAM_INDEX_MAX_ENTRIES
+-            )
+-        self._index = CheckpointIndex(index_path, max_entries=index_max_entries)
++        self._index = CheckpointIndex(index_path)
+         self._payloads = CheckpointPayloadStore(
+             ctx.storage_manager, self._index, max_leases=max_leases
+         )
+@@ -119,10 +73,6 @@
+             pool_size=ctx.shm_pool_info["pool_size"],
+             durable_index=index_path is not None,
+         )
+-        # Generations each recent request published, and the reverse map.
+-        self._lineage_lock = threading.Lock()
+-        self._request_generations: OrderedDict[str, list[str]] = OrderedDict()
+-        self._generation_request: dict[str, str] = {}
+ 
+     @property
+     def context(self) -> MPCacheServerContext:
+@@ -141,7 +91,6 @@
+             (RequestType.CHECKPOINT_POLL_RETRIEVE, self.poll_retrieve),
+             (RequestType.CHECKPOINT_FINISH_RETRIEVE, self.finish_retrieve),
+             (RequestType.CHECKPOINT_CANCEL_RETRIEVE, self.cancel_retrieve),
+-            (RequestType.CHECKPOINT_SUPERSEDE, self.supersede),
+         )
+         return [
+             HandlerSpec(
+@@ -172,111 +121,8 @@
+         """Return the longest complete candidate for authenticated prefix roots.
+ 
+         A candidate is not a cache hit until all payload ranks restore it.
+-        Every rank's payload pages are refreshed in L1 and L2 eviction order:
+-        a resumed conversation is often served from the engine's own cache,
+-        so its pages are neither read nor rewritten, and its oldest pages,
+-        which every later checkpoint of the conversation needs, would
+-        otherwise keep the recency of their first write.
+-        """
+-        manifest = self._index.find(prefixes)
+-        if manifest is not None:
+-            try:
+-                keys = _payload_keys(manifest)
+-            except ValueError:
+-                # Retrieval rejects the same manifest and invalidates it.
+-                return manifest
+-            self._ctx.storage_manager.touch_keys(keys)
+-        return manifest
+-
+-    def supersede(
+-        self, prefixes: tuple[CheckpointPrefix, ...], generation: str, request: str
+-    ) -> int:
+-        """Mark the pages only superseded checkpoints still use.
+-
+-        Called after ``generation`` is published by ``request``, with the
+-        roots of the token sequence that produced it. Only a ``prompt``
+-        checkpoint supersedes: the complete prompt of a new request replaces
+-        every published shorter checkpoint of its sequence that an earlier
+-        request produced, together with the other checkpoints of those
+-        requests (a response endpoint that the chat template rewrote, a
+-        prefill tail). Checkpoints of the same request and ``instruction``
+-        checkpoints, which other conversations share, are kept. Pages the
+-        new checkpoint references are current again.
+-
+-        Superseded pages are evicted first and are never written to L2 on
+-        eviction. Their manifests stay listed, so a request that branches
+-        from an older turn can still restore one while its pages last.
+-
+-        Returns:
+-            Number of pages newly marked superseded.
+         """
+-        current = self._index.get(generation)
+-        if current is None or not prefixes:
+-            return 0
+-        if any(prefix.namespace != current.prefix.namespace for prefix in prefixes):
+-            raise ValueError("checkpoint supersession mixes namespaces")
+-        self._remember(request, generation)
+-        retention = self._ctx.storage_manager.checkpoint_retention
+-        current_keys = set(_payload_keys(current))
+-        retention.mark_current(current_keys)
+-        if _kind(current) != "prompt":
+-            return 0
+-        victims: dict[str, CheckpointManifest] = {}
+-        for ancestor in self._index.ancestors(prefixes, current.prefix.num_tokens):
+-            owner = self._request_of(ancestor.generation)
+-            if owner == request:
+-                continue
+-            victims[ancestor.generation] = ancestor
+-            for sibling in self._generations_of(owner):
+-                if sibling not in victims and sibling != generation:
+-                    manifest = self._index.get(sibling)
+-                    if manifest is not None:
+-                        victims[sibling] = manifest
+-        selected = sorted(
+-            (
+-                victim
+-                for victim in victims.values()
+-                if _kind(victim) != "instruction"
+-                and victim.prefix.namespace == current.prefix.namespace
+-                and not retention.is_superseded_generation(victim.generation)
+-            ),
+-            key=lambda victim: victim.prefix.num_tokens,
+-        )[-_MAX_SUPERSEDED_ANCESTORS:]
+-        marked = 0
+-        for victim in selected:
+-            unique = [key for key in _payload_keys(victim) if key not in current_keys]
+-            marked += retention.mark_superseded(victim.generation, unique)
+-        if selected:
+-            logger.debug(
+-                "Prompt checkpoint of %d tokens superseded %d older checkpoints "
+-                "(%d pages)",
+-                current.prefix.num_tokens,
+-                len(selected),
+-                marked,
+-            )
+-        return marked
+-
+-    def _remember(self, request: str, generation: str) -> None:
+-        with self._lineage_lock:
+-            generations = self._request_generations.setdefault(request, [])
+-            self._request_generations.move_to_end(request)
+-            if generation not in generations:
+-                generations.append(generation)
+-                self._generation_request[generation] = request
+-            while len(self._request_generations) > _MAX_TRACKED_REQUESTS:
+-                _, forgotten = self._request_generations.popitem(last=False)
+-                for old in forgotten:
+-                    self._generation_request.pop(old, None)
+-
+-    def _request_of(self, generation: str) -> str | None:
+-        with self._lineage_lock:
+-            return self._generation_request.get(generation)
+-
+-    def _generations_of(self, request: str | None) -> list[str]:
+-        if request is None:
+-            return []
+-        with self._lineage_lock:
+-            return list(self._request_generations.get(request, ()))
++        return self._index.find(prefixes)
+ 
+     def abort(self, generation: str) -> bool:
+         """Prevent publication; rank copy leases still require explicit finish."""
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lmcache/v1/multiprocess/mq.py b/lmcache/v1/multiprocess/mq.py
+--- a/lmcache/v1/multiprocess/mq.py	2026-09-24 14:03:11.000000000 -0400
++++ b/lmcache/v1/multiprocess/mq.py	2026-09-19 07:27:17.000000000 -0400
+@@ -692,22 +692,13 @@
+             # Process the incoming requests
+             if inbound_state and inbound_state & zmq.POLLIN:
+                 msg = self.socket.recv_multipart()
+-                # This thread serves every client, so a malformed peer must be
+-                # dropped here rather than terminate the polling loop.
+-                if len(msg) < 3:
+-                    logger.error(
+-                        "Malformed request: expected at least 3 message parts "
+-                        "[identity, request_uid, request_type, *payloads], got %d",
+-                        len(msg),
+-                    )
+-                    continue
++                assert len(msg) >= 3, (
++                    "Expected at least 3 message parts "
++                    "[identity, request_uid, request_type, *payloads]"
++                )
+ 
+                 identity, b_request_uid, b_request_type, *payloads = msg
+-                try:
+-                    request_type = msgspec_decode(b_request_type, cls=RequestType)
+-                except Exception:
+-                    logger.exception("Malformed request: invalid request type")
+-                    continue
++                request_type = msgspec_decode(b_request_type, cls=RequestType)
+ 
+                 if handler_entry := self.handlers.get(request_type):
+                     try:
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lmcache/v1/multiprocess/protocols/base.py b/lmcache/v1/multiprocess/protocols/base.py
+--- a/lmcache/v1/multiprocess/protocols/base.py	2026-09-24 14:03:11.000000000 -0400
++++ b/lmcache/v1/multiprocess/protocols/base.py	2026-09-19 07:27:17.000000000 -0400
+@@ -103,7 +103,6 @@
+     CHECKPOINT_POLL_RETRIEVE = enum.auto()
+     CHECKPOINT_FINISH_RETRIEVE = enum.auto()
+     CHECKPOINT_CANCEL_RETRIEVE = enum.auto()
+-    CHECKPOINT_SUPERSEDE = enum.auto()
+ 
+ 
+ @dataclass
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lmcache/v1/multiprocess/protocols/checkpoint.py b/lmcache/v1/multiprocess/protocols/checkpoint.py
+--- a/lmcache/v1/multiprocess/protocols/checkpoint.py	2026-09-24 14:03:11.000000000 -0400
++++ b/lmcache/v1/multiprocess/protocols/checkpoint.py	2026-09-19 07:27:17.000000000 -0400
+@@ -56,7 +56,6 @@
+     "CHECKPOINT_POLL_RETRIEVE",
+     "CHECKPOINT_FINISH_RETRIEVE",
+     "CHECKPOINT_CANCEL_RETRIEVE",
+-    "CHECKPOINT_SUPERSEDE",
+ ]
+ 
+ 
+@@ -84,9 +83,4 @@
+         ),
+         "CHECKPOINT_FINISH_RETRIEVE": ProtocolDefinition([str], bool, blocking),
+         "CHECKPOINT_CANCEL_RETRIEVE": ProtocolDefinition([str], bool, blocking),
+-        # Roots of the producing sequence and the new generation; returns the
+-        # number of pages newly marked superseded.
+-        "CHECKPOINT_SUPERSEDE": ProtocolDefinition(
+-            [tuple[CheckpointPrefix, ...], str, str], int, blocking
+-        ),
+     }
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lmcache/v1/multiprocess/server.py b/lmcache/v1/multiprocess/server.py
+--- a/lmcache/v1/multiprocess/server.py	2026-09-24 14:03:11.000000000 -0400
++++ b/lmcache/v1/multiprocess/server.py	2026-09-19 07:27:17.000000000 -0400
+@@ -287,7 +287,6 @@
+                 Path(mp_config.checkpoint_index_path)
+                 if mp_config.checkpoint_index_path is not None
+                 else None,
+-                index_max_entries=mp_config.checkpoint_index_max_entries,
+             )
+         )
+ 
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lmcache/v1/multiprocess/transfer_context/async_engine_driven.py b/lmcache/v1/multiprocess/transfer_context/async_engine_driven.py
+--- a/lmcache/v1/multiprocess/transfer_context/async_engine_driven.py	2026-09-24 14:03:11.000000000 -0400
++++ b/lmcache/v1/multiprocess/transfer_context/async_engine_driven.py	2026-09-19 07:27:17.000000000 -0400
+@@ -6,7 +6,6 @@
+ from queue import Queue
+ from typing import Any
+ import threading
+-import time
+ 
+ # Third Party
+ import torch
+@@ -27,11 +26,6 @@
+ 
+ logger = init_logger(__name__)
+ 
+-# While a preemption flush waits for store gathers to launch, warn this often.
+-# The wait itself stays unbounded: the forward pass must not overwrite blocks
+-# that a gather has yet to read.
+-_FLUSH_WARNING_INTERVAL_SECONDS = 10.0
+-
+ # Number of background threads used to run commit (CPU->server) work for the
+ # async engine-driven store path. >1 so that a slow gather for one store does
+ # not block the commit of another store whose gather already finished.
+@@ -392,15 +386,8 @@
+         """
+         with self._inflight_lock:
+             pending = list(self._pending_stores)
+-        started = time.monotonic()
+         for ev in pending:
+-            while not ev.wait(timeout=_FLUSH_WARNING_INTERVAL_SECONDS):
+-                logger.warning(
+-                    "Preemption flush has waited %.0f s for %d LMCache store "
+-                    "gathers to launch; the next forward pass waits until they do",
+-                    time.monotonic() - started,
+-                    len(pending),
+-                )
++            ev.wait()
+         self._sync_gather_events(suppress_errors=False)
+ 
+     def close(self) -> None:
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lmcache/_version.py b/lmcache/_version.py
+--- a/lmcache/_version.py	2026-09-24 14:03:11.000000000 -0400
++++ b/lmcache/_version.py	2026-09-19 07:27:17.000000000 -0400
+@@ -18,7 +18,7 @@
+ commit_id: str | None
+ __commit_id__: str | None
+ 
+-__version__ = version = '0.5.3.dev398+lil.cu134.gd22a2a535601'
+-__version_tuple__ = version_tuple = (0, 5, 3, 'dev398', 'lil.cu134.gd22a2a535601')
++__version__ = version = '0.5.3.dev365+lil.cu134.g688bee14e157'
++__version_tuple__ = version_tuple = (0, 5, 3, 'dev365', 'lil.cu134.g688bee14e157')
+ 
+ __commit_id__ = commit_id = None

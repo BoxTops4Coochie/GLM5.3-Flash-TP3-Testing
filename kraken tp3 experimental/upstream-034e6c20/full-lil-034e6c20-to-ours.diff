@@ -1,0 +1,949 @@
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lil/runtime/cache.py b/lil/runtime/cache.py
+--- a/lil/runtime/cache.py	2026-09-24 14:03:23.000000000 -0400
++++ b/lil/runtime/cache.py	2026-09-19 07:27:33.000000000 -0400
+@@ -5,25 +5,12 @@
+ import hashlib
+ import importlib.util
+ import json
+-import os
+ import re
+-import subprocess
+-import sys
+ from dataclasses import dataclass, field
+ from pathlib import Path
+ 
+ from runtime import ConfigError
+ 
+-# LMCACHE_L2_CHECKPOINT_WRITES values that select a checkpoint store policy.
+-CHECKPOINT_STORE_POLICIES = {
+-    "on-reuse": "checkpoint_on_reuse",
+-    "on-evict": "checkpoint_on_evict",
+-}
+-# Seconds LMCache may spend writing RAM-only checkpoints to L2 at shutdown
+-# with on-evict, and the extra time the supervisor waits before SIGKILL.
+-CHECKPOINT_SHUTDOWN_FLUSH_SECONDS = 30
+-STOP_GRACE_SECONDS = 10
+-
+ 
+ @dataclass
+ class CacheService:
+@@ -36,8 +23,6 @@
+     directories: list[str] = field(default_factory=list)
+     identity_required: bool = False
+     namespace: str = ""
+-    # Seconds between SIGTERM and SIGKILL when the container stops.
+-    stop_grace: float = STOP_GRACE_SECONDS
+ 
+ 
+ def configure(values, origins, environment, env_origins, identifier, runtime_identity):
+@@ -68,27 +53,12 @@
+             f"{identifier}: external cache is unsupported by this profile; Engram/PLE placement is independent"
+         )
+     if cache_mode == "native":
+-        if not (glm or qwen):
++        if not glm:
+             raise ConfigError(
+-                "Native KV offload is implemented only by the GLM and Qwen profiles"
++                "Native KV offload is implemented only by the GLM profile"
+             )
+         if values["cache-native-gib"] <= 0:
+             raise ConfigError("cache-native-gib must be positive")
+-        if qwen:
+-            if values["decode-context-parallel-size"] != 1:
+-                raise ConfigError("Qwen native CPU cache requires DCP=1")
+-            if values.get("recurrent-checkpoint-policy", "auto") not in {
+-                "auto",
+-                "aligned",
+-            }:
+-                raise ConfigError("Qwen native CPU cache requires aligned checkpoints")
+-            if environment.get("VLLM_USE_SIMPLE_KV_OFFLOAD", "1") != "1":
+-                raise ConfigError(
+-                    "Qwen native CPU cache requires VLLM_USE_SIMPLE_KV_OFFLOAD=1; "
+-                    "the generic OffloadingConnector is not supported"
+-                )
+-            export("VLLM_USE_SIMPLE_KV_OFFLOAD", "1")
+-            put("recurrent-checkpoint-policy", "aligned")
+         put("kv-offloading-backend", "native")
+         put("kv-offloading-size", values["cache-native-gib"])
+         put("enable-cumem-allocator", True)
+@@ -217,6 +187,8 @@
+             raise ConfigError(
+                 "Qwen external cache requires request-boundary checkpoints"
+             )
++        if values["decode-context-parallel-size"] != 1:
++            raise ConfigError("Qwen external cache requires DCP1")
+         if values.get("prefix-cache-retention-interval", 0) not in {0, "auto"}:
+             raise ConfigError(
+                 "Qwen external cache uses exact boundaries, not periodic retention"
+@@ -311,31 +283,8 @@
+         values["cache-prefetch-policy"],
+     ]
+     argv += ["--no-l1-use-lazy", "--shm-name", shm] if engine else ["--l1-use-lazy"]
+-    # A request-boundary checkpoint carries the complete recurrent state and
+-    # the next turn of the same conversation supersedes it. on-reuse keeps
+-    # new checkpoints in RAM until a restore proves them useful; on-evict
+-    # writes the current checkpoint of a conversation when it leaves RAM and
+-    # at shutdown, and never writes superseded ones.
+-    store_policy = "default"
+-    checkpoint_writes = values["cache-l2-checkpoint-writes"]
+-    if values["cache-l2-enabled"] and checkpoint_writes in CHECKPOINT_STORE_POLICIES:
+-        if not semantic:
+-            raise ConfigError(
+-                f"LMCACHE_L2_CHECKPOINT_WRITES={checkpoint_writes} applies only "
+-                "to request-boundary checkpoints"
+-            )
+-        store_policy = CHECKPOINT_STORE_POLICIES[checkpoint_writes]
+-    stop_grace = STOP_GRACE_SECONDS
+-    if store_policy == "checkpoint_on_evict":
+-        argv += [
+-            "--checkpoint-shutdown-flush-seconds",
+-            str(CHECKPOINT_SHUTDOWN_FLUSH_SECONDS),
+-        ]
+-        stop_grace += CHECKPOINT_SHUTDOWN_FLUSH_SECONDS
+     if glm:
+         argv += ["--hash-algorithm", "blake3", "--max-workers", "8"]
+-        if store_policy != "default":
+-            argv += ["--l2-store-policy", store_policy]
+     else:
+         argv += [
+             "--l1-write-ttl-seconds",
+@@ -347,7 +296,7 @@
+             "--eviction-ratio",
+             "0.10",
+             "--l2-store-policy",
+-            store_policy,
++            "default",
+             "--worker-reap-timeout-seconds",
+             "120",
+             "--worker-registration-grace-seconds",
+@@ -411,10 +360,10 @@
+             "type": "fs_native",
+             "base_path": namespace,
+             "num_workers": values["cache-l2-workers"],
+-            "use_odirect": values["cache-l2-odirect"],
++            "use_odirect": False,
+             "max_capacity_gb": values["cache-l2-gib"],
+         }
+-        if glm or qwen:
++        if glm:
+             l2["eviction"] = {
+                 "eviction_policy": "LRU",
+                 "trigger_watermark": 0.8,
+@@ -446,39 +395,7 @@
+         directories,
+         semantic or values["cache-l2-enabled"],
+         namespace,
+-        stop_grace,
+-    )
+-
+-
+-# Asked in a GPU-free child so the supervisor keeps no Torch state. Without
+-# vLLM #864 the QSA backend refuses KV connectors while nothing enforces it,
+-# and DCP>1 would silently fall back to KV chunks without recurrent state.
+-_QSA_ATOMIC_TRANSFER_PROBE = (
+-    "from vllm.models.qwen4_exp.nvidia.b12x_qsa import Qwen4ExpQSABackend as B\n"
+-    "raise SystemExit(0 if B.supports_kv_connector() else 3)"
+-)
+-
+-
+-def verify_installed_transfer(plan, run=subprocess.run) -> None:
+-    """Refuse Qwen DCP>1 external caches unless vLLM keeps QSA checkpoints atomic."""
+-    service = plan.cache_service
+-    if (
+-        not service
+-        or plan.profile != "qwen38-flash-next"
+-        or plan.values["decode-context-parallel-size"] == 1
+-    ):
+-        return
+-    result = run(
+-        [sys.executable, "-c", _QSA_ATOMIC_TRANSFER_PROBE],
+-        env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},
+-        capture_output=True,
+-        text=True,
+     )
+-    if result.returncode != 0:
+-        raise ConfigError(
+-            "Qwen external cache with DCP>1 requires a vLLM build with atomic QSA "
+-            "checkpoint transfer; use DCP1 or an image that includes it"
+-        )
+ 
+ 
+ def resolve_identity(plan, contract, helper: Path):
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lil/runtime/checkpoint_identity.py b/lil/runtime/checkpoint_identity.py
+--- a/lil/runtime/checkpoint_identity.py	2026-09-24 14:03:23.000000000 -0400
++++ b/lil/runtime/checkpoint_identity.py	2026-09-19 07:27:33.000000000 -0400
+@@ -13,133 +13,16 @@
+ import hashlib
+ import json
+ import os
+-import sys
+-import tempfile
+-from concurrent.futures import ThreadPoolExecutor
+ from pathlib import Path
+ 
+ 
+-_IDENTITY_CACHE_FORMAT = "local-checkpoint-identity/v1"
+-# Large sequential reads on several files at once: hashing is IO-bound, and
+-# hashlib releases the GIL while it digests a buffer.
+-_READ_BYTES = 16 * 1024 * 1024
+-_HASH_WORKERS = 8
+-def _file_sha256(path: Path) -> str:
+-    digest = hashlib.sha256()
+-    buffer = bytearray(_READ_BYTES)
+-    view = memoryview(buffer)
+-    with path.open("rb", buffering=0) as stream:
+-        while count := stream.readinto(buffer):
+-            digest.update(view[:count])
+-    return digest.hexdigest()
+-
+-
+-def _content_digests(paths: list[Path]) -> list[str]:
+-    """SHA-256 of each file's content, several files at a time.
+-
+-    Every byte is read: a Hugging Face blob name is not trusted, because a
+-    blob edited in place keeps its name.
+-    """
+-    size = sum(path.stat().st_size for path in paths)
+-    if size >= 1024**3:
+-        print(
+-            f"[lil-serve] Hashing {size / 1024**3:.1f} GiB of checkpoint files "
+-            "once to identify the model; later starts reuse the result from "
+-            "/cache/checkpoint-identities",
+-            file=sys.stderr,
+-            flush=True,
+-        )
+-    with ThreadPoolExecutor(min(_HASH_WORKERS, len(paths))) as pool:
+-        return list(pool.map(_file_sha256, paths))
+-
+-
+-def _identity_cache_path(directory: Path) -> Path | None:
+-    """Use the persistent runtime cache when one is available and writable."""
+-    configured = os.environ.get("LIL_CHECKPOINT_IDENTITY_CACHE_DIR")
+-    root = Path(configured) if configured else Path("/cache/checkpoint-identities")
+-    if root.resolve() == directory:
+-        return None
+-    try:
+-        root.mkdir(parents=True, exist_ok=True)
+-    except OSError:
+-        return None
+-    key = hashlib.sha256(os.fsencode(directory)).hexdigest()
+-    return root / f"{key}.json"
+-
+-
+-def _cached_digests(
+-    cache_path: Path | None, directory: Path, metadata: list[list[object]]
+-) -> list[str] | None:
+-    if cache_path is None:
+-        return None
+-    try:
+-        cached = json.loads(cache_path.read_text())
+-    except (OSError, ValueError):
+-        return None
+-    if (
+-        not isinstance(cached, dict)
+-        or cached.get("format") != _IDENTITY_CACHE_FORMAT
+-        or cached.get("directory") != str(directory)
+-        or cached.get("metadata") != metadata
+-    ):
+-        return None
+-    digests = cached.get("digests")
+-    if not isinstance(digests, list) or len(digests) != len(metadata):
+-        return None
+-    if any(
+-        not isinstance(digest, str)
+-        or len(digest) != 64
+-        or any(character not in "0123456789abcdef" for character in digest)
+-        for digest in digests
+-    ):
+-        return None
+-    return digests
+-
+-
+-def _write_cached_digests(
+-    cache_path: Path | None,
+-    directory: Path,
+-    metadata: list[list[object]],
+-    digests: list[str],
+-) -> None:
+-    if cache_path is None:
+-        return
+-    payload = {
+-        "format": _IDENTITY_CACHE_FORMAT,
+-        "directory": str(directory),
+-        "metadata": metadata,
+-        "digests": digests,
+-    }
+-    temporary_path: str | None = None
+-    try:
+-        with tempfile.NamedTemporaryFile(
+-            mode="w", dir=cache_path.parent, prefix="identity-", delete=False
+-        ) as stream:
+-            temporary_path = stream.name
+-            json.dump(payload, stream, separators=(",", ":"))
+-        os.replace(temporary_path, cache_path)
+-        temporary_path = None
+-    except OSError:
+-        # Cache persistence is an optimization; identity verification still
+-        # succeeds by hashing the checkpoint on the next process start.
+-        pass
+-    finally:
+-        if temporary_path is not None:
+-            try:
+-                os.unlink(temporary_path)
+-            except OSError:
+-                pass
+-
+-
+ def local_checkpoint_identity(directory: Path) -> str:
+-    """Identify local safetensors weights and model/tokenizer configuration.
++    """Hash local safetensors weights and model/tokenizer configuration.
+ 
+-    JSON, Jinja and tokenizer assets are included conservatively. File digests
+-    are reused only when the selected file list and metadata still match a
+-    previously verified checkpoint. Reading does not modify the checkpoint. A
+-    checkpoint that changes during this operation is rejected; callers must
+-    also keep it immutable during model loading and serving. Missing weights
+-    or unsupported weight formats are errors.
++    JSON, Jinja and tokenizer assets are included conservatively. Reading does
++    not modify the checkpoint. A checkpoint that changes during this operation
++    is rejected; callers must also keep it immutable during model loading and
++    serving. Missing weights or unsupported weight formats are errors.
+     """
+     directory = directory.resolve(strict=True)
+     if not directory.is_dir():
+@@ -176,23 +59,16 @@
+         )
+ 
+     before = {path: path.stat() for path in selected}
+-    metadata = [[path.name, list(content_metadata(before[path]))] for path in selected]
+-    cache_path = _identity_cache_path(directory)
+-    digests = _cached_digests(cache_path, directory, metadata)
+-    cache_hit = digests is not None
+-    if digests is None:
+-        digests = _content_digests(selected)
++    manifest: list[tuple[str, int, str]] = []
++    for path in selected:
++        with path.open("rb") as stream:
++            digest = hashlib.file_digest(stream, "sha256").hexdigest()
++        manifest.append((path.name, before[path].st_size, digest))
+     if files() != selected or any(
+         content_metadata(path.stat()) != content_metadata(before[path])
+         for path in selected
+     ):
+         raise ValueError("Checkpoint files changed while their identity was computed")
+-    if not cache_hit:
+-        _write_cached_digests(cache_path, directory, metadata, digests)
+-    manifest = [
+-        (path.name, before[path].st_size, digest)
+-        for path, digest in zip(selected, digests)
+-    ]
+     encoded = json.dumps(manifest, separators=(",", ":")).encode()
+     return hashlib.sha256(b"glm53-local-checkpoint-v1\0" + encoded).hexdigest()
+ 
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lil/runtime/hardware/rtx-pro-6000-pcie.yaml b/lil/runtime/hardware/rtx-pro-6000-pcie.yaml
+--- a/lil/runtime/hardware/rtx-pro-6000-pcie.yaml	2026-09-24 14:03:23.000000000 -0400
++++ b/lil/runtime/hardware/rtx-pro-6000-pcie.yaml	2026-09-19 07:27:33.000000000 -0400
+@@ -28,4 +28,3 @@
+     VLLM_PCIE_ONESHOT_ALLREDUCE_MAX_SIZE: 64KB
+   qwen38-flash-next:
+     NCCL_CUMEM_ENABLE: "0"
+-    VLLM_QWEN3_8_FLASH_NEXT_HC_TP: "0"
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lil/runtime/image-contract.json b/lil/runtime/image-contract.json
+--- a/lil/runtime/image-contract.json	2026-09-24 14:03:23.000000000 -0400
++++ b/lil/runtime/image-contract.json	2026-09-19 07:27:33.000000000 -0400
+@@ -5,36 +5,36 @@
+   "environment_contract": "model-neutral",
+   "files": {
+     "__init__.py": "133df69ebfb3382112c015ddcefdec1bf890890607a3b0017edd5cb7fe45884b",
+-    "cache.py": "b39b346a8772242ce7a8507869d6a68efe0f2acb84cf7df0ee8bf11334a337aa",
+-    "checkpoint_identity.py": "aaa1271e72214e29383f20f72149ea56864af5c23ceb58f389793de257340688",
++    "cache.py": "9f6129596a41fcea8996558de4af44830c80f1cc807a1d07da850ab7c4f57af7",
++    "checkpoint_identity.py": "b5d259c38bf844d4da6a1a9d905a0e8983f586a8dc550b138d8cdf070c02f499",
+     "entrypoint.py": "9a72dc1272d2534e1fac6f1d4953d955f0f2e878c15c04fffba73bd2560c81c2",
+     "explicit.py": "398ea55395baf4edc1861c64f47b4b91d5e998a2eb58b046de7d06d75988a6d8",
+     "generate.py": "83ae999d214e2c01ab4e96e1fcc120dabb2ee82250feb5ab1d0d84fde563a71d",
+     "hardware/native.yaml": "53b32d99329dfaa67830833f499e2123aa59dc14ee0760154e1fff53766b098c",
+-    "hardware/rtx-pro-6000-pcie.yaml": "46ffcbe07b4adc70fd975fdb8876d7825869bb416128ebe508e97672316a3045",
++    "hardware/rtx-pro-6000-pcie.yaml": "cf9329f6c57b5022de6a208012c1d65ea2187b738f3892d2f2ef1dc922850550",
+     "image_install.py": "1051ee625512dbadc9bd1c11147a980d4b6c2aa9da573ff38ba9c8ca6c3bbb31",
+     "install.sh": "5a6d9f80991d8cf844620db5695960ff1a4ad5f4e0c37cab9a50f49a2f008c86",
+-    "launcher.py": "ee5c383a05d8c3826919fae7a816b8f58bb461a3f0a003cd2825dce820f57bec",
++    "launcher.py": "dd5dd64303e30295b789b24e00f4e59258b4570a414d1f664604dfbc4e2cb54f",
+     "lil-entrypoint": "9962e707374a68532c041ae97e90f2a735756c5f1dd874aa755987306ae3aa84",
+     "lil-serve": "1b4c2821c4fe05262d4f03145d2dff1a9e41aedf5b72a00d7400bd8930faaddf",
+     "native_cli_contract.py": "477846900793bd0c3a1e9c03ea090fbf4737164527ea37e2aba87b5551e3551a",
+-    "options.yaml": "747805ac419af8e2340b01214880b2acb3b50ea7501cdae368a8c2e7b4b15678",
++    "options.yaml": "441266e35ae4f64eae19602c57d663b7fd60fbf251ddc8d18d78c4355f58489d",
+     "packaging.py": "148eced756b7a351d95199164f18765dcf28c44203b08e75fa8f3d7e40af3491",
+     "platform-environment.json": "14befb774e5cb50785e501665a4e791c31f2c9019b3de302a1abfa3385f5833a",
+-    "presets.yaml": "b11a487a24981898c76511fbfbc1b137d7a8eb5061c7153602cbc69826d20454",
+-    "profiles/common.yaml": "07a3325741431a9d5646b0b646744ebbc130dadcaa432de190cb85cfee471eff",
+-    "profiles/ds4-flash.yaml": "3b3b30a05380f7380a08222ac04d65b55b4db01bb9634b6d8fbe02e1a100c0e4",
+-    "profiles/ds4-vision.yaml": "dbff04dcf054d09e9c76383c96c04628b8622b05d0294b0a2ceb43575de08829",
+-    "profiles/ds41-flash.yaml": "7ca559840ba5d8eebc4d676db9e5ba41c22aff4ba17861d35a121da70646c822",
+-    "profiles/glm53-flash.yaml": "73e393d91f1b94df4e39ce157f4d59fdce46fac91e3e6048b05b6340913247c6",
+-    "profiles/qwen38-flash-next.yaml": "d355265197386df75d7b4bc1cee7145175fee2b3dd1b7b9e6d3c9d45f10b82ac",
++    "presets.yaml": "5c3bb6fce531ae347c6353aaafcf9c55eb047fe91061ce2235b76e0602b9b77c",
++    "profiles/common.yaml": "5f0fe9fb16e2d8e3dbe1f22a45cf2092eb64f1ded11937b0d30087dfc84e9c92",
++    "profiles/ds4-flash.yaml": "91b35f0805df6770d1b73554a0446f8afa956ed619a5abff2b8e0fee314d4060",
++    "profiles/ds4-vision.yaml": "274de4389aa91e2a56a5488e8cad0fd7b547dfa3323aedfaa1921e50d8a2214b",
++    "profiles/ds41-flash.yaml": "7792cc89b14a29e43dea7bdb0980eaa197f3ae50cfd1f1bec7f11d247b823a63",
++    "profiles/glm53-flash.yaml": "777cc759f8050265b10c72c30b4372c1b5e40bb9801cb5d2a90d8af980f0c146",
++    "profiles/qwen38-flash-next.yaml": "62b59a889c9d44f567a753c59acab3ccf3c1d46421da373ca35f9368d5003aa1",
+     "requirements.txt": "161995974eda0fee3d9d6ad71605e6404135c9f3b24d85cb3b74b7958e591a32",
+     "schema.json": "0c328f1ad80a4d7817cb57e6c40514fc08d079c4a07e6ec3b02ed2130b5b3e88",
+-    "supervisor.py": "1c6e3b1581b9e07e53a38707fe27b7f671732fd51a39507c0350811687729c83"
++    "supervisor.py": "488a352ddfe24535153e87a913f838fd5a1c173e0ff55bda5c35a723212599f2"
+   },
+   "foundation_image_id": "sha256:d8a355e5c2aceee3ce425e04168291fc12df28eb0af2261a800b9b1a53884bae",
+   "qualified_serving_receipts": [],
+-  "runtime_lock_sha256": "ad37bdb17949846174cf39f843f596434224653469cec927ca34deade7becf14",
++  "runtime_lock_sha256": "538e4b38d30963e2d16c0fba7fbf32a3417189b48afc78026c56f46820205ba2",
+   "schema_version": 1,
+   "status": "implemented"
+ }
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lil/runtime/launcher.py b/lil/runtime/launcher.py
+--- a/lil/runtime/launcher.py	2026-09-24 14:03:23.000000000 -0400
++++ b/lil/runtime/launcher.py	2026-09-19 07:27:33.000000000 -0400
+@@ -31,15 +31,6 @@
+     "B12X_COMPILE_CACHE_DIR": "b12x/compile",
+     "SPARKINFER_COMPILE_CACHE_DIR": "b12x/compile",
+     "CUDA_CACHE_PATH": "cuda",
+-    # These default to the home directory, which a recreated container loses.
+-    "TILELANG_CACHE_DIR": "tilelang",
+-    "TVM_FFI_CACHE_DIR": "tvm-ffi",
+-    "TVM_CACHE_DIR": "tvm",
+-    "FLASHINFER_WORKSPACE_BASE": "flashinfer",
+-    "FLASH_ATTENTION_CUTE_DSL_CACHE_DIR": "flash-attention-cute-dsl",
+-    "TORCH_EXTENSIONS_DIR": "torch-extensions",
+-    "NUMBA_CACHE_DIR": "numba",
+-    "CUPY_CACHE_DIR": "cupy",
+ }
+ NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+ SECRET = re.compile(
+@@ -549,10 +540,6 @@
+                     "TILELANG_",
+                     "TVM_",
+                     "TORCH_EXTENSIONS_",
+-                    "FLASHINFER_",
+-                    "FLASH_ATTENTION_",
+-                    "NUMBA_",
+-                    "CUPY_",
+                     "INSTANTTENSOR_",
+                     "SAFETENSORS_",
+                 )
+@@ -612,46 +599,6 @@
+             "remote code follows selected checkpoint",
+         )
+ 
+-    if identifier == "qwen38-flash-next":
+-        # B12X QSA shards compressed KV across DCP ranks in groups of four
+-        # tokens and refuses vLLM's default interleave of one, so every
+-        # DCP > 1 deployment needs this unless the operator chose a value.
+-        if values["decode-context-parallel-size"] > 1:
+-            for key in ("cp-kv-cache-interleave-size", "dcp-kv-cache-interleave-size"):
+-                if key not in values or origins[key].startswith(
+-                    ("common:", "model:", "hardware:")
+-                ):
+-                    derive(key, 4, "QSA DCP interleave")
+-        context_length = values["max-model-len"]
+-        base_context_length = 262144
+-        if context_length > base_context_length and "hf-overrides" not in values:
+-            if context_length > 1048576:
+-                raise ConfigError(
+-                    "Qwen3.8 Flash Next contexts above 1048576 tokens require "
+-                    "an explicit HF_OVERRIDES configuration"
+-                )
+-            # The checkpoint advertises 262144 positions. Extend its text
+-            # config before vLLM constructs both target and MTP draft models.
+-            factor = 2 if context_length <= 524288 else 4
+-            derive(
+-                "hf-overrides",
+-                {
+-                    "text_config": {
+-                        "max_position_embeddings": context_length,
+-                        "rope_parameters": {
+-                            "mrope_interleaved": True,
+-                            "mrope_section": [11, 11, 10],
+-                            "partial_rotary_factor": 0.25,
+-                            "rope_theta": 10000000,
+-                            "rope_type": "yarn",
+-                            "factor": factor,
+-                            "original_max_position_embeddings": base_context_length,
+-                        },
+-                    }
+-                },
+-                f"Qwen3.8 YaRN for {context_length} tokens",
+-            )
+-
+     if explicit_env.get("EXTRA_VLLM_ARGS"):
+         raise ConfigError(
+             "EXTRA_VLLM_ARGS is ambiguous shell text; pass native CLI arguments after --"
+@@ -968,18 +915,6 @@
+                 ) from error
+             if not math.isfinite(seconds) or seconds <= 0:
+                 raise ConfigError("half-life must be positive and finite")
+-    prefill_step_tokens = values.get("max-num-prefill-tokens-per-step")
+-    if prefill_step_tokens is not None:
+-        if not isinstance(prefill_step_tokens, int) or prefill_step_tokens < 0:
+-            raise ConfigError("max-num-prefill-tokens-per-step must be nonnegative")
+-        if prefill_step_tokens > values["max-num-batched-tokens"]:
+-            raise ConfigError(
+-                "max-num-prefill-tokens-per-step cannot exceed max-num-batched-tokens"
+-            )
+-        if prefill_step_tokens > 0 and share is None:
+-            raise ConfigError(
+-                "max-num-prefill-tokens-per-step requires prefill-compute-share"
+-            )
+     for key in ("max-parallel-prefills", "decode-refill-target"):
+         if (
+             key in values
+@@ -1074,11 +1009,9 @@
+         environment.pop("NCCL_GRAPH_FILE")
+     environment.update(plan.environment)
+     if plan.cache_service:
+-        from runtime.cache import resolve_identity, verify_installed_transfer
++        from runtime.cache import resolve_identity
+         from runtime.supervisor import supervise
+ 
+-        verify_installed_transfer(plan)
+-
+         helper = ROOT / "checkpoint_identity.py"
+         if not helper.is_file():
+             raise ConfigError(
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lil/runtime/options.yaml b/lil/runtime/options.yaml
+--- a/lil/runtime/options.yaml	2026-09-24 14:03:23.000000000 -0400
++++ b/lil/runtime/options.yaml	2026-09-19 07:27:33.000000000 -0400
+@@ -113,12 +113,6 @@
+       "MODEL_REVISION"
+     ]
+   },
+-  "hf-overrides": {
+-    "type": "object",
+-    "env": [
+-      "HF_OVERRIDES"
+-    ]
+-  },
+   "safetensors-load-strategy": {
+     "type": "string",
+     "env": [
+@@ -259,12 +253,6 @@
+       "PREFILL_COMPUTE_HALF_LIFE"
+     ]
+   },
+-  "max-num-prefill-tokens-per-step": {
+-    "type": "integer",
+-    "env": [
+-      "MAX_NUM_PREFILL_TOKENS_PER_STEP"
+-    ]
+-  },
+   "prefill-schedule-interval": {
+     "type": "integer",
+     "env": [
+@@ -310,12 +298,6 @@
+       "ENABLE_AUTO_TOOL_CHOICE"
+     ]
+   },
+-  "enable-expert-parallel": {
+-    "type": "boolean",
+-    "env": [
+-      "ENABLE_EXPERT_PARALLEL"
+-    ]
+-  },
+   "enable-flashinfer-autotune": {
+     "type": "boolean",
+     "env": [
+@@ -577,25 +559,6 @@
+       "LMCACHE_MODE"
+     ]
+   },
+-  "cache-l2-odirect": {
+-    "type": "boolean",
+-    "control": true,
+-    "env": [
+-      "LMCACHE_L2_ODIRECT"
+-    ]
+-  },
+-  "cache-l2-checkpoint-writes": {
+-    "type": "string",
+-    "control": true,
+-    "env": [
+-      "LMCACHE_L2_CHECKPOINT_WRITES"
+-    ],
+-    "enum": [
+-      "always",
+-      "on-reuse",
+-      "on-evict"
+-    ]
+-  },
+   "cache-directory": {
+     "type": "string",
+     "control": true,
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lil/runtime/presets.yaml b/lil/runtime/presets.yaml
+--- a/lil/runtime/presets.yaml	2026-09-24 14:03:23.000000000 -0400
++++ b/lil/runtime/presets.yaml	2026-09-19 07:27:33.000000000 -0400
+@@ -37,30 +37,6 @@
+         config: {moe_backend: b12x}
+     linked_options:
+       cache-object-tokens: max-num-batched-tokens
+-  glm53-tp3:
+-    profile: glm53-flash
+-    hardware: rtx-pro-6000-pcie
+-    description: GLM-5.3-Flash on three 96-GB RTX PRO GPUs with TP3, expert parallelism and MTP3. Attention heads are padded for TP3, the vision tower runs data-parallel, and large dense projections decode in FP8. VRAM prefix cache only.
+-    options:
+-      tensor-parallel-size: 3
+-      enable-expert-parallel: true
+-      moe-backend: flashinfer_cutlass
+-      enable-flashinfer-autotune: true
+-      mode: mtp
+-      max-num-seqs: 8
+-      max-cudagraph-capture-size: 32
+-      cudagraph-capture-sizes: [1, 2, 4, 8, 12, 16, 20, 24, 28, 32]
+-      additional-config: {glm53_kda_decode_backend: b12x, kda_prefill_backend: flashkda}
+-    environment:
+-      VLLM_PCIE_ONESHOT_ALLREDUCE_MAX_SIZE: 256KB
+-      VLLM_GLM53_L2_PREFETCH_BUDGET_A_MB: "10"
+-      VLLM_GLM53_L2_PREFETCH_BUDGET_B_MB: "25"
+-      VLLM_GLM53_L2_PREFETCH_BUDGET_C_MB: "7.5"
+-      VLLM_GLM53_L2_PREFETCH_BUDGET_A_MLA_MB: "18"
+-      VLLM_GLM53_FP8_DENSE: "1"
+-      VLLM_GLM53_FP8_PREFILL: w8a8
+-    modes: {}
+-    linked_options: {}
+   qwen38-tp2:
+     profile: qwen38-flash-next
+     hardware: rtx-pro-6000-pcie
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lil/runtime/profiles/common.yaml b/lil/runtime/profiles/common.yaml
+--- a/lil/runtime/profiles/common.yaml	2026-09-24 14:03:23.000000000 -0400
++++ b/lil/runtime/profiles/common.yaml	2026-09-19 07:27:33.000000000 -0400
+@@ -8,8 +8,6 @@
+   cache-l1-init-gib: 2
+   cache-l2-gib: 256
+   cache-l2-enabled: false
+-  cache-l2-odirect: false
+-  cache-l2-checkpoint-writes: always
+   cache-cpu-workers: 4
+   cache-l2-workers: 4
+   cache-directory: /cache/lmcache
+@@ -29,7 +27,6 @@
+   kv-cache-dtype: fp8
+   load-format: instanttensor
+   enable-prefix-caching: true
+-  enable-prompt-tokens-details: true
+   enable-chunked-prefill: true
+   enable-auto-tool-choice: true
+   cache-mode: vram
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lil/runtime/profiles/ds41-flash.yaml b/lil/runtime/profiles/ds41-flash.yaml
+--- a/lil/runtime/profiles/ds41-flash.yaml	2026-09-24 14:03:23.000000000 -0400
++++ b/lil/runtime/profiles/ds41-flash.yaml	2026-09-19 07:27:33.000000000 -0400
+@@ -42,6 +42,7 @@
+   tokenizer-mode: deepseek_v41
+   reasoning-parser: deepseek_v41
+   tool-call-parser: deepseek_v41
++  enable-prompt-tokens-details: true
+   enable-force-include-usage: true
+   enable-request-id-headers: true
+   default-chat-template-kwargs: {thinking: true, reasoning_effort: high}
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lil/runtime/profiles/ds4-flash.yaml b/lil/runtime/profiles/ds4-flash.yaml
+--- a/lil/runtime/profiles/ds4-flash.yaml	2026-09-24 14:03:23.000000000 -0400
++++ b/lil/runtime/profiles/ds4-flash.yaml	2026-09-19 07:27:33.000000000 -0400
+@@ -36,13 +36,13 @@
+   tokenizer-mode: deepseek_v4
+   reasoning-parser: deepseek_v4
+   tool-call-parser: deepseek_v4
++  enable-prompt-tokens-details: true
+   enable-force-include-usage: true
+   enable-request-id-headers: true
+   default-chat-template-kwargs: {thinking: true, reasoning_effort: high}
+   override-generation-config: {temperature: 1.0, top_p: 0.95}
+ environment:
+   OMP_NUM_THREADS: "2"
+-  INSTANTTENSOR_BACKEND: URING,AIO
+   VLLM_B12X_MOE_FP4_FORCE_A16: "0"
+   VLLM_USE_AOT_COMPILE: "1"
+   VLLM_USE_BREAKABLE_CUDAGRAPH: "0"
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lil/runtime/profiles/ds4-vision.yaml b/lil/runtime/profiles/ds4-vision.yaml
+--- a/lil/runtime/profiles/ds4-vision.yaml	2026-09-24 14:03:23.000000000 -0400
++++ b/lil/runtime/profiles/ds4-vision.yaml	2026-09-19 07:27:33.000000000 -0400
+@@ -36,6 +36,7 @@
+   tokenizer-mode: deepseek_v4
+   reasoning-parser: deepseek_v4
+   tool-call-parser: deepseek_v4
++  enable-prompt-tokens-details: true
+   enable-force-include-usage: true
+   enable-request-id-headers: true
+   default-chat-template-kwargs: {thinking: true, reasoning_effort: high}
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lil/runtime/profiles/glm53-flash.yaml b/lil/runtime/profiles/glm53-flash.yaml
+--- a/lil/runtime/profiles/glm53-flash.yaml	2026-09-24 14:03:23.000000000 -0400
++++ b/lil/runtime/profiles/glm53-flash.yaml	2026-09-19 07:27:33.000000000 -0400
+@@ -18,7 +18,7 @@
+   model: local-inference-lab/GLM-5.3-Flash-NVFP4
+   served-model-name: GLM-5.3-Flash-NVFP4
+   tensor-parallel-size: 4
+-  mode: mtp
++  mode: off
+   prefill-compute-share: 0.4
+   prefill-schedule-interval: 1
+   max-parallel-prefills: 1
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lil/runtime/profiles/qwen38-flash-next.yaml b/lil/runtime/profiles/qwen38-flash-next.yaml
+--- a/lil/runtime/profiles/qwen38-flash-next.yaml	2026-09-24 14:03:23.000000000 -0400
++++ b/lil/runtime/profiles/qwen38-flash-next.yaml	2026-09-19 07:27:33.000000000 -0400
+@@ -27,7 +27,7 @@
+   enable-flashinfer-autotune: false
+   mm-encoder-tp-mode: data
+   mm-processor-cache-gb: 0
+-  language-model-only: false
++  language-model-only: true
+   reasoning-parser: qwen3
+   tool-call-parser: qwen3_xml
+ environment:
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lil/runtime/supervisor.py b/lil/runtime/supervisor.py
+--- a/lil/runtime/supervisor.py	2026-09-24 14:03:23.000000000 -0400
++++ b/lil/runtime/supervisor.py	2026-09-19 07:27:33.000000000 -0400
+@@ -2,14 +2,11 @@
+ 
+ from __future__ import annotations
+ 
+-import fcntl
+ import json
+-import math
+ import os
+ import signal
+ import socket
+ import subprocess
+-import sys
+ import time
+ import urllib.error
+ import urllib.request
+@@ -39,98 +36,20 @@
+         )
+ 
+ 
+-SHM_ROOT = Path("/dev/shm")
+-# Share of a filesystem's space (free plus what the tier already holds) that
+-# a disk tier may claim; the rest stays for the model, logs and other writers.
+-L2_DISK_SHARE = 0.9
+-# Arena locks stay open for the supervisor's lifetime. The kernel releases a
+-# flock when its holder exits, including on SIGKILL or an OOM kill, so a held
+-# lock proves a running owner and a free one proves the arena is stale.
+-_ARENA_LOCKS: list[int] = []
+-
+-
+-def _claim_arena(shm: Path) -> None:
+-    """Lock the arena name for this container or refuse if another owns it."""
+-    fd = os.open(shm.with_name(shm.name + ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+-    try:
+-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+-    except BlockingIOError:
+-        os.close(fd)
+-        raise ConfigError(
+-            f"Refusing to reuse a cache SHM arena owned by another running container: {shm}"
+-        ) from None
+-    _ARENA_LOCKS.append(fd)
+-
+-
+-def _tree_bytes(path: Path) -> int:
+-    """Bytes allocated on disk by the files below ``path``."""
+-    total = 0
+-    stack = [path]
+-    while stack:
+-        try:
+-            entries = os.scandir(stack.pop())
+-        except OSError:
+-            continue
+-        with entries:
+-            for entry in entries:
+-                try:
+-                    if entry.is_dir(follow_symlinks=False):
+-                        stack.append(Path(entry.path))
+-                    elif entry.is_file(follow_symlinks=False):
+-                        total += entry.stat(follow_symlinks=False).st_blocks * 512
+-                except OSError:
+-                    continue
+-    return total
+-
+-
+-def fit_disk_tiers(service: CacheService) -> None:
+-    """Cap filesystem L2 tiers to what their disk can still hold.
+-
+-    A tier larger than its disk fills the disk and fails every writer on it,
+-    including the model server. Existing tier contents count as available,
+-    since the tier can evict them.
+-    """
+-    for index, arg in enumerate(service.argv[:-1]):
+-        if arg != "--l2-adapter":
+-            continue
+-        adapter = json.loads(service.argv[index + 1])
+-        requested = adapter.get("max_capacity_gb")
+-        if adapter.get("type") not in {"fs", "fs_native"} or not requested:
+-            continue
+-        base = Path(adapter["base_path"])
+-        probe = base
+-        while not probe.exists() and probe != probe.parent:
+-            probe = probe.parent
+-        stats = os.statvfs(probe)
+-        free = stats.f_bavail * stats.f_frsize
+-        held = _tree_bytes(base) if base.exists() else 0
+-        usable = math.floor((free + held) * L2_DISK_SHARE / 1024**3)
+-        if requested <= usable:
+-            continue
+-        if usable < 1:
+-            raise ConfigError(
+-                f"No space for the LMCache disk tier at {base}: "
+-                f"{free / 1024**3:.1f} GiB free. Free disk space or set "
+-                "LMCACHE_L2_ENABLED=0"
+-            )
+-        adapter["max_capacity_gb"] = usable
+-        service.argv[index + 1] = json.dumps(adapter, separators=(",", ":"))
+-        announce(
+-            f"LMCache disk tier capped at {usable} GiB instead of {requested:g} GiB: "
+-            f"{probe} has {free / 1024**3:.0f} GiB free and the tier already holds "
+-            f"{held / 1024**3:.0f} GiB. Lower LMCACHE_L2_GB or free space to "
+-            "silence this"
+-        )
+-
+-
+ def preflight(service: CacheService, environment: dict) -> None:
+     if any("UNRESOLVED-CHECKPOINT" in arg for arg in service.argv):
+         raise ConfigError(
+             "Persistent cache identity must be resolved before starting processes"
+         )
+-    shm = SHM_ROOT / service.shm_name if service.shm_bytes else None
+-    if shm is not None:
+-        _claim_arena(shm)
++    if service.shm_bytes:
++        shm = Path("/dev/shm") / service.shm_name
++        if shm.exists():
++            raise ConfigError(f"Refusing to reuse an existing cache SHM arena: {shm}")
++        stats = os.statvfs("/dev/shm")
++        if stats.f_bavail * stats.f_frsize < service.shm_bytes:
++            raise ConfigError(
++                "Insufficient free /dev/shm for the complete engine-driven L1 arena"
++            )
+     interposer = Path("/opt/lmcache/lib/liblmcache_cumem_shareable.so")
+     if (
+         str(interposer) in environment.get("LD_PRELOAD", "").split(":")
+@@ -169,40 +88,6 @@
+                 raise ConfigError(
+                     f"Cache service address is unavailable: {address}:{port}"
+                 ) from error
+-    if shm is not None:
+-        # This container holds the arena lock and the cache ports are free, so
+-        # an existing arena was left by a cache that did not shut down cleanly.
+-        if shm.exists():
+-            shm.unlink()
+-            announce(
+-                f"Removed the stale cache SHM arena {shm} left by a cache service "
+-                "that did not shut down cleanly"
+-            )
+-        stats = os.statvfs(SHM_ROOT)
+-        if stats.f_bavail * stats.f_frsize < service.shm_bytes:
+-            raise ConfigError(
+-                "Insufficient free /dev/shm for the complete engine-driven L1 arena"
+-            )
+-    fit_disk_tiers(service)
+-
+-
+-def describe_exit(status: int) -> str:
+-    if status >= 0:
+-        return f"status {status}"
+-    try:
+-        name = signal.Signals(-status).name
+-    except ValueError:
+-        name = f"signal {-status}"
+-    if status == -signal.SIGKILL:
+-        # Nothing in this container sends SIGKILL before its own shutdown.
+-        return f"{name}; the host kernel OOM killer is the usual sender, see dmesg"
+-    return name
+-
+-
+-def announce(message: str) -> None:
+-    # Printed before shutdown starts, so it precedes the model server's own
+-    # shutdown messages and names the actual cause.
+-    print(f"[lil-serve] {message}", file=sys.stderr, flush=True)
+ 
+ 
+ def stop_groups(children, grace=10):
+@@ -272,38 +157,20 @@
+             except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+                 time.sleep(0.1)
+         if requested_signal:
+-            announce(
+-                f"Received {signal.Signals(requested_signal).name} before the model "
+-                "server started; stopping LMCache"
+-            )
+             return 128 + requested_signal
+         if cache.poll() is not None:
+             raise ConfigError("LMCache exited after its readiness response")
+         model = subprocess.Popen(model_command, env=environment, start_new_session=True)
+         children.append(model)
+         while not requested_signal:
+-            status = cache.poll()
+-            if status is not None:
+-                reason = (
+-                    f"LMCache exited ({describe_exit(status)}) while the model "
+-                    "server was running"
+-                )
+-                announce(f"{reason}; stopping the model server")
+-                raise ConfigError(reason)
++            if cache.poll() is not None:
++                raise ConfigError("LMCache exited while the model server was running")
+             status = model.poll()
+             if status is not None:
+-                announce(
+-                    f"Model server exited ({describe_exit(status)}); stopping LMCache"
+-                )
+                 return status if status >= 0 else 128 - status
+             time.sleep(0.1)
+-        announce(
+-            f"Received {signal.Signals(requested_signal).name} from outside the "
+-            "container, usually docker stop, a Compose recreation or an image "
+-            "updater; stopping the model server and LMCache"
+-        )
+         return 128 + requested_signal
+     finally:
+-        stop_groups(children, service.stop_grace)
++        stop_groups(children)
+         for sig, handler in previous.items():
+             signal.signal(sig, handler)
+diff -ruN -x __pycache__ -x '*.pyc' -x '*.so' -x '*.cubin' a/lil/tp3-source-delta.json b/lil/tp3-source-delta.json
+--- a/lil/tp3-source-delta.json	1969-12-31 19:00:00.000000000 -0500
++++ b/lil/tp3-source-delta.json	2026-09-23 11:47:47.000000000 -0400
+@@ -0,0 +1,37 @@
++{
++  "b12x/comm/pcie/_dma_kernels.py": "0533cc76930bba32b59cd786df93b271d11ba7f4dd1cfbac24fe2eb270529f64",
++  "b12x/comm/pcie/_oneshot_cute.py": "7a551de0a9ea9d52a2681480095077bfdffee3a0154e65ebdef762c987c28e12",
++  "b12x/comm/pcie/_tuning.py": "3b54253d90eb3949a34e21e7d1fda2dc3fb311162533355f72ecb37f353a09af",
++  "b12x/comm/pcie/pcie_dcp_a2a.py": "5381fd826082c8642bb34a5324f715385135e5fdca5aa2775cb30b70d69f6d58",
++  "b12x/comm/pcie/pcie_dma.py": "9df25477583fa045427d6310022c8c40a85f4953a99d1d8c6b8a84ed04a75143",
++  "b12x/comm/pcie/pcie_oneshot.py": "a8792b92e8621dd2cc9e4b9a746daf1fedab4121150573ce39c706b219106e96",
++  "b12x/norm/mhc/_kernels.py": "e731c748d618117a5c0cb7bf6d8027adb01775f4124a907178fc3273fc85b32c",
++  "vllm/config/speculative.py": "546144f361806a422d1e8c702ee7c1a76dc98193549ecc44aac6fea1e7a7744a",
++  "vllm/config/vllm.py": "77746f37418c24392b25ffa471fad4605eef254a79a64353dd54e097bfa626ca",
++  "vllm/distributed/device_communicators/cuda_communicator.py": "d56964347bf7ddfdf03ab50131560a3e7695db54852be36993a03d3b6bc024cd",
++  "vllm/model_executor/layers/linear.py": "f4cefa8151b7b083c57fcc6db2dc845eb2740a27210bc4dee7a713e043889f60",
++  "vllm/model_executor/layers/mamba/gdn/kimi_gdn_linear_attn.py": "84458677ce0528de1c82b28aacb030a042e16633ff2d48e8ef4577e3c23fe184",
++  "vllm/model_executor/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_nvfp4.py": "bcd6f59e2fffe1ccfc016d6fbd4203c35b1aa0e134d9105b1d216cb698d44b1d",
++  "vllm/model_executor/layers/quantization/modelopt.py": "78f0c025f927536a631aa7622ff36a1a1d043c5cab74bbd277100fa085d4369d",
++  "vllm/model_executor/models/qwen3_dflash.py": "de1a7afa424b4fac9a562454bd3f9757686aade1caa4b2a005d8772a8e0c9b61",
++  "vllm/model_executor/models/qwen3_dflash2.py": "ae766f40be33da3a222710b30708f772755dd0d422dc314fdb231ba5d84bf53e",
++  "vllm/model_executor/parameter.py": "a841add58100d1a47db9e8bc887b77756c43445f3cbf2d94ea4fac0c03ca3e79",
++  "vllm/model_executor/warmup/flashinfer_autotune_cache.py": "57375e081dd47a60c3ee4be65fccee2849b8bd1193e1b79ad8caba5da9fc52bd",
++  "vllm/model_executor/warmup/kernel_warmup.py": "3a5bebaa9926d9510bacdbd309e1757b6c43ad1becf81b29f9931233eddf04b4",
++  "vllm/models/glm5next/common/multimodal.py": "f39ccf6c27690859fd04a017500393d02101a40f88494785cca8bf10159c0ca7",
++  "vllm/models/glm5next/nvidia/attention.py": "ef436fc2e1c730c7f424e396e397d99c3ca1fd66a1e5b89ec7818a1b759ed200",
++  "vllm/models/glm5next/nvidia/glm53_fp8_dense.py": "e647bffabbee89f4b96bdc2faf1d2724667daf35ac1ae5fa32607a59130073e9",
++  "vllm/models/glm5next/nvidia/glm53_low_latency_gemm.py": "fcb4a10dae35c71944b2b51adbdf8f5aaec927d5cc9e1da0a183ba45b5065e0b",
++  "vllm/models/glm5next/nvidia/model.py": "a9a15de051085db84b318e6fcf279a749b014456eedfa19ad1fdb091a91dac91",
++  "vllm/models/glm5next/nvidia/mtp.py": "89dffa04074c352e6f530b1deee7f5b3d34474ae6f04613aa3ec95a22e2f0407",
++  "vllm/parser/engine/parser_engine.py": "48a009cb31be61fcd8bf9c64a2b76b90a52b8c6aa5c0db862300d7fc1e8fb113",
++  "vllm/transformers_utils/configs/glm53_tp3.py": "5c21eb056cee9566bd435f114f0bf74d344acee4afd6d3f25a2cd3fbd6e69422",
++  "vllm/v1/attention/ops/dcp.py": "6a31aab23d965aece4a6b825b4f2db8231c07b5b83b2178328549fd3d8b2e592",
++  "vllm/v1/core/kv_cache_utils.py": "00ccf2c09d577f3067981f3e5d0f16af6d51bbbd160a7b5fa4a7723f6a82af2e",
++  "vllm/v1/engine/core.py": "c090fa4667fc8391a84963a4a58c470fc847a13d9ac660e720fcca3b7fc7226c",
++  "vllm/v1/spec_decode/dflash.py": "45530198bed94ae5284df8f3d310297903cddd2c5ef2067c85bb8c1d73022e6b",
++  "vllm/v1/worker/gpu/model_runner.py": "5b0a0a5fb4eb2bbaf5c172977e5ead1a9de02a15d99278ec662ab6416a69bc32",
++  "vllm/v1/worker/gpu_model_runner.py": "9cceb97f18a4a875d84cb4e7311b6a6b4bf84f76de01f9d44a05d0a750a0a749",
++  "vllm/v1/worker/mamba_utils.py": "2e681395445c32774ebaa460c0c3a20407852f35ab83648799c4334d87e42905",
++  "vllm/v1/worker/utils.py": "1205b6f66df837de9d3c5e39f1a74ac2aa2e7cf2ece83e47c5d4012594307948"
++}
