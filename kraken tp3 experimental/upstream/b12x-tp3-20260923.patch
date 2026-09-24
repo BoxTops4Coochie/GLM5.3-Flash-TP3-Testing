@@ -1,0 +1,194 @@
+--- a/b12x/comm/pcie/_dma_kernels.py
++++ b/b12x/comm/pcie/_dma_kernels.py
+@@ -1357,7 +1357,7 @@
+ def compile_launchers(*, world_size: int, wire_mode: str) -> DmaLaunchers:
+     """Resolve the primitive programs reachable by declaration metadata."""
+ 
+-    if int(world_size) not in (2, 4, 6, 8, 10):
++    if int(world_size) not in (2, 3, 4, 6, 8, 10):
+         raise ValueError(f"unsupported DMA world size {world_size}")
+     mode = str(wire_mode)
+     codec = "i8" if mode.startswith("i8") else "mx" if mode.startswith("mx") else "e4m3"
+--- a/b12x/comm/pcie/_oneshot_cute.py
++++ b/b12x/comm/pcie/_oneshot_cute.py
+@@ -9,6 +9,7 @@
+ from __future__ import annotations
+ 
+ import functools
++import os
+ from collections.abc import Callable
+ 
+ import cuda.bindings.driver as cuda
+@@ -208,6 +209,7 @@
+         self._slot_bias = int(slot_bias) & 1
+         self._transport = transport
+         self._threads = int(threads)
++        self._pdl = _ONESHOT_PDL and transport == "pull"
+ 
+     @cute.jit
+     def __call__(
+@@ -342,6 +344,8 @@
+                     stage_index += stride
+ 
+             self._multi_gpu_barrier(signal_ptrs)
++            if cutlass.const_expr(self._pdl):
++                cute.arch.griddepcontrol_launch_dependents()
+ 
+             while index < size_packs:
+                 accumulator = cute.make_rmem_tensor(
+@@ -1145,6 +1149,13 @@
+                 )
+ 
+ 
++# Release the dependent launch once this rank's input is published and every
++# peer has arrived. The dependent kernel (the mHC partial) waits in-kernel for
++# this grid to complete before reading its output, so the release only hides
++# the dependent's launch latency and can never expose a partial result.
++_ONESHOT_PDL = os.getenv("B12X_PCIE_ONESHOT_PDL", "0") != "0"
++
++
+ def _dummy(dtype, alignment: int):
+     return make_ptr(dtype, 16, cute.AddressSpace.gmem, assumed_align=alignment)
+ 
+@@ -1246,6 +1257,7 @@
+         slot_bias,
+         str(transport),
+         int(threads),
++        ("pdl", bool(launch._pdl)),
+     )
+     raise_if_kernel_resolution_frozen(
+         "cute.compile", target=launch, cache_key=cache_key
+@@ -1265,7 +1277,7 @@
+         1,
+         1,
+         current_cuda_stream(),
+-        compile_spec=KernelCompileSpec.from_key("comm.pcie.oneshot", 4, cache_key),
++        compile_spec=KernelCompileSpec.from_key("comm.pcie.oneshot", 5, cache_key),
+     )
+ 
+     def run(
+--- a/b12x/comm/pcie/pcie_dcp_a2a.py
++++ b/b12x/comm/pcie/pcie_dcp_a2a.py
+@@ -36,7 +36,7 @@
+ )
+ 
+ 
+-SUPPORTED_WORLD_SIZES = (2, 4, 8, 16)
++SUPPORTED_WORLD_SIZES = (2, 3, 4, 8, 16)
+ SUPPORTED_DTYPES = (torch.float16, torch.bfloat16)
+ SUPPORTED_GATHER_DTYPES = (*SUPPORTED_DTYPES, torch.float8_e4m3fn)
+ SUPPORTED_PAIR_DTYPES = (*SUPPORTED_GATHER_DTYPES, torch.float32)
+--- a/b12x/comm/pcie/pcie_dma.py
++++ b/b12x/comm/pcie/pcie_dma.py
+@@ -33,7 +33,7 @@
+     torch.float16: 1,
+     torch.float32: 2,
+ }
+-SUPPORTED_WORLD_SIZES = (2, 4, 6, 8, 10)
++SUPPORTED_WORLD_SIZES = (2, 3, 4, 6, 8, 10)
+ FLAG_STRIDE = 128
+ FLAG_SLOTS = 256
+ MAX_PIECES = 8
+--- a/b12x/comm/pcie/pcie_oneshot.py
++++ b/b12x/comm/pcie/pcie_oneshot.py
+@@ -22,7 +22,7 @@
+ 
+ logger = logging.getLogger(__name__)
+ 
+-SUPPORTED_WORLD_SIZES = (2, 4, 6, 8, 10)
++SUPPORTED_WORLD_SIZES = (2, 3, 4, 6, 8, 10)
+ SUPPORTED_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
+ DEFAULT_MAX_SIZE = 8 * 1024 * 1024
+ DEFAULT_RANK_DATA_BYTES = 8 * 1024 * 1024
+--- a/b12x/comm/pcie/_tuning.py
++++ b/b12x/comm/pcie/_tuning.py
+@@ -13,26 +13,26 @@
+ # Native execution surfaces after the all-reduce manager's plan-time routing.
+ # Values are supported worlds, never a set of transports to race.
+ SURFACES = {
+-    "OneshotAllReduce.all_reduce": (2, 4, 6, 8, 10),
+-    "OneshotAllReduce.all_reduce_fused_add_rms_norm": (2, 4, 6, 8, 10),
+-    "OneshotAllReducePool.all_reduce": (2, 4, 6, 8, 10),
+-    "OneshotAllReducePool.all_reduce_fused_add_rms_norm": (2, 4, 6, 8, 10),
+-    "DmaAllReduce.all_reduce": (2, 4, 6, 8, 10),
++    "OneshotAllReduce.all_reduce": (2, 3, 4, 6, 8, 10),
++    "OneshotAllReduce.all_reduce_fused_add_rms_norm": (2, 3, 4, 6, 8, 10),
++    "OneshotAllReducePool.all_reduce": (2, 3, 4, 6, 8, 10),
++    "OneshotAllReducePool.all_reduce_fused_add_rms_norm": (2, 3, 4, 6, 8, 10),
++    "DmaAllReduce.all_reduce": (2, 3, 4, 6, 8, 10),
+     "PCIeTwoShotBF16.all_reduce": (4,),
+     "PCIeTwoShotBF16.reduce_scatter": (4,),
+     "PCIeTwoShotBF16.all_gather": (4,),
+     "TwoShotReduceScatter.reduce_scatter_fp8": (2, 4, 8),
+     "TwoShotReduceScatter.all_gather_fp8": (2, 4, 8),
+-    "DcpAllToAll.lse_reduce_scatter": (2, 4, 8, 16),
+-    "DcpAllToAll.all_gather_heads": (2, 4, 8, 16),
+-    "DcpAllToAll.all_gather_pair": (2, 4, 8, 16),
+-    "DcpAllToAll.all_gather_pair_kimi_topk": (2, 4, 8, 16),
+-    "DcpAllToAll.kimi_topk16": (2, 4, 8, 16),
+-    "DcpAllToAllPool.lse_reduce_scatter": (2, 4, 8, 16),
+-    "DcpAllToAllPool.all_gather_heads": (2, 4, 8, 16),
+-    "DcpAllToAllPool.all_gather_pair": (2, 4, 8, 16),
+-    "DcpAllToAllPool.all_gather_pair_kimi_topk": (2, 4, 8, 16),
+-    "DcpAllToAllPool.kimi_topk16": (2, 4, 8, 16),
++    "DcpAllToAll.lse_reduce_scatter": (2, 3, 4, 6, 8, 16),
++    "DcpAllToAll.all_gather_heads": (2, 3, 4, 6, 8, 16),
++    "DcpAllToAll.all_gather_pair": (2, 3, 4, 6, 8, 16),
++    "DcpAllToAll.all_gather_pair_kimi_topk": (2, 3, 4, 6, 8, 16),
++    "DcpAllToAll.kimi_topk16": (2, 3, 4, 6, 8, 16),
++    "DcpAllToAllPool.lse_reduce_scatter": (2, 3, 4, 6, 8, 16),
++    "DcpAllToAllPool.all_gather_heads": (2, 3, 4, 6, 8, 16),
++    "DcpAllToAllPool.all_gather_pair": (2, 3, 4, 6, 8, 16),
++    "DcpAllToAllPool.all_gather_pair_kimi_topk": (2, 3, 4, 6, 8, 16),
++    "DcpAllToAllPool.kimi_topk16": (2, 3, 4, 6, 8, 16),
+     "DcpTopKOwnerExchange.stage_candidates": (2, 3, 4, 6, 8),
+     "VocabParallelArgmax.fused_add_argmax": (8, 12, 16),
+     "PCIeHierarchicalAllReduce.all_reduce": (12, 16),
+--- a/b12x/norm/mhc/_kernels.py
++++ b/b12x/norm/mhc/_kernels.py
+@@ -833,6 +833,7 @@
+             ),
+             block=[self.num_threads, 1, 1],
+             stream=stream,
++            use_pdl=_MHC_PDL,
+         )
+ 
+     @cute.kernel
+@@ -848,6 +849,10 @@
+         pre_mix: cute.Tensor,
+         y: cute.Tensor,
+     ):
++        # Launched early behind the one-shot all-reduce that produces x; wait
++        # for it to complete before any global read.
++        if const_expr(_MHC_PDL):
++            cute.arch.griddepcontrol_wait()
+         hidden_tile, partial_group, token = cute.arch.block_idx()
+         token = Int64(token)
+         tidx = cute.arch.thread_idx()[0]
+@@ -4476,7 +4481,7 @@
+     return _compile_mhc_entry(
+         kernel,
+         compile_spec=KernelCompileSpec.from_key(
+-            compile_name, 4 if split_n_abi else 5, compile_key
++            compile_name, 4 if split_n_abi else 6, compile_key
+         ),
+         compile_args=args,
+         runtime_args=args,
+@@ -5307,7 +5312,7 @@
+             split_k=split_k,
+             post_only=True,
+         ),
+-        compile_spec=KernelCompileSpec.from_key(compile_name, 3, compile_key),
++        compile_spec=KernelCompileSpec.from_key(compile_name, 4, compile_key),
+         compile_args=args,
+         runtime_args=args,
+     )
+@@ -5469,7 +5474,7 @@
+             lagged_mix=lagged_mix,
+             partials_per_cta=partials_per_cta,
+         ),
+-        compile_spec=KernelCompileSpec.from_key(compile_name, 3, compile_key),
++        compile_spec=KernelCompileSpec.from_key(compile_name, 4, compile_key),
+         compile_args=args,
+         runtime_args=args,
+     )

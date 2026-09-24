@@ -66,6 +66,8 @@ against the 20260921 image (model.py +5, mtp.py +2, b12x one-shot +11/-1, b12x
 mHC +8/-3) plus the new module [glm53_fp8_dense.py](glm53_fp8_dense.py).
 Hashes, observed server state and result summaries:
 [release-receipt-20260923.json](release-receipt-20260923.json).
+The complete port as patches against the Kraken base (vLLM `67bb922f6`, b12x
+1.3.0), with a per-file change list: [upstream/](upstream/README.md).
 
 As in 20260921, the image's lil profile is untouched (its hashes are pinned by
 `/opt/lil/image-contract.json`), so the qualified prefill backend and the new
