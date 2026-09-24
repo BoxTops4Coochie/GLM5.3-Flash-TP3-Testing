@@ -95,7 +95,38 @@ TP sizes are unchanged.
   32 x 4096 x BF16 = 256 KiB, over the 84 KiB default, and fell back to the NCCL
   ring at 44.9 us versus the one-shot's 16.1 us. +3.0% C8 steps/s.
 - `VLLM_GLM53_FP8_DENSE=1`, `VLLM_GLM53_FP8_PREFILL=w8a8` for the FP8 paths.
+- L2 prefetch budgets `VLLM_GLM53_L2_PREFETCH_BUDGET_{A,B,C,A_MLA}_MB` =
+  10 / 25 / 7.5 / 18 (half the module defaults; R34-tuned, re-checked with the
+  FP8 weights -- the full defaults measured -1.9% C1).
+- CUDA-graph capture sizes `1 2 4 8 12 16 20 24 28 32` for MTP3 (`1..8 16 32`
+  for MTP0) at graph max 32 and 8 sequences. The coarse default ladder padded C5
+  verify batches up to 32 rows: the finer ladder measured +25-28% at C5, flat at
+  C1/C8, for ~1% less KV.
+- These are set by our launcher wrapper around lil's entrypoint
+  (`serve-glm53-flash-tp3-kraken.py` in the release folder, mounted by compose,
+  not part of either patch), which maps environment switches (checkpoint, mode,
+  DCP, graph ladder) to lil arguments.
 - The lil profile was not modified (its hashes are pinned by the image contract).
+
+## What the patches cover
+
+**All code changes.** Verified 2026-09-23 by hashing every non-`.pyc` file under
+`site-packages/vllm` and `site-packages/b12x` in the base image and in
+`glm53-kraken-tp3:20260923`: they differ in exactly the 35 files these patches
+touch (32 changed, 3 new), in both directions -- nothing in the image is missing
+from the patches and nothing in the patches is absent from the image. The
+image's Dockerfile only copies `src/` (these files) and a manifest on top of the
+pinned base.
+
+Not in the patches, because they are not vLLM or b12x code:
+
+| Item | What it is | Where |
+| --- | --- | --- |
+| Launcher `serve-glm53-flash-tp3-kraken.py` | Our wrapper around lil's entrypoint: maps environment switches (checkpoint, mode, DCP, graph ladder) to lil arguments, and holds the finer CUDA-graph capture sizes policy. Mounted by compose, not built into the image. | release folder |
+| Compose settings | flashkda KDA prefill, 256 KiB one-shot cutoff, FP8 flags, half L2 budgets (all listed above under runtime settings). | `compose.yaml` in the release folder |
+| lil profile | **Not modified.** Its hashes are pinned by `/opt/lil/image-contract.json` and the entrypoint refuses to start if they change, so everything we needed from it is set through compose. | -- |
+| `/opt/lil/tp3-source-delta.json` | Our sha256 manifest of the `src/` overlay files; informational, read by nothing. | in the image |
+| Three stray `__pycache__/*.cpython-314.pyc` files under `vllm/models/glm5next/nvidia/` | Left in the image by host-side syntax checks before the source tree was cleaned. Compiled for Python 3.14; the image runs 3.12, which never loads them. No effect; a rebuild without them would change only the image ID. | in the image |
 
 ## Findings that may matter upstream
 
