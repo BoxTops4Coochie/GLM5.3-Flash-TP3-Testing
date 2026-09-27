@@ -7,3 +7,6 @@ COPY support-receipt.json /opt/lil/glm53-20260927.json
 COPY lil/cache.py /opt/lil/runtime/cache.py
 COPY lil/image-contract.json /opt/lil/runtime/image-contract.json
 ENV VLLM_B12X_BF16_GEMV=1 VLLM_SCHEDULER_UNCAP_PREFILL_ONLY_STEPS=0
+# lil-bench: upstream installer and lock (llm-inference-bench v0.7.3), p2pmark built for this image.
+COPY install_lil_bench.py lil-bench.lock.json /tmp/lil-bench/
+RUN /opt/venv/bin/python /tmp/lil-bench/install_lil_bench.py --lock /tmp/lil-bench/lil-bench.lock.json && rm -rf /tmp/lil-bench

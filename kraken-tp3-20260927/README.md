@@ -1,9 +1,10 @@
 # GLM-5.3 Flash Kraken TP3 — 20260927
 
-Image: **`azallaza/glm53-kraken-tp3:20260927`** (published; registry digest equals
-the local build, `glm53-kraken-tp3:20260927`,
-`sha256:697f27872d5652442904d944eec2aacc46a7b7c516a413d81df7ba6ded89c13f`), derived from `glm53-kraken-tp3:20260925`. Earlier local builds of
-this tag are kept as `20260927-pre-dflash-fix` and `20260927-pre-lmcache`.
+Image: **`azallaza/glm53-kraken-tp3:20260927`** (local `glm53-kraken-tp3:20260927`,
+`sha256:4281708cbf5ad2230447b6443601e44c5c1339346692814553d19e6862272ce0`), derived from `glm53-kraken-tp3:20260925`; includes `lil-bench`.
+Earlier local builds of this tag are kept as `20260927-pre-dflash-fix`,
+`20260927-pre-lmcache` and `20260927-pre-lilbench` (the first upload,
+`sha256:697f2787…`, identical except for `lil-bench`).
 
 ```bash
 docker pull azallaza/glm53-kraken-tp3:20260927
@@ -29,6 +30,7 @@ batch 4096, graph 32, 8 slots, max length 1,048,576. Host settings unchanged:
 | Prefill-only step uncapping (vllm #880) — code only | `VLLM_SCHEDULER_UNCAP_PREFILL_ONLY_STEPS=0` | none (untested) |
 | DFlash draft geometry fix (DFlash could not start on 20260925) | always | DFlash works again |
 | LMCache L1 at TP3: lil `cache.py` accepts TP3 (contract hash updated), launcher `LMCACHE=l1`, stale-arena cleanup | `LMCACHE=l1` | host-RAM prefix tier |
+| `lil-bench` (upstream standardized benchmark, llm-inference-bench v0.7.3, p2pmark) | `docker exec … lil-bench` | tooling only |
 
 `KV_RECLAIM=auto` applies the three memory items **only** for default
 checkpoint / MTP3 / MOE_TP=1 at DCP1 (1,779 blocks) or DCP3 (1,774 blocks,
@@ -124,7 +126,8 @@ arithmetic natural EOS, 350 W on every GPU. Receipts: `deploy-server.log`,
   overlays, plus `glm53_tp3.py` with the DFlash draft fix), `lil/` (TP3
   `cache.py` + updated `image-contract.json`, `lil-cache-tp3.patch`),
   `serve-glm53-flash-tp3-kraken.py` (+ `launcher.before.py`),
-  `support-receipt.json`, `compose.yaml` (the public example below), build logs.
+  `support-receipt.json`, `install_lil_bench.py` + `lil-bench.lock.json`
+  (upstream, unchanged), `compose.yaml` (the public example below), build logs.
 - `source.patch`: all source changes versus `glm53-kraken-tp3:20260925`.
 - Evidence: `../../optimization/kv-reclaim-20260926/`,
   `../../optimization/kv-layout-20260926/`,
@@ -261,6 +264,29 @@ the disk tier (L2) is not tested at TP3 and is rejected.
   `/dev/shm/lmcache_l1_pool_lmcache-glm53-flash-8000-18000` to free the RAM.
 - A benign `resource_tracker` `KeyError` traceback for the arena name can appear
   at startup while ranks attach; serving is unaffected.
+
+## lil-bench
+
+The image ships upstream's standardized benchmark, installed by upstream's own
+`install_lil_bench.py` and lock (`local-inference-lab/llm-inference-bench`
+v0.7.3, commit `05ec1803`, archive checksum verified) at `/opt/lil/bench`, with
+p2pmark compiled for this image. It runs inside the serving container against
+the running server, records the launch command, hardware and PCIe topology,
+runs p2pmark and the prefill (32K/128K) and decode (C1/C8/C16 at 0/64K/128K)
+matrix while sampling clocks, power and throttling, then saves to
+`/cache/lil-bench` and uploads to docker.local-inference-lab.ai.
+
+```bash
+# identifier from https://docker.local-inference-lab.ai/bench/token
+docker exec --privileged -it glm53-kraken-tp3 lil-bench --profile quick --no-upload   # setup check
+docker exec --privileged -it -e LIL_BENCH_TOKEN=lilb_... glm53-kraken-tp3 lil-bench
+```
+
+With 8 slots (`MAX_NUM_SEQS=8`) C16 is skipped automatically. p2pmark sizes
+its buffers to free GPU memory (the KV budgets leave 1.5-2.5 GB/GPU). It
+refuses to run while the server has other requests (`--allow-busy` overrides).
+Run it at the tested host settings (350 W/GPU, +6000 memory offset) with the
+GPUs cool.
 
 ## Example Compose
 

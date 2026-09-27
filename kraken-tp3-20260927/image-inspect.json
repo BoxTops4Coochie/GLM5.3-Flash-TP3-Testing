@@ -1,14 +1,15 @@
 [
     {
-        "Id": "sha256:697f27872d5652442904d944eec2aacc46a7b7c516a413d81df7ba6ded89c13f",
+        "Id": "sha256:4281708cbf5ad2230447b6443601e44c5c1339346692814553d19e6862272ce0",
         "RepoTags": [
-            "glm53-kraken-tp3:20260927"
+            "glm53-kraken-tp3:20260927",
+            "glm53-kraken-tp3:20260927-lilbench"
         ],
         "RepoDigests": [
-            "glm53-kraken-tp3@sha256:697f27872d5652442904d944eec2aacc46a7b7c516a413d81df7ba6ded89c13f"
+            "glm53-kraken-tp3@sha256:4281708cbf5ad2230447b6443601e44c5c1339346692814553d19e6862272ce0"
         ],
         "Comment": "buildkit.dockerfile.v0",
-        "Created": "2026-09-27T09:28:58.70899133-04:00",
+        "Created": "2026-09-27T11:36:57.118882495-04:00",
         "Config": {
             "ExposedPorts": {
                 "6006/tcp": {},
@@ -164,7 +165,7 @@
         },
         "Architecture": "amd64",
         "Os": "linux",
-        "Size": 44019727194,
+        "Size": 44024527771,
         "RootFS": {
             "Type": "layers",
             "Layers": [
@@ -251,22 +252,24 @@
                 "sha256:48e3e99c4f3de964a024e1c6f4da5ef9e4e1c78b94c4a82defc7e858c6f67387",
                 "sha256:c1a7f6afa13e26c02236855661f7176c41cbdf882aa1fc8e1e1d987b8bedeca8",
                 "sha256:984bacd9d06bcd128e36f6eb3b221eb947b99b0294c5f61a4471fb03fd4f72ca",
-                "sha256:268e2260d90937a4c27d99f09d5cfeb513422c4eccf74fd153ae8be7e75d0a59"
+                "sha256:268e2260d90937a4c27d99f09d5cfeb513422c4eccf74fd153ae8be7e75d0a59",
+                "sha256:a1fa99eccfce32a3ffdf66ec418adcf525e3537960718025a2f562c7309941c0",
+                "sha256:738157de044160963fd15224e7f67eb9765b64666afc35b1707a32b612c0b3a3"
             ]
         },
         "Metadata": {
-            "LastTagTime": "2026-09-27T13:28:58.787499646Z"
+            "LastTagTime": "2026-09-27T15:38:27.019307909Z"
         },
         "Descriptor": {
             "mediaType": "application/vnd.oci.image.index.v1+json",
-            "digest": "sha256:697f27872d5652442904d944eec2aacc46a7b7c516a413d81df7ba6ded89c13f",
+            "digest": "sha256:4281708cbf5ad2230447b6443601e44c5c1339346692814553d19e6862272ce0",
             "size": 857
         },
         "Identity": {
             "Build": [
                 {
-                    "Ref": "o5yxwha3h6pqm7qh3zjb0lwbf",
-                    "CreatedAt": "2026-09-27T09:28:58.850575258-04:00"
+                    "Ref": "9ivfnjn29opdgp2v886xghsaa",
+                    "CreatedAt": "2026-09-27T11:36:57.320586136-04:00"
                 }
             ]
         }
