@@ -13,6 +13,9 @@ KV_RECLAIM_BYTES = 24707662848
 # 8,417,076 tokens; 8x~895K stress with 6 resident (63.5% KV), 0 preemptions,
 # peak 96,364 MiB/GPU (1.5 GB free).
 KV_RECLAIM_BYTES_BY_DCP = {'1': KV_RECLAIM_BYTES, '3': 1774 * 13888512}
+# With LMCACHE=l1 (DCP1 only): 1720 blocks, 3,180,865 tokens; LMCache's GPU-side
+# transfer buffers need ~0.8 GB more headroom (1,779 blocks hangs in autotune).
+KV_RECLAIM_BYTES_L1 = {'1': 1720 * 13888512}
 
 CHECKPOINTS = {
     'default': ('local-inference-lab/GLM-5.3-Flash-NVFP4', '175ae8ce3b5af842b0d0140dbeb43e9cfc557c49'),
@@ -78,6 +81,17 @@ def build_args(env):
         sizes = [int(s) for s in sizes.split()]
         if sizes != sorted(set(sizes)) or sizes[-1] != maximum:
             raise ValueError('Capture sizes must be increasing, unique, and end at the graph maximum')
+    # LMCACHE: off = GPU prefix cache only (vram); l1 = LMCache host-RAM tier
+    # (LMCACHE_L1_GB, default 96; must fit host /dev/shm). L2 (disk) not tested at TP3.
+    lmcache = value('LMCACHE', 'off').lower()
+    if lmcache not in ('off', 'l1'):
+        raise ValueError('LMCACHE must be off or l1 (the L2 disk tier is not tested at TP3)')
+    cache_args = ['--cache-mode', 'vram']
+    if lmcache == 'l1':
+        l1 = value('LMCACHE_L1_GB', '96')
+        if not re.fullmatch(r'[1-9][0-9]*', l1):
+            raise ValueError('LMCACHE_L1_GB must be a positive integer')
+        cache_args = ['--cache-mode', 'lmcache', '--cache-l1-gib', l1, '--no-cache-l2-enabled']
     args = ['--profile', 'glm53-flash', '--hardware', 'rtx-pro-6000-pcie',
             '--model', model, '--revision', revision, '--mode', mode,
             '--tensor-parallel-size', '3', '--decode-context-parallel-size', dcp,
@@ -87,7 +101,7 @@ def build_args(env):
             '--gpu-memory-utilization', value('GPU_MEMORY_UTILIZATION', '0.95'),
             '--max-num-batched-tokens', str(positive('MAX_NUM_BATCHED_TOKENS', 4096)),
             '--max-cudagraph-capture-size', str(maximum),
-            '--cache-mode', 'vram', '--enable-flashinfer-autotune',
+            *cache_args, '--enable-flashinfer-autotune',
             '--served-model-name', value('SERVED_MODEL_NAME', 'GLM-5.3-Flash-TP3'),
             '--default-chat-template-kwargs', json.dumps({'reasoning_effort': reasoning, 'clear_thinking': clear == 'true'}),
             '--override-generation-config', '{"temperature":1.0,"top_p":0.95}',
@@ -126,7 +140,8 @@ def build_args(env):
     reclaim = value('KV_RECLAIM', 'auto').lower()
     if reclaim not in ('auto', '0'):
         raise ValueError('KV_RECLAIM must be auto or 0')
-    tested = (checkpoint == 'default' and mode == 'mtp' and dcp in KV_RECLAIM_BYTES_BY_DCP and moe_tp == '1'
+    budgets = KV_RECLAIM_BYTES_L1 if lmcache == 'l1' else KV_RECLAIM_BYTES_BY_DCP
+    tested = (checkpoint == 'default' and mode == 'mtp' and dcp in budgets and moe_tp == '1'
               and positive('MAX_NUM_SEQS', 8) == 8 and positive('MAX_NUM_BATCHED_TOKENS', 4096) == 4096
               and maximum == 32 and not env.get('CUDAGRAPH_CAPTURE_SIZES')
               and positive('MAX_MODEL_LEN', 1048576) == 1048576
@@ -135,12 +150,32 @@ def build_args(env):
     if kv_bytes and not re.fullmatch(r'[1-9][0-9]*', kv_bytes):
         raise ValueError('KV_CACHE_MEMORY_BYTES must be a positive integer')
     if reclaim == 'auto' and tested:
-        args += ['--kv-cache-memory-bytes', kv_bytes or str(KV_RECLAIM_BYTES_BY_DCP[dcp])]
+        args += ['--kv-cache-memory-bytes', kv_bytes or str(budgets[dcp])]
     elif kv_bytes:
         raise ValueError('KV_CACHE_MEMORY_BYTES is only accepted with KV_RECLAIM=auto in the tested '
                          'default/MTP3/DCP1 or DCP3 with MOE_TP=1 configuration')
     env['_GLM53_KV_RECLAIM_ACTIVE'] = '1' if reclaim == 'auto' and tested else '0'
     return args
+
+
+# lil's LMCache L1 arena (host /dev/shm via ipc: host) is not unlinked when the
+# container stops, and lil refuses to start over an existing arena. Hold an
+# exclusive lock beside it for the container's lifetime; whoever gets the lock
+# knows no live server owns the arena and removes the stale one.
+LMCACHE_ARENA = '/dev/shm/lmcache_l1_pool_lmcache-glm53-flash-8000-18000'
+
+
+def _claim_lmcache_arena():
+    import fcntl
+    fd = os.open(LMCACHE_ARENA + '.lock', os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise ValueError(f'Another running server holds the LMCache arena {LMCACHE_ARENA}')
+    os.set_inheritable(fd, True)  # kept open across exec for the container's lifetime
+    if os.path.exists(LMCACHE_ARENA):
+        os.unlink(LMCACHE_ARENA)
+        print(f'GLM-5.3 LMCache: removed stale L1 arena {LMCACHE_ARENA}', flush=True)
 
 
 def main():
@@ -175,12 +210,14 @@ def main():
                 "MAX_NUM_SEQS", "MAX_MODEL_LEN", "GPU_MEMORY_UTILIZATION",
                 "REASONING_EFFORT", "CLEAR_THINKING", "SERVED_MODEL_NAME",
                 "MOE_TP", "EPLB", "EPLB_WINDOW_SIZE", "EPLB_STEP_INTERVAL", "KDA_NO_COPY",
-                "KV_RECLAIM", "KV_CACHE_MEMORY_BYTES"):
+                "KV_RECLAIM", "KV_CACHE_MEMORY_BYTES", "LMCACHE", "LMCACHE_L1_GB"):
         os.environ.pop(key, None)
     # Blank optional environment entries mean use the native defaults.
     for key in list(os.environ):
         if os.environ[key] == '':
             del os.environ[key]
+    if '--cache-mode' in args and args[args.index('--cache-mode') + 1] == 'lmcache':
+        _claim_lmcache_arena()
     os.execv('/usr/local/bin/lil-entrypoint', ['/usr/local/bin/lil-entrypoint', *args])
 
 

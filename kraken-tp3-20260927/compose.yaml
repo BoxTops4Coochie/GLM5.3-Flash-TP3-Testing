@@ -1,22 +1,25 @@
-# Kraken TP3 image 20260927: TP-sharded experts (MOE_TP), KV reclaim and the
-# upstream tensor-core BF16 GEMV. Default: default checkpoint / MTP3 / DCP1,
-# MOE_TP=1, half-L2, top-p 0.95, KV 3,319,246 (KV_RECLAIM=auto).
-# See release/kraken-20260927/README.md; previous: compose.pre-20260927.yaml.
+# Kraken TP3 release example, image azallaza/glm53-kraken-tp3:20260927.
+# Defaults: default checkpoint / MTP3 / DCP1 / MOE_TP=1, FP8 decode + prefill,
+# BF16 GEMV, KV reclaim (3,319,246 tokens), half-L2, top-p 0.95. All source
+# changes are built into the image; only the launcher is mounted.
 # GPU power is a host setting: tested 350W/GPU; never exceed 400W.
 services:
   glm53-kraken-tp3:
-    image: "${GLM53_IMAGE:-glm53-kraken-tp3:20260927}"
+    image: "${GLM53_IMAGE:-azallaza/glm53-kraken-tp3:20260927}"
     container_name: glm53-kraken-tp3
     restart: "no"
+    # Room for LMCache/vLLM to shut down cleanly. A stale LMCache L1 arena left in
+    # /dev/shm is removed by the launcher at the next start (lock-protected).
+    stop_grace_period: 90s
     ipc: host
     shm_size: "64gb"
-    cpuset: "8-47"
+    cpuset: "${CPUSET:-8-47}"
     gpus: all
     ports:
       - "15015:8000"
     volumes:
-      - /m2-2/huggingface:/root/.cache/huggingface:ro
-      - /home/aabduh/vllm_cache/glm53-kraken:/cache
+      - ${HF_CACHE_DIR:?Set HF_CACHE_DIR to your populated Hugging Face cache}:/root/.cache/huggingface:ro
+      - runtime-cache:/cache
       - ./serve-glm53-flash-tp3-kraken.py:/usr/local/bin/serve-glm53-flash-tp3-kraken.py:ro
     environment:
       # Set here, in .env, or before `docker compose up -d`.
@@ -31,16 +34,22 @@ services:
       # mtp = depth3; dflash2 (or dflash) = depth7; mtp0 = speculation off.
       # Draft arguments are added only in DFlash mode.
       MODE: "${MODE:-mtp}"
-      # 0 = baseline EP3; 1 = TP-sharded routed experts (704 channels/rank).
-      # Currently tested only for default/MTP3/DCP1; other combinations reject 1.
-      # Keep 0 for full baseline KV capacity; changing this requires recreation.
+      # 0 = baseline EP3; 1 = TP-sharded routed experts (704 channels/rank),
+      # +2.8-4% C1. MTP only: qualified at DCP1, experimental at DCP3; DFlash,
+      # MTP0 and other checkpoints need MOE_TP=0.
       MOE_TP: "${MOE_TP:-1}"
       # auto = LM-head BF16 release + shared PyNCCL + explicit KV budget, applied
-      # only for default/MTP3/DCP1/MOE_TP=1 with the default slot/batch/graph/
-      # length settings (3,319,246 KV; 3x~1M stress passed). Any other setting
-      # uses automatic KV sizing. 0 = off everywhere.
+      # only for default/MTP3/MOE_TP=1 with default slots/batch/graph/length:
+      # DCP1 3,319,246 KV (3,180,865 with LMCACHE=l1); DCP3 8,417,076 (experimental).
+      # Any other setting uses automatic KV sizing. 0 = off everywhere.
       KV_RECLAIM: "${KV_RECLAIM:-auto}"
-      # Optional explicit KV bytes/GPU for that same configuration (empty = 24707662848).
+      # off = GPU prefix cache only; l1 = LMCache host-RAM tier (LMCACHE_L1_GB GiB,
+      # must fit the host's /dev/shm; ipc: host). Reloads evicted prefixes from RAM
+      # (100K prefix: 8.5 s -> 0.24 s) at ~138K fewer GPU KV tokens (3,180,865).
+      # The LMCache disk tier (L2) is not tested at TP3 and is rejected.
+      LMCACHE: "${LMCACHE:-off}"
+      LMCACHE_L1_GB: "${LMCACHE_L1_GB:-96}"
+      # Optional explicit KV bytes/GPU for those configurations (empty = tested budget).
       KV_CACHE_MEMORY_BYTES: "${KV_CACHE_MEMORY_BYTES:-}"
       # b12x tensor-core BF16 GEMV for decode BF16 linears <=8 rows (C1): ~+2.6-3%
       # C1 steps/s, C8 unchanged, quality-qualified 2026-09-27. 0 = cuBLAS as before.
@@ -123,3 +132,6 @@ services:
       VLLM_GLM53_L2_PREFETCH_A_NEXT_MB: "${VLLM_GLM53_L2_PREFETCH_A_NEXT_MB:-0}"
     entrypoint: ["/opt/venv/bin/python", "/usr/local/bin/serve-glm53-flash-tp3-kraken.py"]
     command: []
+
+volumes:
+  runtime-cache:

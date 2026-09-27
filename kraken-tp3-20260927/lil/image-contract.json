@@ -1,0 +1,40 @@
+{
+  "bootstrap": [
+    "/opt/venv/bin/lil-runtime-bootstrap"
+  ],
+  "environment_contract": "model-neutral",
+  "files": {
+    "__init__.py": "133df69ebfb3382112c015ddcefdec1bf890890607a3b0017edd5cb7fe45884b",
+    "cache.py": "ef313240490e186b60bc37b26f92c63c1fce2b9bc10035d2f32d2d3affe10619",
+    "checkpoint_identity.py": "b5d259c38bf844d4da6a1a9d905a0e8983f586a8dc550b138d8cdf070c02f499",
+    "entrypoint.py": "9a72dc1272d2534e1fac6f1d4953d955f0f2e878c15c04fffba73bd2560c81c2",
+    "explicit.py": "398ea55395baf4edc1861c64f47b4b91d5e998a2eb58b046de7d06d75988a6d8",
+    "generate.py": "83ae999d214e2c01ab4e96e1fcc120dabb2ee82250feb5ab1d0d84fde563a71d",
+    "hardware/native.yaml": "53b32d99329dfaa67830833f499e2123aa59dc14ee0760154e1fff53766b098c",
+    "hardware/rtx-pro-6000-pcie.yaml": "cf9329f6c57b5022de6a208012c1d65ea2187b738f3892d2f2ef1dc922850550",
+    "image_install.py": "1051ee625512dbadc9bd1c11147a980d4b6c2aa9da573ff38ba9c8ca6c3bbb31",
+    "install.sh": "5a6d9f80991d8cf844620db5695960ff1a4ad5f4e0c37cab9a50f49a2f008c86",
+    "launcher.py": "dd5dd64303e30295b789b24e00f4e59258b4570a414d1f664604dfbc4e2cb54f",
+    "lil-entrypoint": "9962e707374a68532c041ae97e90f2a735756c5f1dd874aa755987306ae3aa84",
+    "lil-serve": "1b4c2821c4fe05262d4f03145d2dff1a9e41aedf5b72a00d7400bd8930faaddf",
+    "native_cli_contract.py": "477846900793bd0c3a1e9c03ea090fbf4737164527ea37e2aba87b5551e3551a",
+    "options.yaml": "441266e35ae4f64eae19602c57d663b7fd60fbf251ddc8d18d78c4355f58489d",
+    "packaging.py": "148eced756b7a351d95199164f18765dcf28c44203b08e75fa8f3d7e40af3491",
+    "platform-environment.json": "14befb774e5cb50785e501665a4e791c31f2c9019b3de302a1abfa3385f5833a",
+    "presets.yaml": "5c3bb6fce531ae347c6353aaafcf9c55eb047fe91061ce2235b76e0602b9b77c",
+    "profiles/common.yaml": "5f0fe9fb16e2d8e3dbe1f22a45cf2092eb64f1ded11937b0d30087dfc84e9c92",
+    "profiles/ds4-flash.yaml": "91b35f0805df6770d1b73554a0446f8afa956ed619a5abff2b8e0fee314d4060",
+    "profiles/ds4-vision.yaml": "274de4389aa91e2a56a5488e8cad0fd7b547dfa3323aedfaa1921e50d8a2214b",
+    "profiles/ds41-flash.yaml": "7792cc89b14a29e43dea7bdb0980eaa197f3ae50cfd1f1bec7f11d247b823a63",
+    "profiles/glm53-flash.yaml": "777cc759f8050265b10c72c30b4372c1b5e40bb9801cb5d2a90d8af980f0c146",
+    "profiles/qwen38-flash-next.yaml": "62b59a889c9d44f567a753c59acab3ccf3c1d46421da373ca35f9368d5003aa1",
+    "requirements.txt": "161995974eda0fee3d9d6ad71605e6404135c9f3b24d85cb3b74b7958e591a32",
+    "schema.json": "0c328f1ad80a4d7817cb57e6c40514fc08d079c4a07e6ec3b02ed2130b5b3e88",
+    "supervisor.py": "488a352ddfe24535153e87a913f838fd5a1c173e0ff55bda5c35a723212599f2"
+  },
+  "foundation_image_id": "sha256:d8a355e5c2aceee3ce425e04168291fc12df28eb0af2261a800b9b1a53884bae",
+  "qualified_serving_receipts": [],
+  "runtime_lock_sha256": "538e4b38d30963e2d16c0fba7fbf32a3417189b48afc78026c56f46820205ba2",
+  "schema_version": 1,
+  "status": "implemented"
+}

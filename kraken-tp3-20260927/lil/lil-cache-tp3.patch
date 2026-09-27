@@ -1,0 +1,15 @@
+--- cache.orig.py	2026-09-27 08:34:21.429036221 -0400
++++ cache.py	2026-09-27 08:34:21.444701220 -0400
+@@ -127,8 +127,10 @@
+     semantic = False
+     if glm:
+         tp = values["tensor-parallel-size"]
+-        if tp not in {2, 4, 8}:
+-            raise ConfigError("The GLM external-cache profile supports TP2, TP4 or TP8")
++        # TP3 (padded GLM-5.3 geometry): LMCache L1 reported working by users and
++        # tested here; the L2 disk tier is not tested at TP3.
++        if tp not in {2, 3, 4, 8}:
++            raise ConfigError("The GLM external-cache profile supports TP2, TP3, TP4 or TP8")
+         if tp == 2 and not engine:
+             raise ConfigError(
+                 "GLM TP2 requires engine-driven request-boundary cache transfer"
