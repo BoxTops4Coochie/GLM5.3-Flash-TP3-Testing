@@ -1,0 +1,6 @@
+{"image": "glm53-kraken-tp3:20260927", "base": "glm53-kraken-tp3:20260925",
+ "adds": ["pooled-selection startup-owner cleanup", "LM-head BF16 release (VLLM_GLM53_FP8_LM_HEAD_DROP_BF16)",
+          "shared TP/EP PyNCCL (VLLM_SHARE_PYNCCL_COMMS)", "b12x tensor-core BF16 GEMV + cuBLAS backend (b12x #421)",
+          "vLLM bf16_gemv routing (vllm #873, VLLM_B12X_BF16_GEMV) with FP8-weight guard",
+          "prefill-only uncap code (vllm #880, VLLM_SCHEDULER_UNCAP_PREFILL_ONLY_STEPS, default off)",
+          "launcher KV_RECLAIM=auto / KV_CACHE_MEMORY_BYTES"]}

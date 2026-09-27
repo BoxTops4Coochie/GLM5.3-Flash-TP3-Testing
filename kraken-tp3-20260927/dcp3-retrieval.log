@@ -1,0 +1,8 @@
+Idle observations: 0
+Idle observations: 1
+Idle observations: 2
+Idle observations: 3
+START 128000 actual prompt 127992
+DONE 128000 {"passed": true, "strict_json": false, "actual": {"A": "ALPHA-R34-7K2M9Q", "B": "BETA-R34-8P6V3X", "C": "GAMMA-R34-4T9N2Z"}, "expected": {"A": "ALPHA-R34-7K2M9Q", "B": "BETA-R34-8P6V3X", "C": "GAMMA-R34-4T9N2Z"}, "usage": {"prompt_tokens": 127992, "total_tokens": 128140, "completion_tokens": 148, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 88}}, "finish_reason": "stop"}
+Idle observations: 0
+Idle observations: 1

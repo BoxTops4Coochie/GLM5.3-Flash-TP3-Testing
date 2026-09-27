@@ -1,0 +1,13 @@
+--- a/vllm/transformers_utils/configs/glm53_tp3.py
++++ b/vllm/transformers_utils/configs/glm53_tp3.py
+@@ -223,9 +223,7 @@
+             if getattr(config, "draft_vocab_size", None) is None:
+                 config.draft_vocab_size = 154880
+         config.glm53_tp3_padding = True
+-        if moe_tp_width and hasattr(config, "moe_intermediate_size"):
+-            config.original_moe_intermediate_size = 2048
+-            config.moe_intermediate_size = moe_tp_width
++        # DFlash drafts are dense: no routed-expert width to pad (MOE_TP).
+         config.glm53_tp3_vocab_padding_size = 192
+         config.glm53_tp3_vocab_storage_size = 154944
+ 

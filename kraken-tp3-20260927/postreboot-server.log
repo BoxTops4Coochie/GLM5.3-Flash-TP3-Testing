@@ -1,0 +1,367 @@
+GLM-5.3 KV reclaim active
+W0927 12:17:33.986000 1 torch/_opaque_base.py:6] torch._opaque_base is deprecated, use torch._custom_class_base instead
+W0927 12:17:33.987000 1 torch/_library/opaque_object.py:288] register_opaque_type is deprecated, use register_custom_class instead
+W0927 12:17:33.987000 1 torch/_library/opaque_object.py:211] typ='value' is deprecated, use typ='constant' instead
+W0927 12:17:38.977000 1 torch/utils/_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+W0927 12:17:38.997000 1 torch/utils/_pytree.py:630] <enum 'ScaleCalculationMode'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+(APIServer pid=1) INFO 09-27 12:17:43 [api_utils.py:347] 
+(APIServer pid=1) INFO 09-27 12:17:43 [api_utils.py:347]        █     █     █▄   ▄█
+(APIServer pid=1) INFO 09-27 12:17:43 [api_utils.py:347]  ▄▄ ▄█ █     █     █ ▀▄▀ █  version 0.1.dev21537+g67bb922f6
+(APIServer pid=1) INFO 09-27 12:17:43 [api_utils.py:347]   █▄█▀ █     █     █     █  model   local-inference-lab/GLM-5.3-Flash-NVFP4
+(APIServer pid=1) INFO 09-27 12:17:43 [api_utils.py:347]    ▀▀  ▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀
+(APIServer pid=1) INFO 09-27 12:17:43 [api_utils.py:347] 
+(APIServer pid=1) INFO 09-27 12:17:43 [api_utils.py:286] non-default args: {'model_tag': 'local-inference-lab/GLM-5.3-Flash-NVFP4', 'default_chat_template_kwargs': {'reasoning_effort': 'max', 'clear_thinking': True}, 'enable_auto_tool_choice': True, 'tool_call_parser': 'glm47', 'host': '0.0.0.0', 'model': 'local-inference-lab/GLM-5.3-Flash-NVFP4', 'dtype': 'bfloat16', 'revision': '175ae8ce3b5af842b0d0140dbeb43e9cfc557c49', 'max_model_len': 1048576, 'quantization': 'modelopt_mixed', 'served_model_name': ['GLM-5.3-Flash-TP3'], 'override_generation_config': {'temperature': 1.0, 'top_p': 0.95}, 'load_format': 'instanttensor', 'attention_backend': 'B12X', 'reasoning_parser': 'glm45', 'tensor_parallel_size': 3, 'dcp_kv_cache_interleave_size': 4, 'cp_kv_cache_interleave_size': 4, 'block_size': 256, 'gpu_memory_utilization': 0.95, 'kv_cache_memory_bytes': 24707662848, 'kv_cache_dtype': 'fp8', 'enable_prefix_caching': True, 'recurrent_checkpoint_policy': 'request_boundaries', 'mamba_cache_mode': 'align', 'max_num_batched_tokens': 4096, 'max_num_seqs': 8, 'enable_chunked_prefill': True, 'prefill_compute_share': 0.4, 'cudagraph_capture_sizes': [1, 2, 4, 8, 12, 16, 20, 24, 28, 32], 'max_cudagraph_capture_size': 32, 'enable_flashinfer_autotune': True, 'moe_backend': 'flashinfer_cutlass', 'linear_backend': 'b12x', 'speculative_config': {'method': 'mtp', 'num_speculative_tokens': 3, 'revision': '175ae8ce3b5af842b0d0140dbeb43e9cfc557c49', 'draft_sample_method': 'probabilistic', 'rejection_sample_method': 'standard', 'moe_backend': 'marlin', 'attention_backend': 'B12X'}, 'compilation_config': {'mode': None, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': [], 'ir_enable_torch_wrap': None, 'splitting_ops': None, 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': None, 'compile_ranges_endpoints': None, 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2, 1)>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': None, 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': None, 'pass_config': {}, 'max_cudagraph_capture_size': None, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': None, 'static_all_moe_layers': []}, 'additional_config': {'glm53_kda_decode_backend': 'b12x', 'kda_prefill_backend': 'flashkda'}}
+(APIServer pid=1) INFO 09-27 12:17:43 [arg_utils.py:927] HF_HUB_OFFLINE is True, replace model_id [local-inference-lab/GLM-5.3-Flash-NVFP4] to model_path [/root/.cache/huggingface/hub/models--local-inference-lab--GLM-5.3-Flash-NVFP4/snapshots/175ae8ce3b5af842b0d0140dbeb43e9cfc557c49]
+(APIServer pid=1) WARNING 09-27 12:17:43 [envs.py:2399] Unknown vLLM environment variable detected: VLLM_TP3_PCIE_DCP
+(APIServer pid=1) WARNING 09-27 12:17:43 [envs.py:2399] Unknown vLLM environment variable detected: VLLM_GLM53_L2_PREFETCH_BUDGET_C_MB
+(APIServer pid=1) WARNING 09-27 12:17:43 [envs.py:2399] Unknown vLLM environment variable detected: VLLM_GLM53_FP8_LM_HEAD_DROP_BF16
+(APIServer pid=1) WARNING 09-27 12:17:43 [envs.py:2399] Unknown vLLM environment variable detected: VLLM_GLM53_FP8_PREFILL
+(APIServer pid=1) WARNING 09-27 12:17:43 [envs.py:2399] Unknown vLLM environment variable detected: VLLM_CACHE_DIR
+(APIServer pid=1) WARNING 09-27 12:17:43 [envs.py:2399] Unknown vLLM environment variable detected: VLLM_CAUSAL_CONV1D_UPDATE_HOIST
+(APIServer pid=1) WARNING 09-27 12:17:43 [envs.py:2399] Unknown vLLM environment variable detected: VLLM_GLM53_L2_PREFETCH_BUDGET_A_MLA_MB
+(APIServer pid=1) WARNING 09-27 12:17:43 [envs.py:2399] Unknown vLLM environment variable detected: VLLM_GLM53_TP3_MOE_TP
+(APIServer pid=1) WARNING 09-27 12:17:43 [envs.py:2399] Unknown vLLM environment variable detected: VLLM_GLM53_L2_PREFETCH_PERSIST_MB
+(APIServer pid=1) WARNING 09-27 12:17:43 [envs.py:2399] Unknown vLLM environment variable detected: VLLM_GLM53_FP8_MTP
+(APIServer pid=1) WARNING 09-27 12:17:43 [envs.py:2399] Unknown vLLM environment variable detected: VLLM_GLM53_SPLIT_TARGET_BLOCK_SIZE
+(APIServer pid=1) WARNING 09-27 12:17:43 [envs.py:2399] Unknown vLLM environment variable detected: VLLM_GLM53_KDA_NO_COPY
+(APIServer pid=1) WARNING 09-27 12:17:43 [envs.py:2399] Unknown vLLM environment variable detected: VLLM_GLM53_ONLINE_DENSE_MXFP8
+(APIServer pid=1) WARNING 09-27 12:17:43 [envs.py:2399] Unknown vLLM environment variable detected: VLLM_GLM53_L2_PREFETCH_BUDGET_A_MB
+(APIServer pid=1) WARNING 09-27 12:17:43 [envs.py:2399] Unknown vLLM environment variable detected: VLLM_GLM53_KDA_GATE_SIDE_STREAM
+(APIServer pid=1) WARNING 09-27 12:17:43 [envs.py:2399] Unknown vLLM environment variable detected: VLLM_GLM53_L2_PREFETCH
+(APIServer pid=1) WARNING 09-27 12:17:43 [envs.py:2399] Unknown vLLM environment variable detected: VLLM_GLM53_FP8_LM_HEAD
+(APIServer pid=1) WARNING 09-27 12:17:43 [envs.py:2399] Unknown vLLM environment variable detected: VLLM_GLM53_DFLASH_ATTN
+(APIServer pid=1) WARNING 09-27 12:17:43 [envs.py:2399] Unknown vLLM environment variable detected: VLLM_GLM53_FP8_DENSE
+(APIServer pid=1) WARNING 09-27 12:17:43 [envs.py:2399] Unknown vLLM environment variable detected: VLLM_GLM53_SPLIT_MAMBA_BLOCK_SIZE
+(APIServer pid=1) WARNING 09-27 12:17:43 [envs.py:2399] Unknown vLLM environment variable detected: VLLM_GLM53_L2_PREFETCH_BUDGET_B_MB
+(APIServer pid=1) WARNING 09-27 12:17:43 [envs.py:2399] Unknown vLLM environment variable detected: VLLM_GLM53_FP8_FFN
+(APIServer pid=1) WARNING 09-27 12:17:43 [envs.py:2399] Unknown vLLM environment variable detected: VLLM_GLM53_L2_PREFETCH_A_NEXT_MB
+(APIServer pid=1) WARNING 09-27 12:17:43 [envs.py:2399] Unknown vLLM environment variable detected: VLLM_SHARE_PYNCCL_COMMS
+(APIServer pid=1) INFO 09-27 12:17:43 [model.py:693] Resolved architecture: Glm5NextForConditionalGeneration
+(APIServer pid=1) INFO 09-27 12:17:43 [model.py:2046] Using max model len 1048576
+(APIServer pid=1) ERROR 09-27 12:17:44 [config.py:29] Failed to import Triton kernels. Please make sure your triton version is compatible. Error: No module named 'triton_kernels.matmul_ogs'
+(APIServer pid=1) WARNING 09-27 12:17:44 [indexer_topk.py:29] Failed to import the DeepSelect extension (vllm._deepselect_C): No module named 'vllm._deepselect_C'
+(APIServer pid=1) ERROR 09-27 12:17:44 [mxfp4.py:61] Failed to import Triton kernels. Please make sure your triton version is compatible. Error: No module named 'triton_kernels.matmul_ogs'
+(APIServer pid=1) INFO 09-27 12:17:45 [cache.py:364] Using fp8 data type to store kv cache. It reduces the GPU memory footprint and boosts the performance. Meanwhile, it may cause accuracy drop without a proper scaling factor
+(APIServer pid=1) INFO 09-27 12:17:45 [model.py:693] Resolved architecture: Glm5NextMTPModel
+(APIServer pid=1) INFO 09-27 12:17:45 [model.py:2046] Using max model len 1048576
+(APIServer pid=1) WARNING 09-27 12:17:45 [speculative.py:1431] Enabling num_speculative_tokens > 1 will run multiple times of forward on same MTP layer,which may result in lower acceptance rate
+(APIServer pid=1) INFO 09-27 12:17:45 [scheduler.py:385] Chunked prefill is enabled with max_num_batched_tokens=4096.
+(APIServer pid=1) INFO 09-27 12:17:45 [vllm.py:866] Auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1. Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out.
+(APIServer pid=1) INFO 09-27 12:17:45 [kernel.py:430] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'], gelu_and_mul_sparse=['triton', 'native'])
+(APIServer pid=1) WARNING 09-27 12:17:45 [vllm.py:2272] max_num_scheduled_tokens is set to 4096 based on the speculative decoding settings. This may lead to suboptimal performance. Consider increasing max_num_batched_tokens to accommodate the additional draft token slots, or decrease num_speculative_tokens.
+(APIServer pid=1) INFO 09-27 12:17:45 [compilation.py:336] Enabled custom fusions: norm_quant, act_quant, allreduce_rms
+(APIServer pid=1) [transformers] The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+(APIServer pid=1) INFO 09-27 12:17:50 [base.py:261] Multi-modal warmup completed in 1.125s
+W0927 12:17:50.235000 355 torch/_opaque_base.py:6] torch._opaque_base is deprecated, use torch._custom_class_base instead
+W0927 12:17:50.235000 355 torch/_library/opaque_object.py:288] register_opaque_type is deprecated, use register_custom_class instead
+W0927 12:17:50.235000 355 torch/_library/opaque_object.py:211] typ='value' is deprecated, use typ='constant' instead
+(APIServer pid=1) INFO 09-27 12:17:51 [base.py:261] Readonly multi-modal warmup completed in 1.072s
+W0927 12:17:53.037000 355 torch/utils/_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+W0927 12:17:53.055000 355 torch/utils/_pytree.py:630] <enum 'ScaleCalculationMode'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+ERROR 09-27 12:17:55 [config.py:29] Failed to import Triton kernels. Please make sure your triton version is compatible. Error: No module named 'triton_kernels.matmul_ogs'
+(EngineCore pid=355) INFO 09-27 12:17:55 [core.py:123] Initializing a V1 LLM engine (v0.1.dev21537+g67bb922f6) with config: model='/root/.cache/huggingface/hub/models--local-inference-lab--GLM-5.3-Flash-NVFP4/snapshots/175ae8ce3b5af842b0d0140dbeb43e9cfc557c49', speculative_config=SpeculativeConfig(method='mtp', model='/root/.cache/huggingface/hub/models--local-inference-lab--GLM-5.3-Flash-NVFP4/snapshots/175ae8ce3b5af842b0d0140dbeb43e9cfc557c49', num_spec_tokens=3), tokenizer='/root/.cache/huggingface/hub/models--local-inference-lab--GLM-5.3-Flash-NVFP4/snapshots/175ae8ce3b5af842b0d0140dbeb43e9cfc557c49', skip_tokenizer_init=False, tokenizer_mode=auto, revision=175ae8ce3b5af842b0d0140dbeb43e9cfc557c49, tokenizer_revision=175ae8ce3b5af842b0d0140dbeb43e9cfc557c49, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=1048576, download_dir=None, load_format=instanttensor, tensor_parallel_size=3, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=False, quantization=modelopt_mixed, quantization_config=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=fp8, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='glm45', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, per_request_spec_decode_metrics='none', kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False, jit_monitor_mode='warn', jit_monitor_verbose=False), seed=0, served_model_name=GLM-5.3-Flash-TP3, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.NONE: 0>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['all'], 'ir_enable_torch_wrap': False, 'splitting_ops': [], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': [], 'compile_ranges_endpoints': [4096], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2, 1)>, 'cudagraph_num_of_warmups': 1, 'cudagraph_capture_sizes': [1, 2, 4, 8, 12, 16, 20, 24, 28, 32], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': True, 'enable_qk_norm_rope_fusion': False, 'fuse_rope_kvcache_cat_mla': False, 'fuse_act_padding': False, 'fuse_qk_norm_rope_kvcache': False}, 'max_cudagraph_capture_size': 32, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': False, 'static_all_moe_layers': []}, kernel_config=KernelConfig(ir_op_priority=IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'], gelu_and_mul_sparse=['triton', 'native']), enable_flashinfer_autotune=True, enable_b12x_autotune=True, enable_cutedsl_warmup=True, enable_jit_warmup=True, enable_bf16x3_router_gemm=False, moe_backend='flashinfer_cutlass', sparse_indexer_topk_backend='auto', linear_backend='b12x', linear_backend_per_quant=None)
+(EngineCore pid=355) INFO 09-27 12:17:55 [multiproc_executor.py:153] DP group leader: node_rank=0, node_rank_within_dp=0, master_addr=127.0.0.1, mq_connect_ip=192.168.128.2 (local), world_size=3, local_world_size=3
+W0927 12:17:56.974000 370 torch/_opaque_base.py:6] torch._opaque_base is deprecated, use torch._custom_class_base instead
+W0927 12:17:56.975000 370 torch/_library/opaque_object.py:288] register_opaque_type is deprecated, use register_custom_class instead
+W0927 12:17:56.975000 370 torch/_library/opaque_object.py:211] typ='value' is deprecated, use typ='constant' instead
+W0927 12:17:56.976000 371 torch/_opaque_base.py:6] torch._opaque_base is deprecated, use torch._custom_class_base instead
+W0927 12:17:56.976000 371 torch/_library/opaque_object.py:288] register_opaque_type is deprecated, use register_custom_class instead
+W0927 12:17:56.976000 371 torch/_library/opaque_object.py:211] typ='value' is deprecated, use typ='constant' instead
+W0927 12:17:56.994000 369 torch/_opaque_base.py:6] torch._opaque_base is deprecated, use torch._custom_class_base instead
+W0927 12:17:56.994000 369 torch/_library/opaque_object.py:288] register_opaque_type is deprecated, use register_custom_class instead
+W0927 12:17:56.995000 369 torch/_library/opaque_object.py:211] typ='value' is deprecated, use typ='constant' instead
+W0927 12:18:00.361000 370 torch/utils/_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+W0927 12:18:00.379000 370 torch/utils/_pytree.py:630] <enum 'ScaleCalculationMode'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+W0927 12:18:00.432000 369 torch/utils/_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+W0927 12:18:00.450000 369 torch/utils/_pytree.py:630] <enum 'ScaleCalculationMode'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+W0927 12:18:00.459000 371 torch/utils/_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+W0927 12:18:00.479000 371 torch/utils/_pytree.py:630] <enum 'ScaleCalculationMode'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+ERROR 09-27 12:18:02 [config.py:29] Failed to import Triton kernels. Please make sure your triton version is compatible. Error: No module named 'triton_kernels.matmul_ogs'
+ERROR 09-27 12:18:02 [config.py:29] Failed to import Triton kernels. Please make sure your triton version is compatible. Error: No module named 'triton_kernels.matmul_ogs'
+ERROR 09-27 12:18:02 [config.py:29] Failed to import Triton kernels. Please make sure your triton version is compatible. Error: No module named 'triton_kernels.matmul_ogs'
+WARNING 09-27 12:18:03 [indexer_topk.py:29] Failed to import the DeepSelect extension (vllm._deepselect_C): No module named 'vllm._deepselect_C'
+WARNING 09-27 12:18:03 [indexer_topk.py:29] Failed to import the DeepSelect extension (vllm._deepselect_C): No module named 'vllm._deepselect_C'
+WARNING 09-27 12:18:03 [indexer_topk.py:29] Failed to import the DeepSelect extension (vllm._deepselect_C): No module named 'vllm._deepselect_C'
+ERROR 09-27 12:18:03 [mxfp4.py:61] Failed to import Triton kernels. Please make sure your triton version is compatible. Error: No module named 'triton_kernels.matmul_ogs'
+ERROR 09-27 12:18:03 [mxfp4.py:61] Failed to import Triton kernels. Please make sure your triton version is compatible. Error: No module named 'triton_kernels.matmul_ogs'
+ERROR 09-27 12:18:03 [mxfp4.py:61] Failed to import Triton kernels. Please make sure your triton version is compatible. Error: No module named 'triton_kernels.matmul_ogs'
+(Worker pid=369) INFO 09-27 12:18:04 [parallel_state.py:1859] world_size=3 rank=0 local_rank=0 distributed_init_method=file:///tmp/vllm_dist_081eb9d7f51746cd99f13297a7eb3753 backend=nccl
+(Worker pid=370) INFO 09-27 12:18:04 [parallel_state.py:1859] world_size=3 rank=1 local_rank=1 distributed_init_method=file:///tmp/vllm_dist_081eb9d7f51746cd99f13297a7eb3753 backend=nccl
+(Worker pid=371) INFO 09-27 12:18:04 [parallel_state.py:1859] world_size=3 rank=2 local_rank=2 distributed_init_method=file:///tmp/vllm_dist_081eb9d7f51746cd99f13297a7eb3753 backend=nccl
+(Worker pid=369) INFO 09-27 12:18:06 [nccl.py:25] Found nccl from environment variable VLLM_NCCL_SO_PATH=/opt/venv/lib/python3.12/site-packages/local_inference_nccl/lib/libnccl.so.2.31.2
+(Worker pid=370) INFO 09-27 12:18:06 [nccl.py:25] Found nccl from environment variable VLLM_NCCL_SO_PATH=/opt/venv/lib/python3.12/site-packages/local_inference_nccl/lib/libnccl.so.2.31.2
+(Worker pid=371) INFO 09-27 12:18:06 [nccl.py:25] Found nccl from environment variable VLLM_NCCL_SO_PATH=/opt/venv/lib/python3.12/site-packages/local_inference_nccl/lib/libnccl.so.2.31.2
+(Worker pid=369) INFO 09-27 12:18:06 [pynccl.py:148] vLLM is using nccl==2.31.2
+(Worker pid=369) INFO 09-27 12:18:07 [b12x_pcie_all_reduce.py:319] Using B12X PCIe all-reduce (algorithm=oneshot, one-shot max=262144, fused max=86016, two-shot bf16 max=off, DMA min=6291456).
+(Worker pid=369) WARNING 09-27 12:18:07 [symm_mem.py:67] SymmMemCommunicator: Device capability 12.0 not supported, communicator is not available.
+(Worker pid=369) INFO 09-27 12:18:07 [cuda_communicator.py:417] Using ['B12X_PCIE', 'PYNCCL'] all-reduce backends (in dispatch order) for group 'tp:0' out of potential backends: ['FLASHINFER_PCIE_IPC', 'B12X_PCIE', 'B12X_ROCENANTE', 'FLASHINFER', 'NCCL_SYMM_MEM', 'QUICK_REDUCE', 'AITER_CUSTOM', 'CUSTOM', 'SYMM_MEM', 'PYNCCL'].
+(Worker pid=371) WARNING 09-27 12:18:07 [symm_mem.py:67] SymmMemCommunicator: Device capability 12.0 not supported, communicator is not available.
+(Worker pid=370) WARNING 09-27 12:18:07 [symm_mem.py:67] SymmMemCommunicator: Device capability 12.0 not supported, communicator is not available.
+(Worker pid=370) INFO 09-27 12:18:07 [cuda_communicator.py:55] Reusing the PyNCCL communicator of ranks (0, 1, 2)
+(Worker pid=371) INFO 09-27 12:18:07 [cuda_communicator.py:55] Reusing the PyNCCL communicator of ranks (0, 1, 2)
+(Worker pid=369) INFO 09-27 12:18:07 [cuda_communicator.py:55] Reusing the PyNCCL communicator of ranks (0, 1, 2)
+(Worker pid=369) INFO 09-27 12:18:07 [cuda_communicator.py:417] Using ['PYNCCL'] all-reduce backends (in dispatch order) for group 'ep:0' out of potential backends: ['FLASHINFER_PCIE_IPC', 'B12X_PCIE', 'B12X_ROCENANTE', 'FLASHINFER', 'NCCL_SYMM_MEM', 'QUICK_REDUCE', 'AITER_CUSTOM', 'CUSTOM', 'SYMM_MEM', 'PYNCCL'].
+(Worker pid=369) INFO 09-27 12:18:07 [parallel_state.py:2299] rank 0 in world size 3 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, ETP rank 0, EP rank 0, EPLB rank N/A
+(Worker pid=369) INFO 09-27 12:18:07 [gpu_worker.py:472] Using V2 Model Runner
+(Worker_TP0 pid=369) INFO 09-27 12:18:07 [model_runner.py:413] Loading model from scratch...
+(Worker_TP0 pid=369) INFO 09-27 12:18:07 [cuda.py:597] Using backend AttentionBackendEnum.FLASH_ATTN for vit attention
+(Worker_TP0 pid=369) INFO 09-27 12:18:07 [mm_encoder_attention.py:372] Using AttentionBackendEnum.FLASH_ATTN for MMEncoderAttention.
+(Worker_TP0 pid=369) INFO 09-27 12:18:08 [kernel.py:430] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'], gelu_and_mul_sparse=['triton', 'native'])
+(Worker_TP2 pid=371) INFO 09-27 12:18:08 [kernel.py:430] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'], gelu_and_mul_sparse=['triton', 'native'])
+(Worker_TP0 pid=369) WARNING 09-27 12:18:08 [vllm.py:2272] max_num_scheduled_tokens is set to 4096 based on the speculative decoding settings. This may lead to suboptimal performance. Consider increasing max_num_batched_tokens to accommodate the additional draft token slots, or decrease num_speculative_tokens.
+(Worker_TP1 pid=370) INFO 09-27 12:18:08 [kernel.py:430] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'], gelu_and_mul_sparse=['triton', 'native'])
+(Worker_TP0 pid=369) INFO 09-27 12:18:08 [compilation.py:336] Enabled custom fusions: norm_quant, act_quant, allreduce_rms
+(Worker_TP0 pid=369) INFO 09-27 12:18:08 [mla_attention.py:682] Using fp8_ds_mla KV cache format for B12X backend.
+(Worker_TP0 pid=369) WARNING 09-27 12:18:08 [mla_attention.py:777] Sparse MLA layer has no dense-MHA prefill path; using the top-k MQA path only.
+(Worker_TP0 pid=369) INFO 09-27 12:18:08 [deep_gemm.py:196] deep_gemm not found in site-packages, trying vendored vllm.third_party.deep_gemm
+(Worker_TP0 pid=369) INFO 09-27 12:18:08 [deep_gemm.py:223] DeepGEMM PDL enabled on vllm.third_party.deep_gemm.
+(Worker_TP0 pid=369) INFO 09-27 12:18:08 [deep_gemm.py:136] DeepGEMM E8M0 enabled on current platform.
+(Worker_TP0 pid=369) INFO 09-27 12:18:08 [nvfp4.py:261] Using 'FLASHINFER_CUTLASS' NvFp4 MoE backend out of potential backends: ['FLASHINFER_TRTLLM', 'FLASHINFER_CUTEDSL', 'FLASHINFER_CUTLASS', 'VLLM_CUTLASS', 'MARLIN', 'HUMMING', 'EMULATION'].
+(Worker_TP1 pid=370) INFO 09-27 12:18:08 [l2_prefetch.py:508] [l2_prefetch] persisting L2 set-aside on cuda:1: L2 134 MB, max 84 MB, requested 0 MB, now 0 MB
+(Worker_TP2 pid=371) INFO 09-27 12:18:08 [l2_prefetch.py:508] [l2_prefetch] persisting L2 set-aside on cuda:2: L2 134 MB, max 84 MB, requested 0 MB, now 0 MB
+(Worker_TP0 pid=369) INFO 09-27 12:18:08 [l2_prefetch.py:508] [l2_prefetch] persisting L2 set-aside on cuda:0: L2 134 MB, max 84 MB, requested 0 MB, now 0 MB
+(Worker_TP0 pid=369) INFO 09-27 12:18:08 [glm53_low_latency_gemm.py:114] GLM-5.3 low-latency GEMM: 168 BF16 projections routed to the CuTe skinny GEMM for their measured decode batch sizes (16 warmup configs)
+(Worker_TP0 pid=369) INFO 09-27 12:18:08 [glm53_fp8_dense.py:336] GLM-5.3 FP8 decode: 96 BF16 projections use Marlin FP8 W8A16 for batches of at most 32 rows, prefill w8a8 [DSA o_proj x11, DSA q_b_proj x11, KDA in_proj_qkvgfab x34, KDA o_proj x34, dense FFN down x3, dense FFN gate_up x3]
+(Worker_TP0 pid=369) INFO 09-27 12:18:08 [glm53_fp8_dense.py:351] GLM-5.3 FP8 decode: LM head uses Marlin FP8 W8A16 for decode
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:   0% Completed | 0.00/184G [00:00<?, ?B/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:   1% Completed | 2.67G/184G [00:01<01:08, 2.87GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:   4% Completed | 8.28G/184G [00:02<00:40, 4.72GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:   8% Completed | 13.9G/184G [00:03<00:34, 5.32GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:  11% Completed | 19.9G/184G [00:04<00:30, 5.77GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:  14% Completed | 25.4G/184G [00:05<00:29, 5.81GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:  17% Completed | 30.8G/184G [00:06<00:28, 5.75GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:  20% Completed | 36.6G/184G [00:07<00:26, 5.91GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:  23% Completed | 42.2G/184G [00:08<00:25, 5.93GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:  26% Completed | 47.8G/184G [00:09<00:24, 5.96GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:  29% Completed | 53.7G/184G [00:10<00:23, 6.07GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:  32% Completed | 59.4G/184G [00:11<00:22, 6.08GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:  35% Completed | 65.1G/184G [00:12<00:22, 5.82GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:  38% Completed | 70.5G/184G [00:13<00:21, 5.82GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:  41% Completed | 76.2G/184G [00:14<00:19, 5.90GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:  44% Completed | 81.7G/184G [00:15<00:18, 5.87GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:  47% Completed | 87.2G/184G [00:16<00:17, 5.87GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:  50% Completed | 92.7G/184G [00:17<00:16, 5.84GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:  53% Completed | 98.1G/184G [00:18<00:15, 5.82GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:  56% Completed | 104G/184G [00:19<00:14, 5.91GB/s]
+(Worker_TP0 pid=369)  Loading safetensors using InstantTensor loader:  59% Completed | 109G/184G [00:20<00:13, 5.92GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:  62% Completed | 115G/184G [00:21<00:13, 5.68GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:  65% Completed | 120G/184G [00:22<00:12, 5.60GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:  68% Completed | 126G/184G [00:23<00:11, 5.66GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:  71% Completed | 131G/184G [00:24<00:10, 5.60GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:  74% Completed | 136G/184G [00:25<00:09, 5.60GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:  77% Completed | 141G/184G [00:26<00:08, 5.56GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:  79% Completed | 147G/184G [00:27<00:07, 5.58GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:  82% Completed | 152G/184G [00:28<00:06, 5.57GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:  85% Completed | 157G/184G [00:29<00:05, 5.58GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:  89% Completed | 164G/184G [00:30<00:03, 6.29GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:  92% Completed | 170G/184G [00:31<00:02, 6.29GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:  96% Completed | 177G/184G [00:32<00:01, 6.59GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:  99% Completed | 183G/184G [00:36<00:00, 3.76GB/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader: 100% Completed | 184G/184G [00:36<00:00, 5.49GB/s]
+(Worker_TP0 pid=369) 
+(Worker_TP0 pid=369) INFO 09-27 12:18:45 [default_loader.py:510] Loading weights took 36.88 seconds
+(Worker_TP0 pid=369) WARNING 09-27 12:18:45 [marlin_utils_fp8.py:117] Your GPU does not have native support for FP8 computation but FP8 quantization is being used. Weight-only FP8 compression will be used leveraging the Marlin kernel. This may degrade performance for compute-heavy workloads.
+(Worker_TP0 pid=369) WARNING 09-27 12:18:45 [marlin_utils.py:238] Marlin requires thread-tile padding for some weight shapes in this model. Activations and/or outputs of the padded layers are padded/sliced on every forward; performance may be degraded.
+(Worker_TP0 pid=369) INFO 09-27 12:18:46 [nvfp4.py:618] Using MoEPrepareAndFinalizeNoDPEPModular
+(Worker_TP0 pid=369) INFO 09-27 12:18:46 [glm53_fp8_dense.py:259] GLM-5.3 FP8 decode: LM head packed to Marlin FP8
+(Worker_TP0 pid=369) INFO 09-27 12:18:46 [kernel.py:430] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'], gelu_and_mul_sparse=['triton', 'native'])
+(Worker_TP1 pid=370) INFO 09-27 12:18:46 [kernel.py:430] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'], gelu_and_mul_sparse=['triton', 'native'])
+(Worker_TP2 pid=371) INFO 09-27 12:18:46 [kernel.py:430] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'], gelu_and_mul_sparse=['triton', 'native'])
+(Worker_TP1 pid=370) INFO 09-27 12:18:46 [kernel.py:430] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'], gelu_and_mul_sparse=['triton', 'native'])
+(Worker_TP0 pid=369) INFO 09-27 12:18:46 [kernel.py:430] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'], gelu_and_mul_sparse=['triton', 'native'])
+(Worker_TP2 pid=371) INFO 09-27 12:18:46 [kernel.py:430] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'], gelu_and_mul_sparse=['triton', 'native'])
+(Worker_TP1 pid=370) INFO 09-27 12:18:46 [kernel.py:430] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'], gelu_and_mul_sparse=['triton', 'native'])
+(Worker_TP0 pid=369) INFO 09-27 12:18:46 [kernel.py:430] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'], gelu_and_mul_sparse=['triton', 'native'])
+(Worker_TP2 pid=371) INFO 09-27 12:18:46 [kernel.py:430] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'], gelu_and_mul_sparse=['triton', 'native'])
+(Worker_TP0 pid=369) INFO 09-27 12:18:46 [kernel.py:430] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'], gelu_and_mul_sparse=['triton', 'native'])
+(Worker_TP1 pid=370) INFO 09-27 12:18:46 [kernel.py:430] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'], gelu_and_mul_sparse=['triton', 'native'])
+(Worker_TP2 pid=371) INFO 09-27 12:18:46 [kernel.py:430] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'], gelu_and_mul_sparse=['triton', 'native'])
+(Worker_TP0 pid=369) INFO 09-27 12:18:46 [mxfp8.py:125] Using 'MARLIN' MxFp8 MoE backend (user-requested).
+(Worker_TP0 pid=369) INFO 09-27 12:18:46 [glm53_low_latency_gemm.py:114] GLM-5.3 low-latency GEMM: 7 BF16 projections routed to the CuTe skinny GEMM for their measured decode batch sizes (10 warmup configs)
+(Worker_TP0 pid=369) INFO 09-27 12:18:46 [glm53_fp8_dense.py:332] GLM-5.3 FP8 decode (MTP draft): 2 projections [DSA o_proj x1, DSA q_b_proj x1]
+(Worker_TP0 pid=369) INFO 09-27 12:18:46 [weight_utils.py:704] Safetensors index filter selected 4/44 checkpoint shards.
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader:   0% Completed | 0.00/7.31G [00:00<?, ?B/s]
+(Worker_TP0 pid=369) Loading safetensors using InstantTensor loader: 100% Completed | 7.31G/7.31G [00:00<00:00, 16.3GB/s]
+(Worker_TP0 pid=369) 
+(Worker_TP0 pid=369) INFO 09-27 12:18:47 [default_loader.py:510] Loading weights took 0.62 seconds
+(Worker_TP0 pid=369) INFO 09-27 12:18:47 [fp8.py:740] Using MoEPrepareAndFinalizeNoDPEPModular
+(Worker_TP2 pid=371) INFO 09-27 12:18:47 [mtp_draft_head.py:154] Using a draft-only NVFP4 GLM MTP vocabulary head copy (113.48 MiB per rank); the target verifier vocabulary head remains BF16.
+(Worker_TP1 pid=370) INFO 09-27 12:18:47 [mtp_draft_head.py:154] Using a draft-only NVFP4 GLM MTP vocabulary head copy (113.48 MiB per rank); the target verifier vocabulary head remains BF16.
+(Worker_TP0 pid=369) INFO 09-27 12:18:47 [mtp_draft_head.py:154] Using a draft-only NVFP4 GLM MTP vocabulary head copy (113.48 MiB per rank); the target verifier vocabulary head remains BF16.
+(Worker_TP0 pid=369) WARNING 09-27 12:18:47 [speculator.py:240] Draft model Glm5NextMTP does not support external multimodal embeddings. Embeddings from the target model will not be passed to the drafter; using text-only draft inputs instead.
+(Worker_TP2 pid=371) INFO 09-27 12:18:48 [model_runner.py:445] Model loading took 64.46 GiB memory and 40.603146 seconds
+(Worker_TP1 pid=370) INFO 09-27 12:18:48 [model_runner.py:445] Model loading took 64.46 GiB memory and 40.623002 seconds
+(Worker_TP2 pid=371) WARNING 09-27 12:18:48 [interface.py:899] Using split GLM-5.3 cache pages: target block size 2048 tokens, recurrent-state block size 2048 tokens.
+(Worker_TP0 pid=369) INFO 09-27 12:18:48 [model_runner.py:445] Model loading took 64.46 GiB memory and 40.638935 seconds
+(Worker_TP0 pid=369) INFO 09-27 12:18:48 [utils.py:140] GLM53_TP3_RUNTIME_PROOF {"collective_backend":"b12x_pcie_oneshot","expert_parallel_size":1,"kda_decode_backend":"b12x","kda_prefill_backend":"flashkda","mm_encoder_tp_mode":"weights","tp_experts_verified":true}
+(Worker_TP1 pid=370) WARNING 09-27 12:18:48 [interface.py:899] Using split GLM-5.3 cache pages: target block size 2048 tokens, recurrent-state block size 2048 tokens.
+(Worker_TP0 pid=369) INFO 09-27 12:18:48 [topk_topp_sampler.py:80] Using FlashInfer for top-p & top-k sampling.
+(Worker_TP0 pid=369) WARNING 09-27 12:18:48 [interface.py:899] Using split GLM-5.3 cache pages: target block size 2048 tokens, recurrent-state block size 2048 tokens.
+(EngineCore pid=355) INFO 09-27 12:18:48 [utils.py:396] Using BLHNC KV cache layout.
+(Worker_TP0 pid=369) INFO 09-27 12:18:49 [b12x_prepare.py:556] b12x weights preparation uses 8 compiler workers
+(Worker_TP2 pid=371) INFO 09-27 12:18:49 [b12x_prepare.py:556] b12x weights preparation uses 8 compiler workers
+(Worker_TP1 pid=370) INFO 09-27 12:18:49 [b12x_prepare.py:556] b12x weights preparation uses 8 compiler workers
+b12x planning norm.mhc: 0/120 ready, candidates 0/1 prepared, 0 measured, 0 cached, 0 compilations, 0:00
+b12x priming gemm.bf16_gemv: 33/120 ready, 0 measured, 66 cached, 0 compilations, 0:00
+b12x waiting for ranks comm.pcie: 93/120 ready, candidates 0/1 prepared, 0 measured, 66 cached, 0 compilations, 0:00
+b12x ready comm.pcie: 120/120 ready, candidates 0/1 prepared, 0 measured, 66 cached, 0 compilations, 0:01
+(Worker_TP0 pid=369) INFO 09-27 12:18:53 [encoder_runner.py:131] Encoder cache will be initialized with a budget of 32242 tokens, and profiled with 1 video items of the maximum feature size.
+(Worker_TP2 pid=371) INFO 09-27 12:19:05 [model.py:862] [l2_prefetch] layer 0 A: 1 segs 10.0 MB: o_proj.weight[head]:10.0MB | B: 10 segs 25.0 MB: post_attention_layernorm.weight:0.0MB, hc_ffn_base:0.0MB, hc_ffn_fn:1.6MB, L1.hc_attn_fn:1.6MB, L1.hc_attn_base:0.0MB, L1.input_layernorm.weight:0.0MB, L1.self_attn.dt_bias:0.0MB, L1.self_attn.A_log:0.0MB | C: 1 segs 7.5 MB: L1.self_attn.in_proj_qkvgfab.weight[tail][head]:7.5MB | dropped 8.7 MB
+(Worker_TP1 pid=370) INFO 09-27 12:19:05 [model.py:862] [l2_prefetch] layer 0 A: 1 segs 10.0 MB: o_proj.weight[head]:10.0MB | B: 10 segs 25.0 MB: post_attention_layernorm.weight:0.0MB, hc_ffn_base:0.0MB, hc_ffn_fn:1.6MB, L1.hc_attn_fn:1.6MB, L1.hc_attn_base:0.0MB, L1.input_layernorm.weight:0.0MB, L1.self_attn.dt_bias:0.0MB, L1.self_attn.A_log:0.0MB | C: 1 segs 7.5 MB: L1.self_attn.in_proj_qkvgfab.weight[tail][head]:7.5MB | dropped 8.7 MB
+(Worker_TP0 pid=369) INFO 09-27 12:19:05 [model.py:862] [l2_prefetch] layer 0 A: 1 segs 10.0 MB: o_proj.weight[head]:10.0MB | B: 10 segs 25.0 MB: post_attention_layernorm.weight:0.0MB, hc_ffn_base:0.0MB, hc_ffn_fn:1.6MB, L1.hc_attn_fn:1.6MB, L1.hc_attn_base:0.0MB, L1.input_layernorm.weight:0.0MB, L1.self_attn.dt_bias:0.0MB, L1.self_attn.A_log:0.0MB | C: 1 segs 7.5 MB: L1.self_attn.in_proj_qkvgfab.weight[tail][head]:7.5MB | dropped 8.7 MB
+(Worker_TP2 pid=371) INFO 09-27 12:19:05 [model.py:862] [l2_prefetch] layer 2 A: 1 segs 10.0 MB: o_proj.weight[head]:10.0MB | B: 12 segs 25.0 MB: post_attention_layernorm.weight:0.0MB, hc_ffn_base:0.0MB, hc_ffn_fn:1.6MB, L3.hc_attn_fn:1.6MB, L3.hc_attn_base:0.0MB, L3.input_layernorm.weight:0.0MB, L3.self_attn.fused_qkv_a_proj.weight:16.8MB, L3.self_attn.q_a_layernorm.weight:0.0MB | C: 3 segs 7.5 MB: L3.self_attn.q_b_proj.weight[tail]:4.4MB, L3.self_attn.q_b_proj._glm53_fp8_scale[tail]:0.0MB, L3.self_attn.indexer.wq_b.weight[tail][head]:3.1MB | dropped 23.1 MB
+(Worker_TP1 pid=370) INFO 09-27 12:19:05 [model.py:862] [l2_prefetch] layer 2 A: 1 segs 10.0 MB: o_proj.weight[head]:10.0MB | B: 12 segs 25.0 MB: post_attention_layernorm.weight:0.0MB, hc_ffn_base:0.0MB, hc_ffn_fn:1.6MB, L3.hc_attn_fn:1.6MB, L3.hc_attn_base:0.0MB, L3.input_layernorm.weight:0.0MB, L3.self_attn.fused_qkv_a_proj.weight:16.8MB, L3.self_attn.q_a_layernorm.weight:0.0MB | C: 3 segs 7.5 MB: L3.self_attn.q_b_proj.weight[tail]:4.4MB, L3.self_attn.q_b_proj._glm53_fp8_scale[tail]:0.0MB, L3.self_attn.indexer.wq_b.weight[tail][head]:3.1MB | dropped 23.1 MB
+(Worker_TP0 pid=369) INFO 09-27 12:19:05 [model.py:862] [l2_prefetch] layer 2 A: 1 segs 10.0 MB: o_proj.weight[head]:10.0MB | B: 12 segs 25.0 MB: post_attention_layernorm.weight:0.0MB, hc_ffn_base:0.0MB, hc_ffn_fn:1.6MB, L3.hc_attn_fn:1.6MB, L3.hc_attn_base:0.0MB, L3.input_layernorm.weight:0.0MB, L3.self_attn.fused_qkv_a_proj.weight:16.8MB, L3.self_attn.q_a_layernorm.weight:0.0MB | C: 3 segs 7.5 MB: L3.self_attn.q_b_proj.weight[tail]:4.4MB, L3.self_attn.q_b_proj._glm53_fp8_scale[tail]:0.0MB, L3.self_attn.indexer.wq_b.weight[tail][head]:3.1MB | dropped 23.1 MB
+(Worker_TP2 pid=371) INFO 09-27 12:19:05 [model.py:862] [l2_prefetch] layer 3 A: deferred | B: 12 segs 25.0 MB: post_attention_layernorm.weight:0.0MB, hc_ffn_base:0.0MB, hc_ffn_fn:1.6MB, mlp.gate.weight:2.4MB, mlp.gate.e_score_correction_bias:0.0MB, L4.hc_attn_fn:1.6MB, L4.hc_attn_base:0.0MB, L4.input_layernorm.weight:0.0MB | C: 1 segs 7.5 MB: L4.self_attn.in_proj_qkvgfab.weight[tail][head]:7.5MB | dropped 11.1 MB
+(Worker_TP1 pid=370) INFO 09-27 12:19:05 [model.py:862] [l2_prefetch] layer 3 A: deferred | B: 12 segs 25.0 MB: post_attention_layernorm.weight:0.0MB, hc_ffn_base:0.0MB, hc_ffn_fn:1.6MB, mlp.gate.weight:2.4MB, mlp.gate.e_score_correction_bias:0.0MB, L4.hc_attn_fn:1.6MB, L4.hc_attn_base:0.0MB, L4.input_layernorm.weight:0.0MB | C: 1 segs 7.5 MB: L4.self_attn.in_proj_qkvgfab.weight[tail][head]:7.5MB | dropped 11.1 MB
+(Worker_TP0 pid=369) INFO 09-27 12:19:05 [model.py:862] [l2_prefetch] layer 3 A: deferred | B: 12 segs 25.0 MB: post_attention_layernorm.weight:0.0MB, hc_ffn_base:0.0MB, hc_ffn_fn:1.6MB, mlp.gate.weight:2.4MB, mlp.gate.e_score_correction_bias:0.0MB, L4.hc_attn_fn:1.6MB, L4.hc_attn_base:0.0MB, L4.input_layernorm.weight:0.0MB | C: 1 segs 7.5 MB: L4.self_attn.in_proj_qkvgfab.weight[tail][head]:7.5MB | dropped 11.1 MB
+(Worker_TP1 pid=370) INFO 09-27 12:19:05 [model.py:848] [l2_prefetch] layer 3 deferred MLA A: 1 segs 18.0 MB: o_proj.weight[head]:18.0MB
+(Worker_TP0 pid=369) INFO 09-27 12:19:05 [model.py:848] [l2_prefetch] layer 3 deferred MLA A: 1 segs 18.0 MB: o_proj.weight[head]:18.0MB
+(Worker_TP2 pid=371) INFO 09-27 12:19:05 [model.py:848] [l2_prefetch] layer 3 deferred MLA A: 1 segs 18.0 MB: o_proj.weight[head]:18.0MB
+(Worker_TP0 pid=369) INFO 09-27 12:19:06 [model.py:862] [l2_prefetch] layer 4 A: 1 segs 10.0 MB: o_proj.weight[head]:10.0MB | B: 12 segs 25.0 MB: post_attention_layernorm.weight:0.0MB, hc_ffn_base:0.0MB, hc_ffn_fn:1.6MB, mlp.gate.weight:2.4MB, mlp.gate.e_score_correction_bias:0.0MB, L5.hc_attn_fn:1.6MB, L5.hc_attn_base:0.0MB, L5.input_layernorm.weight:0.0MB | C: 1 segs 7.5 MB: L5.self_attn.in_proj_qkvgfab.weight[tail][head]:7.5MB | dropped 11.1 MB
+(Worker_TP1 pid=370) INFO 09-27 12:19:06 [model.py:862] [l2_prefetch] layer 4 A: 1 segs 10.0 MB: o_proj.weight[head]:10.0MB | B: 12 segs 25.0 MB: post_attention_layernorm.weight:0.0MB, hc_ffn_base:0.0MB, hc_ffn_fn:1.6MB, mlp.gate.weight:2.4MB, mlp.gate.e_score_correction_bias:0.0MB, L5.hc_attn_fn:1.6MB, L5.hc_attn_base:0.0MB, L5.input_layernorm.weight:0.0MB | C: 1 segs 7.5 MB: L5.self_attn.in_proj_qkvgfab.weight[tail][head]:7.5MB | dropped 11.1 MB
+(Worker_TP2 pid=371) INFO 09-27 12:19:06 [model.py:862] [l2_prefetch] layer 4 A: 1 segs 10.0 MB: o_proj.weight[head]:10.0MB | B: 12 segs 25.0 MB: post_attention_layernorm.weight:0.0MB, hc_ffn_base:0.0MB, hc_ffn_fn:1.6MB, mlp.gate.weight:2.4MB, mlp.gate.e_score_correction_bias:0.0MB, L5.hc_attn_fn:1.6MB, L5.hc_attn_base:0.0MB, L5.input_layernorm.weight:0.0MB | C: 1 segs 7.5 MB: L5.self_attn.in_proj_qkvgfab.weight[tail][head]:7.5MB | dropped 11.1 MB
+(Worker_TP0 pid=369) INFO 09-27 12:19:06 [model.py:862] [l2_prefetch] layer 44 A: 1 segs 10.0 MB: o_proj.weight[head]:10.0MB | B: 13 segs 25.0 MB: post_attention_layernorm.weight:0.0MB, hc_ffn_base:0.0MB, hc_ffn_fn:1.6MB, mlp.gate.weight:2.4MB, mlp.gate.e_score_correction_bias:0.0MB, L0.hc_attn_fn_broadcast:0.4MB, L0.hc_attn_fn:1.6MB, L0.hc_attn_base:0.0MB | C: 1 segs 7.5 MB: L0.self_attn.in_proj_qkvgfab.weight[tail][head]:7.5MB | dropped 11.5 MB
+(Worker_TP2 pid=371) INFO 09-27 12:19:06 [model.py:862] [l2_prefetch] layer 44 A: 1 segs 10.0 MB: o_proj.weight[head]:10.0MB | B: 13 segs 25.0 MB: post_attention_layernorm.weight:0.0MB, hc_ffn_base:0.0MB, hc_ffn_fn:1.6MB, mlp.gate.weight:2.4MB, mlp.gate.e_score_correction_bias:0.0MB, L0.hc_attn_fn_broadcast:0.4MB, L0.hc_attn_fn:1.6MB, L0.hc_attn_base:0.0MB | C: 1 segs 7.5 MB: L0.self_attn.in_proj_qkvgfab.weight[tail][head]:7.5MB | dropped 11.5 MB
+(Worker_TP1 pid=370) INFO 09-27 12:19:06 [model.py:862] [l2_prefetch] layer 44 A: 1 segs 10.0 MB: o_proj.weight[head]:10.0MB | B: 13 segs 25.0 MB: post_attention_layernorm.weight:0.0MB, hc_ffn_base:0.0MB, hc_ffn_fn:1.6MB, mlp.gate.weight:2.4MB, mlp.gate.e_score_correction_bias:0.0MB, L0.hc_attn_fn_broadcast:0.4MB, L0.hc_attn_fn:1.6MB, L0.hc_attn_base:0.0MB | C: 1 segs 7.5 MB: L0.self_attn.in_proj_qkvgfab.weight[tail][head]:7.5MB | dropped 11.5 MB
+(Worker_TP0 pid=369) INFO 09-27 12:19:07 [glm53_fp8_dense.py:233] GLM-5.3 FP8 decode: LM head BF16 weight released; all logits use FP8
+(Worker_TP0 pid=369) INFO 09-27 12:19:08 [gpu_worker.py:629] Initial free memory 93.46 GiB, reserved 23.01 GiB memory for KV Cache as specified by kv_cache_memory_bytes config and skipped memory profiling. This does not respect the gpu_memory_utilization config. Only use kv_cache_memory_bytes config when you want manual control of KV cache memory size. If OOM'ed, check the difference of initial free memory between the current run and the previous run where kv_cache_memory_bytes is suggested and update it correspondingly.
+(Worker_TP2 pid=371) INFO 09-27 12:19:08 [gpu_worker.py:629] Initial free memory 93.43 GiB, reserved 23.01 GiB memory for KV Cache as specified by kv_cache_memory_bytes config and skipped memory profiling. This does not respect the gpu_memory_utilization config. Only use kv_cache_memory_bytes config when you want manual control of KV cache memory size. If OOM'ed, check the difference of initial free memory between the current run and the previous run where kv_cache_memory_bytes is suggested and update it correspondingly.
+(Worker_TP1 pid=370) INFO 09-27 12:19:08 [gpu_worker.py:629] Initial free memory 93.46 GiB, reserved 23.01 GiB memory for KV Cache as specified by kv_cache_memory_bytes config and skipped memory profiling. This does not respect the gpu_memory_utilization config. Only use kv_cache_memory_bytes config when you want manual control of KV cache memory size. If OOM'ed, check the difference of initial free memory between the current run and the previous run where kv_cache_memory_bytes is suggested and update it correspondingly.
+(EngineCore pid=355) WARNING 09-27 12:19:08 [kv_cache_utils.py:1853] Rebalanced split KV cache groups from layer counts [12, 11, 11, 12] to [9, 9, 8, 8, 12]; shared-pool max-request cost decreased from 10221944832 to 7805343744 bytes (23.64%).
+(EngineCore pid=355) WARNING 09-27 12:19:08 [kv_cache_utils.py:2689] Keeping split GLM-5.3 cache groups with physical page sizes [1148928, 1543168].
+(EngineCore pid=355) INFO 09-27 12:19:08 [kv_cache_utils.py:2795] GPU KV cache size: 3,319,246 tokens, Maximum concurrency for 1,048,576 tokens per request: 3.17x
+(Worker_TP2 pid=371) INFO 09-27 12:19:08 [b12x_prepare.py:616] b12x autotuning uses 34 temporary KV blocks before allocating 1779 serving blocks
+(Worker_TP1 pid=370) INFO 09-27 12:19:08 [b12x_prepare.py:616] b12x autotuning uses 34 temporary KV blocks before allocating 1779 serving blocks
+(Worker_TP0 pid=369) INFO 09-27 12:19:08 [b12x_prepare.py:616] b12x autotuning uses 34 temporary KV blocks before allocating 1779 serving blocks
+(Worker_TP0 pid=369) /opt/venv/lib/python3.12/site-packages/b12x/attention/_shared/mla/kv_cache.py:833: UserWarning: Accessing the data pointer of FakeTensor is deprecated and will error in PyTorch 2.5. This is almost definitely a bug in your code and will cause undefined behavior with subsystems like torch.compile. Please wrap calls to tensor.data_ptr() in an opaque custom op; If all else fails, you can guard accesses to tensor.data_ptr() on isinstance(tensor, FakeTensor). (Triggered internally at /opt/pytorch/pytorch/c10/core/StorageImpl.cpp:46.)
+(Worker_TP0 pid=369)   if kv_c.stride(0) % 2 != 0 or kv_c.data_ptr() % 4 != 0:
+(Worker_TP0 pid=369) INFO 09-27 12:19:09 [b12x_prepare.py:556] b12x state preparation uses 8 compiler workers
+(Worker_TP2 pid=371) /opt/venv/lib/python3.12/site-packages/b12x/attention/_shared/mla/kv_cache.py:833: UserWarning: Accessing the data pointer of FakeTensor is deprecated and will error in PyTorch 2.5. This is almost definitely a bug in your code and will cause undefined behavior with subsystems like torch.compile. Please wrap calls to tensor.data_ptr() in an opaque custom op; If all else fails, you can guard accesses to tensor.data_ptr() on isinstance(tensor, FakeTensor). (Triggered internally at /opt/pytorch/pytorch/c10/core/StorageImpl.cpp:46.)
+(Worker_TP2 pid=371)   if kv_c.stride(0) % 2 != 0 or kv_c.data_ptr() % 4 != 0:
+(Worker_TP1 pid=370) /opt/venv/lib/python3.12/site-packages/b12x/attention/_shared/mla/kv_cache.py:833: UserWarning: Accessing the data pointer of FakeTensor is deprecated and will error in PyTorch 2.5. This is almost definitely a bug in your code and will cause undefined behavior with subsystems like torch.compile. Please wrap calls to tensor.data_ptr() in an opaque custom op; If all else fails, you can guard accesses to tensor.data_ptr() on isinstance(tensor, FakeTensor). (Triggered internally at /opt/pytorch/pytorch/c10/core/StorageImpl.cpp:46.)
+(Worker_TP1 pid=370)   if kv_c.stride(0) % 2 != 0 or kv_c.data_ptr() % 4 != 0:
+(Worker_TP2 pid=371) INFO 09-27 12:19:09 [b12x_prepare.py:556] b12x state preparation uses 8 compiler workers
+(Worker_TP1 pid=370) INFO 09-27 12:19:09 [b12x_prepare.py:556] b12x state preparation uses 8 compiler workers
+b12x priming attention.gdn: 0/118 ready, 0 measured, 7 cached, 0 compilations, 0:00
+b12x priming attention.dsa_indexer: 3/118 ready, 0 measured, 7 cached, 0 compilations, 0:00
+b12x selecting attention.dsa_indexer: 8/118 ready, candidates 0/1 prepared, 0 measured, 7 cached, 0 compilations, 0:01
+b12x priming attention.sparse_mla: 13/118 ready, candidates 0/1 prepared, 0 measured, 7 cached, 0 compilations, 0:02
+b12x ready gemm.bf16_gemv: 118/118 ready, 0 measured, 7 cached, 0 compilations, 0:02
+(Worker_TP2 pid=371) INFO 09-27 12:19:13 [b12x_prepare.py:556] b12x bind preparation uses 8 compiler workers
+(Worker_TP1 pid=370) INFO 09-27 12:19:13 [b12x_prepare.py:556] b12x bind preparation uses 8 compiler workers
+(Worker_TP0 pid=369) INFO 09-27 12:19:13 [b12x_prepare.py:556] b12x bind preparation uses 8 compiler workers
+b12x priming attention.dsa_indexer: 1/118 ready, 0 measured, 7 cached, 0 compilations, 0:00
+b12x selecting attention.dsa_indexer: 11/118 ready, candidates 0/1 prepared, 0 measured, 7 cached, 0 compilations, 0:01
+b12x priming attention.sparse_mla: 15/118 ready, candidates 0/1 prepared, 0 measured, 7 cached, 0 compilations, 0:02
+b12x ready gemm.bf16_gemv: 118/118 ready, 0 measured, 7 cached, 0 compilations, 0:02
+(Worker_TP1 pid=370) INFO 09-27 12:19:16 [kernel_warmup.py:172] JIT kernel warmup starting.
+(Worker_TP2 pid=371) INFO 09-27 12:19:16 [kernel_warmup.py:172] JIT kernel warmup starting.
+(Worker_TP0 pid=369) INFO 09-27 12:19:16 [kernel_warmup.py:172] JIT kernel warmup starting.
+(Worker_TP0 pid=369) JIT kernel warmup (92 compile keys):   0%|          | 0/4 [00:00<?, ?kernel/s]JIT kernel warmup (92 compile keys):  75%|███████▌  | 3/4 [00:00<00:00, 23.91kernel/s, _DecoratedTritonJitKernel (48 keys)]JIT kernel warmup (92 compile keys): 100%|██████████| 4/4 [00:00<00:00, 26.34kernel/s, _DecoratedTritonJitKernel (16 keys)]
+(Worker_TP2 pid=371) INFO 09-27 12:19:16 [kernel_warmup.py:185] JIT kernel warmup finished in 0.18s.
+(Worker_TP1 pid=370) INFO 09-27 12:19:16 [kernel_warmup.py:185] JIT kernel warmup finished in 0.18s.
+(Worker_TP0 pid=369) INFO 09-27 12:19:16 [kernel_warmup.py:185] JIT kernel warmup finished in 0.18s.
+(Worker_TP1 pid=370) [ERROR] `min_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /opt/venv/lib/python3.12/site-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.
+(Worker_TP1 pid=370) [ERROR] `max_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /opt/venv/lib/python3.12/site-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.
+(Worker_TP1 pid=370) INFO 09-27 12:19:16 [mamba_triton_warmup.py:42] Warmed Mamba batch_memcpy_kernel.
+(Worker_TP2 pid=371) [ERROR] `min_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /opt/venv/lib/python3.12/site-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.
+(Worker_TP2 pid=371) [ERROR] `max_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /opt/venv/lib/python3.12/site-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.
+(Worker_TP2 pid=371) INFO 09-27 12:19:16 [mamba_triton_warmup.py:42] Warmed Mamba batch_memcpy_kernel.
+(Worker_TP0 pid=369) [ERROR] `min_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /opt/venv/lib/python3.12/site-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.
+(Worker_TP0 pid=369) [ERROR] `max_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /opt/venv/lib/python3.12/site-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.
+(Worker_TP0 pid=369) INFO 09-27 12:19:16 [mamba_triton_warmup.py:42] Warmed Mamba batch_memcpy_kernel.
+(Worker_TP0 pid=369) INFO 09-27 12:19:16 [kernel_warmup.py:95] Warming up ll_bf16 router GEMM kernels for shapes: ((4096, 288),).
+(Worker_TP0 pid=369) INFO 09-27 12:19:17 [cutedsl_warmup.py:107] Warming up CuTeDSL compile_units=16 names=('shape-dynamic skinny GEMM',).
+(Worker_TP0 pid=369) Compiling CuTeDSL kernels:   0%|          | 0/16 [00:00<?, ?it/s]Compiling CuTeDSL kernels:   6%|▋         | 1/16 [00:00<00:02,  7.07it/s]Compiling CuTeDSL kernels:  12%|█▎        | 2/16 [00:00<00:01,  7.66it/s]Compiling CuTeDSL kernels:  19%|█▉        | 3/16 [00:00<00:01,  7.72it/s]Compiling CuTeDSL kernels:  25%|██▌       | 4/16 [00:00<00:01,  8.06it/s]Compiling CuTeDSL kernels:  31%|███▏      | 5/16 [00:00<00:01,  8.21it/s]Compiling CuTeDSL kernels:  38%|███▊      | 6/16 [00:00<00:01,  7.52it/s]Compiling CuTeDSL kernels:  44%|████▍     | 7/16 [00:00<00:01,  7.58it/s]Compiling CuTeDSL kernels:  50%|█████     | 8/16 [00:01<00:01,  7.32it/s]Compiling CuTeDSL kernels:  56%|█████▋    | 9/16 [00:01<00:00,  7.03it/s]Compiling CuTeDSL kernels:  62%|██████▎   | 10/16 [00:01<00:00,  6.94it/s]Compiling CuTeDSL kernels:  69%|██████▉   | 11/16 [00:01<00:00,  6.82it/s]Compiling CuTeDSL kernels:  75%|███████▌  | 12/16 [00:01<00:00,  6.61it/s]Compiling CuTeDSL kernels:  81%|████████▏ | 13/16 [00:01<00:00,  6.50it/s]Compiling CuTeDSL kernels:  88%|████████▊ | 14/16 [00:01<00:00,  6.46it/s]Compiling CuTeDSL kernels:  94%|█████████▍| 15/16 [00:02<00:00,  6.08it/s]Compiling CuTeDSL kernels: 100%|██████████| 16/16 [00:02<00:00,  5.59it/s]Compiling CuTeDSL kernels: 100%|██████████| 16/16 [00:02<00:00,  6.69it/s]
+(Worker_TP0 pid=369) INFO 09-27 12:19:19 [kernel_warmup.py:410] Using FlashInfer autotune cache file: /cache/jit/538e4b38d30963e2d16c0fba7fbf32a3417189b48afc78026c56f46820205ba2/glm53-flash-9a07df7f681265c5/vllm/flashinfer_autotune_cache/0.6.18+lil.cu134.sm120.g2206a14e4638/120f/6efebbe0f2fb854a2f8dab089ed991411d2eaf291ee99d549dc9ddd2e1b4fa16/autotune_configs.tp3-allranks-v1.json
+(Worker_TP0 pid=369) 2026-09-27 12:19:19,584 - INFO - autotuner.py:3475 - flashinfer.jit: [Autotuner]: Loaded 140 configs from /cache/jit/538e4b38d30963e2d16c0fba7fbf32a3417189b48afc78026c56f46820205ba2/glm53-flash-9a07df7f681265c5/vllm/flashinfer_autotune_cache/0.6.18+lil.cu134.sm120.g2206a14e4638/120f/6efebbe0f2fb854a2f8dab089ed991411d2eaf291ee99d549dc9ddd2e1b4fa16/autotune_configs.tp3-allranks-v1.json
+(Worker_TP0 pid=369) 2026-09-27 12:19:19,584 - INFO - autotuner.py:999 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
+(Worker_TP2 pid=371) 2026-09-27 12:19:19,586 - INFO - autotuner.py:3475 - flashinfer.jit: [Autotuner]: Loaded 140 configs from /cache/jit/538e4b38d30963e2d16c0fba7fbf32a3417189b48afc78026c56f46820205ba2/glm53-flash-9a07df7f681265c5/vllm/flashinfer_autotune_cache/0.6.18+lil.cu134.sm120.g2206a14e4638/120f/6efebbe0f2fb854a2f8dab089ed991411d2eaf291ee99d549dc9ddd2e1b4fa16/autotune_configs.tp3-allranks-v1.json
+(Worker_TP0 pid=369) INFO 09-27 12:19:19 [kernel_warmup.py:351] Running FlashInfer autotune with 4096 tokens and token buckets (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 768, 1024, 1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096).
+(Worker_TP2 pid=371) 2026-09-27 12:19:19,586 - INFO - autotuner.py:999 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
+(Worker_TP1 pid=370) 2026-09-27 12:19:19,587 - INFO - autotuner.py:3475 - flashinfer.jit: [Autotuner]: Loaded 140 configs from /cache/jit/538e4b38d30963e2d16c0fba7fbf32a3417189b48afc78026c56f46820205ba2/glm53-flash-9a07df7f681265c5/vllm/flashinfer_autotune_cache/0.6.18+lil.cu134.sm120.g2206a14e4638/120f/6efebbe0f2fb854a2f8dab089ed991411d2eaf291ee99d549dc9ddd2e1b4fa16/autotune_configs.tp3-allranks-v1.json
+(Worker_TP1 pid=370) 2026-09-27 12:19:19,587 - INFO - autotuner.py:999 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
+(Worker_TP2 pid=371) INFO 09-27 12:19:19 [kernel_warmup.py:351] Running FlashInfer autotune with 4096 tokens and token buckets (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 768, 1024, 1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096).
+(Worker_TP1 pid=370) INFO 09-27 12:19:19 [kernel_warmup.py:351] Running FlashInfer autotune with 4096 tokens and token buckets (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 768, 1024, 1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096).
+(Worker_TP0 pid=369) attention.dsa_indexer: DsaIndexerQuery (max_q_rows=4096, max_k_rows=262144, max_page_table_width=4096, max_candidates=0, source_layout=paged, mode=decode, dtype=bfloat16, kv_dtype=uint8, ...) was not prepared before its first use; preparing its default configuration. Repeated matching declarations are logged at DEBUG.
+(Worker_TP1 pid=370) attention.dsa_indexer: DsaIndexerQuery (max_q_rows=4096, max_k_rows=262144, max_page_table_width=4096, max_candidates=0, source_layout=paged, mode=decode, dtype=bfloat16, kv_dtype=uint8, ...) was not prepared before its first use; preparing its default configuration. Repeated matching declarations are logged at DEBUG.
+(Worker_TP2 pid=371) attention.dsa_indexer: DsaIndexerQuery (max_q_rows=4096, max_k_rows=262144, max_page_table_width=4096, max_candidates=0, source_layout=paged, mode=decode, dtype=bfloat16, kv_dtype=uint8, ...) was not prepared before its first use; preparing its default configuration. Repeated matching declarations are logged at DEBUG.
+(Worker_TP0 pid=369) 2026-09-27 12:19:19,702 - INFO - autotuner.py:1918 - flashinfer.jit: [Autotuner]: Config cache hit for trtllm::fused_moe::gemm1 (runner=MoERunner, source=config file)
+(Worker_TP1 pid=370) 2026-09-27 12:19:19,702 - INFO - autotuner.py:1918 - flashinfer.jit: [Autotuner]: Config cache hit for trtllm::fused_moe::gemm1 (runner=MoERunner, source=config file)
+(Worker_TP2 pid=371) 2026-09-27 12:19:19,702 - INFO - autotuner.py:1918 - flashinfer.jit: [Autotuner]: Config cache hit for trtllm::fused_moe::gemm1 (runner=MoERunner, source=config file)
+(Worker_TP0 pid=369) 2026-09-27 12:19:19,704 - INFO - autotuner.py:1918 - flashinfer.jit: [Autotuner]: Config cache hit for trtllm::fused_moe::gemm2 (runner=MoERunner, source=config file)
+(Worker_TP1 pid=370) 2026-09-27 12:19:19,704 - INFO - autotuner.py:1918 - flashinfer.jit: [Autotuner]: Config cache hit for trtllm::fused_moe::gemm2 (runner=MoERunner, source=config file)
+(Worker_TP2 pid=371) 2026-09-27 12:19:19,704 - INFO - autotuner.py:1918 - flashinfer.jit: [Autotuner]: Config cache hit for trtllm::fused_moe::gemm2 (runner=MoERunner, source=config file)
+(Worker_TP1 pid=370) 2026-09-27 12:19:20,228 - INFO - autotuner.py:1918 - flashinfer.jit: [Autotuner]: Config cache hit for bf16_fp4_cute_dsl_gemm (runner=CuteDslBf16Fp4Runner, source=config file)
+(Worker_TP0 pid=369) 2026-09-27 12:19:20,242 - INFO - autotuner.py:1918 - flashinfer.jit: [Autotuner]: Config cache hit for bf16_fp4_cute_dsl_gemm (runner=CuteDslBf16Fp4Runner, source=config file)
+(Worker_TP2 pid=371) 2026-09-27 12:19:20,249 - INFO - autotuner.py:1918 - flashinfer.jit: [Autotuner]: Config cache hit for bf16_fp4_cute_dsl_gemm (runner=CuteDslBf16Fp4Runner, source=config file)
+(Worker_TP0 pid=369) 2026-09-27 12:19:20,703 - INFO - autotuner.py:1022 - flashinfer.jit: [Autotuner]: Autotuning process ends
+(Worker_TP1 pid=370) 2026-09-27 12:19:20,703 - INFO - autotuner.py:1022 - flashinfer.jit: [Autotuner]: Autotuning process ends
+(Worker_TP2 pid=371) 2026-09-27 12:19:20,704 - INFO - autotuner.py:1022 - flashinfer.jit: [Autotuner]: Autotuning process ends
+(Worker_TP2 pid=371) 2026-09-27 12:19:20,705 - INFO - autotuner.py:3338 - flashinfer.jit: [Autotuner]: Saved 140 configs to /tmp/tmpku3rnys1/local.json (0 new, 140 from previous config)
+(Worker_TP1 pid=370) 2026-09-27 12:19:20,705 - INFO - autotuner.py:3338 - flashinfer.jit: [Autotuner]: Saved 140 configs to /tmp/tmp204j_7rn/local.json (0 new, 140 from previous config)
+(Worker_TP0 pid=369) 2026-09-27 12:19:20,705 - INFO - autotuner.py:3338 - flashinfer.jit: [Autotuner]: Saved 140 configs to /tmp/tmpc0stehsw/local.json (0 new, 140 from previous config)
+(Worker_TP0 pid=369) INFO 09-27 12:19:20 [l2_prefetch.py:267] [l2_prefetch] CuTe kernel ready (grid=16 block=128 chunk=4096; budgets A/B/C/A_mla=10/25/8/18 MB)
+(Worker_TP2 pid=371) INFO 09-27 12:19:20 [l2_prefetch.py:267] [l2_prefetch] CuTe kernel ready (grid=16 block=128 chunk=4096; budgets A/B/C/A_mla=10/25/8/18 MB)
+(Worker_TP1 pid=370) INFO 09-27 12:19:20 [l2_prefetch.py:267] [l2_prefetch] CuTe kernel ready (grid=16 block=128 chunk=4096; budgets A/B/C/A_mla=10/25/8/18 MB)
+(Worker_TP0 pid=369) INFO 09-27 12:19:23 [breakable_cudagraph.py:327] Breakable CUDA graph enabled
+(Worker_TP0 pid=369) Capturing CUDA graphs (PIECEWISE):   0%|          | 0/10 [00:00<?, ?it/s]Capturing CUDA graphs (PIECEWISE):  10%|█         | 1/10 [00:00<00:02,  3.22it/s]Capturing CUDA graphs (PIECEWISE):  20%|██        | 2/10 [00:00<00:02,  3.16it/s]Capturing CUDA graphs (PIECEWISE):  30%|███       | 3/10 [00:00<00:02,  3.25it/s]Capturing CUDA graphs (PIECEWISE):  40%|████      | 4/10 [00:01<00:01,  3.40it/s]Capturing CUDA graphs (PIECEWISE):  50%|█████     | 5/10 [00:01<00:01,  3.68it/s]Capturing CUDA graphs (PIECEWISE):  60%|██████    | 6/10 [00:01<00:01,  3.74it/s]Capturing CUDA graphs (PIECEWISE):  70%|███████   | 7/10 [00:01<00:00,  3.88it/s]Capturing CUDA graphs (PIECEWISE):  80%|████████  | 8/10 [00:02<00:00,  3.96it/s]Capturing CUDA graphs (PIECEWISE):  90%|█████████ | 9/10 [00:02<00:00,  3.91it/s]Capturing CUDA graphs (PIECEWISE): 100%|██████████| 10/10 [00:02<00:00,  4.05it/s]Capturing CUDA graphs (PIECEWISE): 100%|██████████| 10/10 [00:02<00:00,  3.75it/s]
+(Worker_TP1 pid=370) INFO 09-27 12:19:28 [speculator.py:187] Capturing model for speculator...
+(Worker_TP0 pid=369) Capturing CUDA graphs (FULL):   0%|          | 0/8 [00:00<?, ?it/s]Capturing CUDA graphs (FULL):  12%|█▎        | 1/8 [00:00<00:02,  2.69it/s]Capturing CUDA graphs (FULL):  25%|██▌       | 2/8 [00:00<00:01,  3.04it/s]Capturing CUDA graphs (FULL):  38%|███▊      | 3/8 [00:00<00:01,  3.23it/s]Capturing CUDA graphs (FULL):  50%|█████     | 4/8 [00:01<00:01,  3.28it/s]Capturing CUDA graphs (FULL):  62%|██████▎   | 5/8 [00:01<00:00,  3.58it/s]Capturing CUDA graphs (FULL):  75%|███████▌  | 6/8 [00:01<00:00,  3.81it/s]Capturing CUDA graphs (FULL):  88%|████████▊ | 7/8 [00:01<00:00,  3.81it/s]Capturing CUDA graphs (FULL): 100%|██████████| 8/8 [00:02<00:00,  3.93it/s]Capturing CUDA graphs (FULL): 100%|██████████| 8/8 [00:02<00:00,  3.61it/s]
+(Worker_TP2 pid=371) INFO 09-27 12:19:28 [speculator.py:187] Capturing model for speculator...
+(Worker_TP0 pid=369) INFO 09-27 12:19:28 [speculator.py:187] Capturing model for speculator...
+(Worker_TP0 pid=369) Capturing prefill CUDA graphs (PIECEWISE):   0%|          | 0/10 [00:00<?, ?it/s]Capturing prefill CUDA graphs (PIECEWISE):  90%|█████████ | 9/10 [00:00<00:00, 84.05it/s]Capturing prefill CUDA graphs (PIECEWISE): 100%|██████████| 10/10 [00:00<00:00, 85.81it/s]
+(Worker_TP0 pid=369) Capturing prefill CUDA graphs (FULL):   0%|          | 0/4 [00:00<?, ?it/s]Capturing prefill CUDA graphs (FULL): 100%|██████████| 4/4 [00:00<00:00, 84.62it/s]
+(Worker_TP0 pid=369) Capturing decode CUDA graphs (FULL):   0%|          | 0/4 [00:00<?, ?it/s]Capturing decode CUDA graphs (FULL): 100%|██████████| 4/4 [00:00<00:00, 66.61it/s]
+(Worker_TP2 pid=371) INFO 09-27 12:19:28 [model_runner.py:1251] Graph capturing finished in 6 secs, took 0.68 GiB
+(Worker_TP0 pid=369) INFO 09-27 12:19:28 [model_runner.py:1251] Graph capturing finished in 6 secs, took 0.68 GiB
+(Worker_TP1 pid=370) INFO 09-27 12:19:28 [model_runner.py:1251] Graph capturing finished in 6 secs, took 0.68 GiB
+(Worker_TP0 pid=369) INFO 09-27 12:19:29 [jit_monitor.py:85] Kernel JIT monitor activated; monitored JIT compilations during inference will use mode=warn.
+(Worker_TP2 pid=371) INFO 09-27 12:19:29 [jit_monitor.py:85] Kernel JIT monitor activated; monitored JIT compilations during inference will use mode=warn.
+(Worker_TP1 pid=370) INFO 09-27 12:19:29 [jit_monitor.py:85] Kernel JIT monitor activated; monitored JIT compilations during inference will use mode=warn.
+(EngineCore pid=355) INFO 09-27 12:19:29 [core.py:389] init engine (profile, create kv cache, warmup model) took 41.72 s
+(EngineCore pid=355) INFO 09-27 12:19:30 [kv_cache_utils.py:752] kv cache group sizes [2048, 2048, 2048, 2048, 2048]
+(EngineCore pid=355) INFO 09-27 12:19:30 [kv_cache_utils.py:753] kv lcm block sizes 2048
+(EngineCore pid=355) WARNING 09-27 12:19:30 [indexer_topk.py:29] Failed to import the DeepSelect extension (vllm._deepselect_C): No module named 'vllm._deepselect_C'
+(EngineCore pid=355) ERROR 09-27 12:19:30 [mxfp4.py:61] Failed to import Triton kernels. Please make sure your triton version is compatible. Error: No module named 'triton_kernels.matmul_ogs'
+(EngineCore pid=355) INFO 09-27 12:19:32 [kv_cache_manager.py:267] Request-boundary recurrent checkpoint caching is enabled. Supported chat requests retain leading instructions, the complete prompt, and the response endpoint.
+(EngineCore pid=355) INFO 09-27 12:19:33 [kernel.py:430] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'], gelu_and_mul_sparse=['triton', 'native'])
+(EngineCore pid=355) WARNING 09-27 12:19:33 [vllm.py:2272] max_num_scheduled_tokens is set to 4096 based on the speculative decoding settings. This may lead to suboptimal performance. Consider increasing max_num_batched_tokens to accommodate the additional draft token slots, or decrease num_speculative_tokens.
+(EngineCore pid=355) INFO 09-27 12:19:33 [compilation.py:336] Enabled custom fusions: norm_quant, act_quant, allreduce_rms
+(APIServer pid=1) INFO 09-27 12:19:33 [entry.py:135] Supported tasks: ['generate']
+(APIServer pid=1) INFO 09-27 12:19:33 [factories.py:76] Scale-out endpoints are disabled. Set --enable-scale-out to enable them.
+(APIServer pid=1) INFO 09-27 12:19:33 [parser_manager.py:36] "auto" tool choice has been enabled.
+(APIServer pid=1) INFO 09-27 12:19:34 [hf.py:642] Detected the chat template content format to be 'openai'. You can set `--chat-template-content-format` to override this.
+(APIServer pid=1) WARNING 09-27 12:19:34 [model.py:1788] Default vLLM sampling parameters have been overridden by the model's `generation_config.json`: `{'temperature': 1.0, 'top_p': 0.95}`. If this is not intended, please relaunch vLLM instance with `--generation-config vllm`.
+(APIServer pid=1) INFO 09-27 12:19:34 [entry.py:139] Starting vLLM server on http://0.0.0.0:8000
+(APIServer pid=1) INFO 09-27 12:19:34 [launcher.py:61] Available routes are:
+(APIServer pid=1) INFO 09-27 12:19:34 [launcher.py:70] Route: /openapi.json, Methods: HEAD, GET
+(APIServer pid=1) INFO 09-27 12:19:34 [launcher.py:70] Route: /docs, Methods: HEAD, GET
+(APIServer pid=1) INFO 09-27 12:19:34 [launcher.py:70] Route: /docs/oauth2-redirect, Methods: HEAD, GET
+(APIServer pid=1) INFO 09-27 12:19:34 [launcher.py:70] Route: /redoc, Methods: HEAD, GET
+(APIServer pid=1) INFO 09-27 12:19:34 [launcher.py:70] Route: /load, Methods: GET
+(APIServer pid=1) INFO 09-27 12:19:34 [launcher.py:70] Route: /version, Methods: GET
+(APIServer pid=1) INFO 09-27 12:19:34 [launcher.py:70] Route: /health, Methods: GET
+(APIServer pid=1) INFO 09-27 12:19:34 [launcher.py:70] Route: /metrics, Methods: GET
+(APIServer pid=1) INFO 09-27 12:19:34 [launcher.py:70] Route: /tokenize, Methods: POST
+(APIServer pid=1) INFO 09-27 12:19:34 [launcher.py:70] Route: /detokenize, Methods: POST
+(APIServer pid=1) INFO 09-27 12:19:34 [launcher.py:70] Route: /v1/models, Methods: GET
+(APIServer pid=1) INFO 09-27 12:19:34 [launcher.py:70] Route: /ping, Methods: GET
+(APIServer pid=1) INFO 09-27 12:19:34 [launcher.py:70] Route: /ping, Methods: POST
+(APIServer pid=1) INFO 09-27 12:19:34 [launcher.py:70] Route: /invocations, Methods: POST
+(APIServer pid=1) INFO 09-27 12:19:34 [launcher.py:70] Route: /v1/chat/completions, Methods: POST
+(APIServer pid=1) INFO 09-27 12:19:34 [launcher.py:70] Route: /v1/chat/completions/batch, Methods: POST
+(APIServer pid=1) INFO 09-27 12:19:34 [launcher.py:70] Route: /v1/responses, Methods: POST
+(APIServer pid=1) INFO 09-27 12:19:34 [launcher.py:70] Route: /v1/responses/{response_id}, Methods: GET
+(APIServer pid=1) INFO 09-27 12:19:34 [launcher.py:70] Route: /v1/responses/{response_id}/cancel, Methods: POST
+(APIServer pid=1) INFO 09-27 12:19:34 [launcher.py:70] Route: /v1/completions, Methods: POST
+(APIServer pid=1) INFO 09-27 12:19:34 [launcher.py:70] Route: /v1/messages, Methods: POST
+(APIServer pid=1) INFO 09-27 12:19:34 [launcher.py:70] Route: /v1/messages/count_tokens, Methods: POST
+(APIServer pid=1) INFO 09-27 12:19:34 [launcher.py:70] Route: /generative_scoring, Methods: POST
+(APIServer pid=1) INFO 09-27 12:19:34 [launcher.py:70] Route: /scale_elastic_ep, Methods: POST
+(APIServer pid=1) INFO 09-27 12:19:34 [launcher.py:70] Route: /is_scaling_elastic_ep, Methods: POST
+(APIServer pid=1) INFO:     Started server process [1]
+(APIServer pid=1) INFO:     Waiting for application startup.
+(APIServer pid=1) INFO:     Application startup complete.
+(APIServer pid=1) INFO:     192.168.128.1:38136 - "GET /health HTTP/1.1" 200 OK

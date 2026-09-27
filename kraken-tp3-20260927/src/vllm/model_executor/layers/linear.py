@@ -1,0 +1,2387 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from abc import abstractmethod
+from collections.abc import Callable, Iterable
+from typing import Any
+
+import torch
+from torch.nn.parameter import Parameter
+from typing_extensions import TypeIs
+
+import vllm.envs as envs
+from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
+from vllm.distributed import (
+    divide,
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    split_tensor_along_last_dim,
+    tensor_model_parallel_all_gather,
+    tensor_model_parallel_all_reduce,
+)
+from vllm.logger import init_logger
+from vllm.model_executor.custom_op import PluggableLayer
+from vllm.model_executor.determinism.batch_invariant import (
+    linear_batch_invariant,
+)
+from vllm.model_executor.layers.quantization import resolve_quant_method
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig,
+    QuantizeMethodBase,
+)
+from vllm.model_executor.layers.utils import (
+    dispatch_unquantized_gemm,
+)
+from vllm.model_executor.parameter import (
+    BasevLLMParameter,
+    BlockQuantScaleParameter,
+    ModelWeightParameter,
+    PackedColumnParameter,
+    PackedvLLMParameter,
+    PerTensorScaleParameter,
+    RowvLLMParameter,
+    load_tensor_parallel_shard,
+    load_tensor_parallel_weight,
+)
+from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.weight_transfer import allocate_weights, copy_weight
+from vllm.platforms import current_platform
+
+logger = init_logger(__name__)
+
+def _validate_loaded_axis_size(
+    name: str,
+    loaded_size: int,
+    physical_size: int,
+) -> None:
+    if loaded_size <= 0:
+        raise ValueError(f"{name} must be positive, got {loaded_size}")
+    if loaded_size > physical_size:
+        raise ValueError(
+            f"{name}={loaded_size} exceeds physical size {physical_size}"
+        )
+
+
+def _validate_packed_loaded_size(
+    param: Parameter,
+    dim: int,
+    loaded_size: int,
+    name: str,
+) -> None:
+    if getattr(param, "packed_dim", None) != dim:
+        return
+    packed_factor = getattr(param, "packed_factor", 1)
+    if loaded_size % packed_factor:
+        raise ValueError(
+            f"{name}={loaded_size} is not divisible by packed_factor="
+            f"{packed_factor}"
+        )
+
+
+def _validate_padded_axis_layout(
+    param: Parameter,
+    dim: int,
+    loaded_size: int,
+    physical_size: int,
+    physical_shard_size: int,
+    physical_shard_offset: int,
+    name: str,
+    weight_block_size: tuple[int, ...] | None = None,
+) -> int:
+    """Validate a padded logical axis and return its checkpoint tensor size."""
+    if isinstance(param, BlockQuantScaleParameter):
+        if weight_block_size is None:
+            raise ValueError(f"{name} requires a weight block size")
+        if dim == getattr(param, "output_dim", None):
+            block_index = 0
+        elif dim == getattr(param, "input_dim", None):
+            block_index = 1
+        else:
+            raise ValueError(f"{name} does not identify a block-scaled axis")
+        if block_index >= len(weight_block_size):
+            raise ValueError(
+                f"{name} has no block size for parameter dimension {dim}"
+            )
+        block_size = weight_block_size[block_index]
+        shard_end = physical_shard_offset + physical_shard_size
+        boundaries = [
+            boundary
+            for boundary in (physical_shard_offset, shard_end)
+            if 0 < boundary < physical_size
+        ]
+        if physical_shard_size < physical_size:
+            boundaries.append(physical_shard_size)
+        if any(boundary % block_size for boundary in boundaries):
+            raise ValueError(
+                f"{name} physical TP boundaries are not aligned to "
+                f"quantization block size {block_size}"
+            )
+        return (loaded_size + block_size - 1) // block_size
+
+    storage_factor = (
+        getattr(param, "input_dim_storage_factor", 1)
+        if dim == getattr(param, "input_dim", None)
+        else 1
+    )
+    if storage_factor != 1:
+        shard_end = physical_shard_offset + physical_shard_size
+        for boundary_name, boundary in (
+            ("loaded size", loaded_size),
+            ("physical shard offset", physical_shard_offset),
+            ("physical shard end", shard_end),
+        ):
+            if boundary % storage_factor:
+                raise ValueError(
+                    f"{name} {boundary_name} {boundary} is not aligned to "
+                    f"input_dim_storage_factor={storage_factor}"
+                )
+        return loaded_size // storage_factor
+
+    if getattr(param, "packed_dim", None) == dim:
+        packed_factor = getattr(param, "packed_factor", 1)
+        shard_end = physical_shard_offset + physical_shard_size
+        for boundary_name, boundary in (
+            ("loaded size", loaded_size),
+            ("physical shard offset", physical_shard_offset),
+            ("physical shard end", shard_end),
+        ):
+            if boundary % packed_factor:
+                raise ValueError(
+                    f"{name} {boundary_name} {boundary} is not aligned to "
+                    f"packed_factor={packed_factor}"
+                )
+        if isinstance(param, (PackedColumnParameter, PackedvLLMParameter)):
+            packed_size, _ = param.adjust_shard_indexes_for_packing(
+                shard_size=loaded_size, shard_offset=0
+            )
+            return packed_size
+
+    return loaded_size
+
+
+WEIGHT_LOADER_V2_SUPPORTED = [
+    "UnquantizedLinearMethod",
+    "CompressedTensorsLinearMethod",
+    "CompressedTensorsLinearTransformMethod",
+    "QutlassNvFP4LinearMethod",
+    "AutoAWQMarlinLinearMethod",
+    "AutoAWQLinearMethod",
+    "AutoGPTQLinearMethod",
+    "Fp8LinearMethod",
+    "FBGEMMFp8LinearMethod",
+    "QuarkLinearMethod",
+    "HummingLinearMethod",
+    # ModelOptLinearMethod self-registers via
+    # register_weight_loader_v2_supported_method (see modelopt.py).
+]
+
+
+def register_weight_loader_v2_supported_method(cls):
+    """Decorator to register a LinearMethod as supporting weight_loader_v2."""
+    WEIGHT_LOADER_V2_SUPPORTED.append(cls.__name__)
+    return cls
+
+
+def _register_b12x_row_parallel_collective(
+    owner, prefix: str, output_size: int, enabled: bool
+) -> None:
+    """Describe the real row-parallel output; transport owns preparation."""
+    if not enabled:
+        return
+    from vllm.distributed.parallel_state import register_b12x_collective_describer
+
+    def describe(requirements):
+        if not prefix:
+            raise ValueError(
+                "B12X row-parallel collective preparation requires "
+                "a stable module prefix"
+            )
+        from vllm.distributed.device_communicators.b12x_pcie_all_reduce import (
+            B12xPcieInvocation,
+        )
+
+        return tuple(
+            B12xPcieInvocation(
+                name=f"{prefix}.row_all_reduce.m{rows}",
+                operation="all_reduce",
+                shape=(rows, output_size),
+                dtype=requirements.output_dtype,
+            )
+            for rows in requirements.token_counts
+        )
+
+    register_b12x_collective_describer(owner, describe)
+
+
+def adjust_marlin_shard(
+    param: Parameter,
+    shard_size: int,
+    shard_offset: int,
+) -> tuple[int, int]:
+    marlin_tile_size: int | None = getattr(param, "marlin_tile_size", None)
+    if marlin_tile_size is None:
+        return shard_size, shard_offset
+
+    return shard_size * marlin_tile_size, shard_offset * marlin_tile_size
+
+
+def adjust_block_scale_shard(
+    weight_block_size: tuple[int, ...] | None,
+    shard_size: int,
+    shard_offset: int,
+) -> tuple[int, int]:
+    assert weight_block_size is not None
+    block_n = weight_block_size[0]
+    shard_offset = (shard_offset + block_n - 1) // block_n
+    shard_size = (shard_size + block_n - 1) // block_n
+    return shard_size, shard_offset
+
+
+def adjust_scalar_to_fused_array(
+    param_data: torch.Tensor,
+    loaded_weight: torch.Tensor,
+    shard_id: int | str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """For fused modules (QKV and MLP) we have an array of length
+    N that holds 1 scale for each "logical" matrix. So the param
+    is an array of length N. The loaded_weight corresponds to
+    one of the shards on disk. Here, we slice the param based on
+    the shard_id for loading.
+    """
+    qkv_idxs = {"q": 0, "k": 1, "v": 2}
+
+    if isinstance(shard_id, str):
+        shard_id = qkv_idxs[shard_id]
+    elif not isinstance(shard_id, int):
+        raise ValueError(f"Unknown Shard Id {shard_id}")
+
+    # AutoFP8 scales do not have a shape
+    # compressed-tensors scales do have a shape
+    if len(loaded_weight.shape) != 0:
+        assert loaded_weight.shape[0] == 1
+        loaded_weight = loaded_weight[0]
+
+    return param_data[shard_id], loaded_weight
+
+
+class LinearMethodBase(QuantizeMethodBase):
+    """Base class for different (maybe quantized) linear methods."""
+
+    @abstractmethod
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        """Create weights for a linear layer.
+           The weights will be set as attributes of the layer.
+
+        Args:
+            layer: The layer that is using the LinearMethodBase factory.
+            input_size_per_partition: Size of the weight input dim on rank X.
+            output_partition_sizes: Sizes of the output dim of each logical
+                weight on rank X. E.g., output_partition_sizes for QKVLinear
+                is a list contains the width of Wq, Wk, Wv on rank X.
+            input_size: Size of the input dim of the weight across all ranks.
+            output_size: Size of the output dim of the weight across all ranks.
+            params_dtype: Datatype of the parameters.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Apply the weights in layer to the input tensor.
+        Expects create_weights to have been called before on the layer."""
+        raise NotImplementedError
+
+    def get_workspace_size(self, layer: torch.nn.Module, rows: int) -> int:
+        """Scratch bytes one call at ``rows`` needs from a caller-reserved view.
+
+        The shared-experts runner reserves the maximum over its linears and
+        binds it while they run on a side stream. Methods that own a kernel
+        report the kernel's requirement; everything else needs none.
+        """
+        kernel = getattr(self, "kernel", None)
+        report = getattr(kernel, "get_workspace_size", None)
+        return 0 if report is None else int(report(layer, rows))
+
+
+class UnquantizedLinearMethod(LinearMethodBase):
+    """Linear method without quantization."""
+
+    supports_pre_processed_weights = True
+
+    def __init__(self) -> None:
+        config = get_current_vllm_config_or_none()
+        linear_backend = (
+            config.kernel_config.linear_backend if config is not None else "auto"
+        )
+        self._linear_backend = linear_backend
+        self._gemm_impl = dispatch_unquantized_gemm(linear_backend)
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        # This method creates unquantized linear weights.
+        # The weights are not quantized, and they are not sharded.
+        # The amount of memory allocated for the weights is
+        # sum(output_partition_sizes) * input_size_per_partition.
+        weight_loader = extra_weight_attrs.pop("weight_loader")
+        weight = ModelWeightParameter(
+            data=torch.empty(
+                sum(output_partition_sizes),
+                input_size_per_partition,
+                dtype=params_dtype,
+            ),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader,
+        )
+
+        layer.register_parameter("weight", weight)
+        set_weight_attrs(weight, extra_weight_attrs)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if self._linear_backend == "b12x" and current_platform.is_cuda():
+            from vllm.model_executor.kernels.linear.b12x_unquantized import (
+                maybe_attach_b12x_bf16_gemv,
+            )
+
+            maybe_attach_b12x_bf16_gemv(layer)
+        if current_platform.is_cpu():
+            # MLA's kv_b_proj (see `skip_weight_relayout`): not perf-critical,
+            # so skip packing and use a plain fallback.
+            if getattr(layer, "skip_weight_relayout", False):
+                layer.cpu_linear = torch.nn.functional.linear
+                return
+
+            from vllm.model_executor.layers.utils import dispatch_cpu_unquantized_gemm
+
+            dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
+        elif current_platform.is_xpu():
+            # Opt-in: F.linear on XPU is faster with an N-contiguous (N, K) weight
+            # when K > N, but oneDNN's ab-weights matmul is not run-to-run bitwise
+            # bitwise reproducible. Off by default.
+            weight = layer.weight.data
+            if (
+                envs.VLLM_XPU_FORCE_N_CONTIG_WEIGHT
+                and weight.ndim == 2
+                and weight.stride(0) != 1
+            ):
+                layer.weight.data = weight.t().contiguous().t()
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if envs.VLLM_BATCH_INVARIANT and (
+            current_platform.is_cuda_alike() or current_platform.is_xpu()
+        ):
+            return linear_batch_invariant(x, layer.weight, bias)
+        return self._gemm_impl(layer, x, layer.weight, bias)
+
+
+class LinearBase(PluggableLayer):
+    """Base linear layer.
+
+    Args:
+        input_size: input dimension of the linear layer.
+        output_size: output dimension of the linear layer.
+        skip_bias_add: If true, skip adding bias but instead return it.
+        params_dtype: Data type for the parameters.
+        quant_config: Quantization configure.
+        prefix: Prefix for parameter names.
+        return_bias: If true, return bias together with outputs in forward pass.
+        disable_tp: If true, tensor parallelism will be disabled for this layer.
+    """
+
+    requires_unquantized_input = False
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        bias: bool = False,
+        skip_bias_add: bool = False,
+        params_dtype: torch.dtype | None = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+        *,
+        return_bias: bool = True,
+        disable_tp: bool = False,
+        tp_rank: int | None = None,
+        tp_size: int | None = None,
+    ):
+        super().__init__()
+
+        # Keep input parameters
+        self.input_size = input_size
+        self.output_size = output_size
+        self.has_bias = bias
+        self.skip_bias_add = skip_bias_add
+        if params_dtype is None:
+            params_dtype = torch.get_default_dtype()
+        self.params_dtype = params_dtype
+        self.quant_config = quant_config
+        self.prefix = prefix
+        self.allow_fp8_block_shape_mismatch = False
+        self.quant_method: QuantizeMethodBase
+        if quant_config is None:
+            self.quant_method = UnquantizedLinearMethod()
+        elif quant_method := resolve_quant_method(quant_config, self, prefix=prefix):
+            self.quant_method = quant_method
+        else:
+            raise ValueError("All linear layers should support quant method.")
+        self.return_bias = return_bias
+        self.disable_tp = disable_tp
+        if disable_tp:
+            self.tp_rank, self.tp_size = 0, 1
+        else:
+            self.tp_rank = (
+                tp_rank if tp_rank is not None else get_tensor_model_parallel_rank()
+            )
+            self.tp_size = (
+                tp_size
+                if tp_size is not None
+                else get_tensor_model_parallel_world_size()
+            )
+
+    def update_param_tp_status(self):
+        # Single source of truth for a parameter's TP state. BasevLLMParameter
+        # stamps self.tp_rank with the *global* rank in __init__; this reconciles
+        # every child parameter to the *layer's* tp_rank/tp_size (which correctly
+        # accounts for disable_tp -> replicated weights with tp_rank == 0).
+        #
+        # Must be re-run whenever parameters are (re-)created after construction,
+        # e.g. after quant_method.process_weights_after_loading() swaps in fresh
+        # Parameters. Otherwise a later load_weights()/weight-refit would narrow a
+        # replicated weight at global_rank * shard_size and overflow.
+        for param in self.parameters():
+            if isinstance(param, BasevLLMParameter):
+                param.tp_rank = self.tp_rank
+                param.tp_size = self.tp_size
+
+
+# --8<-- [start:replicated_linear]
+@PluggableLayer.register("replicated_linear")
+class ReplicatedLinear(LinearBase):
+    """Replicated linear layer.
+
+    Args:
+        input_size: input dimension of the linear layer.
+        output_size: output dimension of the linear layer.
+        bias: If true, add bias.
+        skip_bias_add: If true, skip adding bias but instead return it.
+        params_dtype: Data type for the parameters.
+        quant_config: Quantization configure.
+        prefix: The name of the layer in the state dict, including all parents
+                        (e.g. model.layers.0.qkv_proj)
+        return_bias: If true, return bias together with outputs in forward pass.
+        disable_tp: Take no effect for replicated linear layers.
+    """
+
+    # --8<-- [end:replicated_linear]
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        bias: bool = True,
+        skip_bias_add: bool = False,
+        params_dtype: torch.dtype | None = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+        *,
+        return_bias: bool = True,
+        disable_tp: bool = False,
+    ):
+        # If MergedReplicatedLinear, use output size of each partition.
+        if hasattr(self, "output_sizes"):
+            self.output_partition_sizes = self.output_sizes
+        else:
+            self.output_partition_sizes = [output_size]
+
+        super().__init__(
+            input_size,
+            output_size,
+            bias,
+            skip_bias_add,
+            params_dtype,
+            quant_config,
+            prefix=prefix,
+            return_bias=return_bias,
+            disable_tp=disable_tp,
+        )
+
+        allocate_weights(
+            self.quant_method.create_weights,
+            self,
+            self.input_size,
+            self.output_partition_sizes,
+            self.input_size,
+            self.output_size,
+            self.params_dtype,
+            weight_loader=self.weight_loader,
+        )
+
+        if bias:
+            self.bias = Parameter(
+                allocate_weights(
+                    torch.empty, self.output_size, dtype=self.params_dtype
+                ),
+                requires_grad=False,
+            )
+            set_weight_attrs(
+                self.bias,
+                {
+                    "output_dim": 0,
+                    "weight_loader": self.weight_loader,
+                },
+            )
+        else:
+            self.register_parameter("bias", None)
+
+    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+        if len(loaded_weight.shape) == 0:
+            loaded_weight = loaded_weight.reshape(1)
+
+        assert param.size() == loaded_weight.size(), (
+            f"Tried to load weights of size {loaded_weight.size()}"
+            f"to a parameter of size {param.size()}"
+        )
+        copy_weight(param.data, loaded_weight)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        bias = self.bias if not self.skip_bias_add else None
+
+        output = self.quant_method.apply(self, x, bias)
+
+        if not self.return_bias:
+            return output
+        output_bias = self.bias if self.skip_bias_add else None
+        return output, output_bias
+
+    def extra_repr(self) -> str:
+        s = f"in_features={self.input_size}"
+        s += f", output_features={self.output_size}"
+        s += f", bias={self.bias is not None}"
+        return s
+
+
+# --8<-- [start:column_parallel_linear]
+@PluggableLayer.register("column_parallel_linear")
+class ColumnParallelLinear(LinearBase):
+    """Linear layer with column parallelism.
+
+    The linear layer is defined as Y = XA + b. A is parallelized along
+    its second dimension as A = [A_1, ..., A_p].
+
+    Args:
+        input_size: first dimension of matrix A.
+        output_size: second dimension of matrix A.
+        bias: If true, add bias.
+        gather_output: If true, call all-gather on output and make Y available
+                       to all GPUs, otherwise, every GPU will have its output
+                       which is Y_i = XA_i
+        skip_bias_add: This was added to enable performance optimizations where
+                       bias can be fused with other element-wise operations. we
+                       skip adding bias but instead return it.
+        params_dtype: Data type for the parameters.
+        quant_config: Quantization configure.
+        prefix: The name of the layer in the state dict, including all parents
+                        (e.g. model.layers.0.qkv_proj)
+        return_bias: If true, return bias together with outputs in forward pass.
+        disable_tp: If true, weights matrix won't be sharded through tp rank.
+        tp_rank: Override the tensor-parallel rank used for sharding. Defaults to
+            the global TP rank. Used to shard at a coarser granularity than one
+            shard per rank (see ``DCPGroupColumnParallelLinear``).
+        tp_size: Override the tensor-parallel world size used for sharding.
+            Defaults to the global TP world size.
+        loaded_output_size: Output dimension represented by the checkpoint.
+            Defaults to ``output_size``. A smaller explicit value enables
+            destination-local zero padding for the physical TP shard tail.
+    """
+
+    # --8<-- [end:column_parallel_linear]
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        bias: bool = True,
+        gather_output: bool = False,
+        skip_bias_add: bool = False,
+        params_dtype: torch.dtype | None = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+        *,
+        return_bias: bool = True,
+        disable_tp: bool = False,
+        tp_rank: int | None = None,
+        tp_size: int | None = None,
+        loaded_output_size: int | None = None,
+    ):
+        # Divide the weight matrix along the last dimension.
+        if disable_tp:
+            self.tp_rank, self.tp_size = 0, 1
+        else:
+            self.tp_rank = (
+                tp_rank if tp_rank is not None else get_tensor_model_parallel_rank()
+            )
+            self.tp_size = (
+                tp_size
+                if tp_size is not None
+                else get_tensor_model_parallel_world_size()
+            )
+        self.loaded_output_size = (
+            output_size if loaded_output_size is None else loaded_output_size
+        )
+        _validate_loaded_axis_size(
+            "loaded_output_size", self.loaded_output_size, output_size
+        )
+        self._allow_loaded_output_padding = (
+            loaded_output_size is not None
+            and self.loaded_output_size != output_size
+        )
+        self.input_size_per_partition = input_size
+        self.output_size_per_partition = divide(output_size, self.tp_size)
+        self.output_partition_sizes = [self.output_size_per_partition]
+        # If QKV or MergedColumn, use output size of each partition.
+        if hasattr(self, "output_sizes"):
+            self.output_partition_sizes = [
+                divide(output_size, self.tp_size) for output_size in self.output_sizes
+            ]
+
+        super().__init__(
+            input_size,
+            output_size,
+            bias,
+            skip_bias_add,
+            params_dtype,
+            quant_config,
+            prefix,
+            return_bias=return_bias,
+            disable_tp=disable_tp,
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
+        )
+
+        self._maybe_allow_fp8_block_shape_mismatch()
+        self.gather_output = gather_output
+
+        allocate_weights(
+            self.quant_method.create_weights,
+            layer=self,
+            input_size_per_partition=self.input_size_per_partition,
+            output_partition_sizes=self.output_partition_sizes,
+            input_size=self.input_size,
+            output_size=self.output_size,
+            params_dtype=self.params_dtype,
+            weight_loader=(
+                self.weight_loader_v2
+                if self.quant_method.__class__.__name__ in WEIGHT_LOADER_V2_SUPPORTED
+                else self.weight_loader
+            ),
+        )
+
+        if bias:
+            self.bias = Parameter(
+                allocate_weights(
+                    torch.empty, self.output_size_per_partition, dtype=params_dtype
+                ),
+                requires_grad=False,
+            )
+            set_weight_attrs(
+                self.bias,
+                {
+                    "output_dim": 0,
+                    "weight_loader": self.weight_loader,
+                },
+            )
+        else:
+            self.register_parameter("bias", None)
+        self.update_param_tp_status()
+
+    def _maybe_allow_fp8_block_shape_mismatch(self) -> None:
+        quant_config = getattr(self, "quant_config", None)
+        weight_block = getattr(quant_config, "weight_block_size", None)
+        if (
+            weight_block is None
+            or len(weight_block) < 1
+            or len(self.output_partition_sizes) <= 1
+        ):
+            return
+
+        try:
+            block_n = int(weight_block[0])
+        except (ValueError, TypeError):
+            return
+
+        if block_n <= 0:
+            return
+
+        if any(size % block_n != 0 for size in self.output_partition_sizes):
+            self.allow_fp8_block_shape_mismatch = True
+            logger.debug(
+                "Allowing FP8 block shape mismatch for %s (block_n=%d, partitions=%s)",
+                getattr(self, "prefix", "<unknown>"),
+                block_n,
+                self.output_partition_sizes,
+            )
+
+    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+        output_dim = getattr(param, "output_dim", None)
+
+        is_sharded_weight = getattr(param, "is_sharded_weight", False)
+
+        param_data = param.data
+        if output_dim is not None and not is_sharded_weight:
+            _validate_packed_loaded_size(
+                param,
+                output_dim,
+                self.loaded_output_size,
+                "loaded_output_size",
+            )
+            expected_loaded_size = None
+            if self._allow_loaded_output_padding:
+                expected_loaded_size = _validate_padded_axis_layout(
+                    param,
+                    output_dim,
+                    self.loaded_output_size,
+                    self.output_size,
+                    self.output_size_per_partition,
+                    self.tp_rank * self.output_size_per_partition,
+                    "loaded_output_size",
+                    getattr(self, "weight_block_size", None),
+                )
+            shard_size = param_data.shape[output_dim]
+            start_idx = self.tp_rank * shard_size
+            load_tensor_parallel_weight(
+                param_data,
+                loaded_weight,
+                output_dim,
+                start_idx,
+                allow_padding=self._allow_loaded_output_padding,
+                expected_loaded_size=expected_loaded_size,
+            )
+            return
+
+        # Special case for loading scales off disk, which often do not
+        # have a shape (such as in the case of AutoFP8).
+        if len(loaded_weight.shape) == 0:
+            loaded_weight = loaded_weight.reshape(1)
+
+        assert param_data.shape == loaded_weight.shape
+        copy_weight(param_data, loaded_weight)
+
+    def weight_loader_v2(self, param: BasevLLMParameter, loaded_weight: torch.Tensor):
+        # Special case for loading scales off disk, which often do not
+        # have a shape (such as in the case of AutoFP8).
+        if len(loaded_weight.shape) == 0:
+            assert loaded_weight.numel() == 1
+            loaded_weight = loaded_weight.reshape(1)
+        output_dim = getattr(param, "output_dim", None)
+        if self._allow_loaded_output_padding and output_dim is not None:
+            expected_loaded_size = _validate_padded_axis_layout(
+                param,
+                output_dim,
+                self.loaded_output_size,
+                self.output_size,
+                self.output_size_per_partition,
+                self.tp_rank * self.output_size_per_partition,
+                "loaded_output_size",
+                getattr(self, "weight_block_size", None),
+            )
+            param.load_column_parallel_weight(
+                loaded_weight=loaded_weight,
+                allow_padding=True,
+                expected_loaded_size=expected_loaded_size,
+            )
+        else:
+            param.load_column_parallel_weight(loaded_weight=loaded_weight)
+
+    def forward(
+        self,
+        input_,
+    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        bias = self.bias if not self.skip_bias_add else None
+
+        # Matrix multiply.
+        output_parallel = self.quant_method.apply(self, input_, bias)
+
+        if self.gather_output and self.tp_size > 1:
+            # All-gather across the partitions.
+            output = tensor_model_parallel_all_gather(output_parallel)
+        else:
+            output = output_parallel
+
+        if not self.return_bias:
+            return output
+        output_bias = self.bias if self.skip_bias_add else None
+        return output, output_bias
+
+    def extra_repr(self) -> str:
+        s = f"in_features={self.input_size}"
+        s += f", output_features={self.output_size_per_partition}"
+        s += f", bias={self.bias is not None}"
+        s += f", tp_size={self.tp_size}"
+        s += f", gather_output={self.gather_output}"
+        return s
+
+
+class DCPGroupColumnParallelLinear(ColumnParallelLinear):
+    """Column-parallel linear whose weight is sharded across DCP groups.
+
+    With Decode Context Parallelism (DCP) the KV cache is sharded across a DCP
+    group, so MLA decode must attend the group's full head set. This layer shards
+    its output across DCP *groups* (effective tp size ``tp_size //
+    dcp_world_size``) rather than across every rank, so each rank in a group
+    holds the whole group's heads, letting decode skip the query all-gather.
+
+    :meth:`forward` returns the group's full head set. :meth:`_local_view`
+    extracts this rank's TP shard for prefill.
+    """
+
+    def __init__(self, *args, **kwargs):
+        dcp_world_size = (
+            get_current_vllm_config().parallel_config.decode_context_parallel_size
+        )
+        rank = get_tensor_model_parallel_rank()
+        world_size = get_tensor_model_parallel_world_size()
+        self.group_size = max(dcp_world_size, 1)
+        self.qrep_active = self.group_size > 1
+        self.rank_in_group = rank % self.group_size
+        super().__init__(
+            *args,
+            **kwargs,
+            tp_rank=rank // self.group_size,
+            tp_size=world_size // self.group_size,
+        )
+
+    def _local_view(self, out: torch.Tensor) -> torch.Tensor:
+        """Slice this rank's tp head shard from a group-heads output.
+
+        ``out`` is head-shaped, i.e. ``(..., group_heads, head_dim)``.
+        """
+        if self.group_size == 1:
+            return out
+        n = out.shape[-2] // self.group_size
+        start = self.rank_in_group * n
+        return out[..., start : start + n, :].contiguous()
+
+
+class MergedColumnParallelLinear(ColumnParallelLinear):
+    """Packed linear layers with column parallelism.
+
+    Similar to ColumnParallelLinear, but the weight matrix is concatenated
+    along the output dimension. When the weight matrix is loaded, the
+    different partitions are sharded separately.
+
+    Args:
+        input_size: input dimension of the linear layer.
+        output_sizes: list of output dimensions of the linear layer.
+        bias: If true, add bias.
+        gather_output: If true, call all-gather on output and make the output
+                       available to all GPUs, otherwise, every GPU will have
+                       its own output.
+        skip_bias_add: This was added to enable performance optimizations where
+                       bias can be fused with other element-wise operations. we
+                       skip adding bias but instead return it.
+        params_dtype: Data type for the parameters.
+        quant_config: Quantization configure.
+        prefix: The name of the layer in the state dict, including all parents
+                        (e.g. model.layers.0.qkv_proj)
+        return_bias: If true, return bias together with outputs in forward pass.
+        disable_tp: If true, all weights matrix won't be sharded, this layer
+                    will be treated as a "Replicated" MergedLinear.
+        loaded_output_sizes: Output dimensions represented by the checkpoint.
+            Defaults to ``output_sizes``. Smaller explicit values enable
+            destination-local zero padding for physical TP shard tails.
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        output_sizes: list[int],
+        bias: bool = True,
+        gather_output: bool = False,
+        skip_bias_add: bool = False,
+        params_dtype: torch.dtype | None = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+        *,
+        return_bias: bool = True,
+        disable_tp: bool = False,
+        loaded_output_sizes: list[int] | None = None,
+    ):
+        self.output_sizes = output_sizes
+        self.loaded_output_sizes = (
+            output_sizes if loaded_output_sizes is None else loaded_output_sizes
+        )
+        if len(self.loaded_output_sizes) != len(self.output_sizes):
+            raise ValueError(
+                "loaded_output_sizes must have the same length as output_sizes"
+            )
+        for shard_id, (loaded_size, physical_size) in enumerate(
+            zip(self.loaded_output_sizes, self.output_sizes)
+        ):
+            _validate_loaded_axis_size(
+                f"loaded_output_sizes[{shard_id}]",
+                loaded_size,
+                physical_size,
+            )
+        self._allow_loaded_output_shard_padding = [
+            loaded_output_sizes is not None and loaded_size != physical_size
+            for loaded_size, physical_size in zip(
+                self.loaded_output_sizes, self.output_sizes
+            )
+        ]
+        self.tp_size = get_tensor_model_parallel_world_size() if not disable_tp else 1
+        self.tp_rank = get_tensor_model_parallel_rank() if not disable_tp else 0
+
+        assert all(output_size % self.tp_size == 0 for output_size in output_sizes)
+        super().__init__(
+            input_size=input_size,
+            output_size=sum(output_sizes),
+            bias=bias,
+            gather_output=gather_output,
+            skip_bias_add=skip_bias_add,
+            params_dtype=params_dtype,
+            quant_config=quant_config,
+            prefix=prefix,
+            return_bias=return_bias,
+            disable_tp=disable_tp,
+        )
+
+    def validate_shard_id(self, shard_id: Any) -> TypeIs[int | tuple[int, ...] | None]:
+        if isinstance(shard_id, int):
+            if shard_id < 0 or shard_id >= len(self.output_sizes):
+                raise ValueError(
+                    f"Shard id should be between 0 and {len(self.output_sizes) - 1}. "
+                    f"Got shard id {shard_id}."
+                )
+            return True
+        if shard_id is None:
+            return True
+        if isinstance(shard_id, tuple):
+            for idx in shard_id:
+                if not (0 <= idx < len(self.output_sizes)):
+                    raise ValueError(
+                        f"Shard id index {idx} should be between 0 and "
+                        f"{len(self.output_sizes) - 1}. Got shard id {shard_id}."
+                    )
+            if len(shard_id) > 1 and any(
+                b - a != 1 for a, b in zip(shard_id[:-1], shard_id[1:])
+            ):
+                raise ValueError(
+                    "Shard id with multiple indices should be consecutive. "
+                    f"Got shard id {shard_id}."
+                )
+            return True
+        raise ValueError("This line should not be reached")
+
+    def weight_loader(
+        self,
+        param: Parameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: tuple[int, ...] | int | None = None,
+    ):
+        self.validate_shard_id(loaded_shard_id)
+
+        param_data = param.data
+        output_dim = getattr(param, "output_dim", None)
+        # Special case for per-tensor scale to load scalar into fused array.
+        needs_scalar_to_array = getattr(param, "needs_scalar_to_array", False)
+
+        if loaded_shard_id is None or isinstance(loaded_shard_id, tuple):
+            # Loaded weight is already fused on disk (mlp).
+            # (e.g., Phi-3's gate_up_proj).
+            if output_dim is None:
+                if needs_scalar_to_array:
+                    param_data, loaded_weight = adjust_scalar_to_fused_array(
+                        param_data, loaded_weight, 0
+                    )
+
+                assert param_data.shape == loaded_weight.shape
+                copy_weight(param_data, loaded_weight)
+                return
+
+            shard_ids = (
+                list(loaded_shard_id)
+                if loaded_shard_id is not None
+                else list(range(len(self.loaded_output_sizes)))
+            )
+            output_sizes = [self.loaded_output_sizes[idx] for idx in shard_ids]
+            current_shard_offset = 0
+            shard_offsets: list[tuple[int, int, int]] = []
+            for shard_id, output_size in zip(shard_ids, output_sizes):
+                shard_offsets.append((shard_id, current_shard_offset, output_size))
+                current_shard_offset += output_size
+            requires_padding = any(
+                self._allow_loaded_output_shard_padding[shard_id]
+                for shard_id in shard_ids
+            )
+            packed_dim = getattr(param, "packed_dim", None)
+            transformed_shards: list[tuple[int, int, int]] = []
+            for shard_id, shard_offset, shard_size in shard_offsets:
+                _validate_packed_loaded_size(
+                    param,
+                    output_dim,
+                    self.loaded_output_sizes[shard_id],
+                    f"loaded_output_sizes[{shard_id}]",
+                )
+                if requires_padding:
+                    physical_shard_size = self.output_sizes[shard_id] // self.tp_size
+                    physical_shard_offset = (
+                        sum(self.output_sizes[:shard_id]) // self.tp_size
+                    )
+                    _validate_padded_axis_layout(
+                        param,
+                        output_dim,
+                        self.loaded_output_sizes[shard_id],
+                        sum(self.output_sizes) // self.tp_size,
+                        physical_shard_size,
+                        physical_shard_offset,
+                        f"loaded_output_sizes[{shard_id}]",
+                        getattr(self, "weight_block_size", None),
+                    )
+                if isinstance(param, BlockQuantScaleParameter):
+                    weight_block_size = getattr(self, "weight_block_size", None)
+                    shard_size, shard_offset = adjust_block_scale_shard(
+                        weight_block_size, shard_size, shard_offset
+                    )
+                if packed_dim == output_dim:
+                    shard_size = shard_size // param.packed_factor
+                    shard_offset = shard_offset // param.packed_factor
+                    shard_size, shard_offset = adjust_marlin_shard(
+                        param, shard_size, shard_offset
+                    )
+                transformed_shards.append((shard_id, shard_offset, shard_size))
+
+            if requires_padding:
+                expected_loaded_size = sum(
+                    shard_size for _, _, shard_size in transformed_shards
+                )
+                if loaded_weight.shape[output_dim] != expected_loaded_size:
+                    raise ValueError(
+                        "Padded merged checkpoint axis size mismatch: "
+                        f"expected {expected_loaded_size}, "
+                        f"got {loaded_weight.shape[output_dim]}"
+                    )
+
+            for shard_id, shard_offset, shard_size in transformed_shards:
+                loaded_weight_shard = loaded_weight.narrow(
+                    output_dim, shard_offset, shard_size
+                )
+                self.weight_loader(param, loaded_weight_shard, shard_id)
+            return
+
+        assert loaded_shard_id < len(self.output_sizes)
+        if output_dim is not None:
+            shard_offset = sum(self.output_sizes[:loaded_shard_id])
+            shard_size = self.output_sizes[loaded_shard_id]
+            shard_offset //= self.tp_size
+            shard_size //= self.tp_size
+            expected_loaded_size = None
+            if self._allow_loaded_output_shard_padding[loaded_shard_id]:
+                expected_loaded_size = _validate_padded_axis_layout(
+                    param,
+                    output_dim,
+                    self.loaded_output_sizes[loaded_shard_id],
+                    sum(self.output_sizes) // self.tp_size,
+                    shard_size,
+                    shard_offset,
+                    f"loaded_output_sizes[{loaded_shard_id}]",
+                    getattr(self, "weight_block_size", None),
+                )
+
+            if isinstance(param, BlockQuantScaleParameter):
+                weight_block_size = getattr(self, "weight_block_size", None)
+                shard_size, shard_offset = adjust_block_scale_shard(
+                    weight_block_size, shard_size, shard_offset
+                )
+
+            packed_dim = getattr(param, "packed_dim", None)
+            if packed_dim == output_dim:
+                shard_size = round(shard_size // param.packed_factor)
+                shard_offset = round(shard_offset // param.packed_factor)
+                shard_size, shard_offset = adjust_marlin_shard(
+                    param, shard_size, shard_offset
+                )
+
+            is_sharded_weight = getattr(param, "is_sharded_weight", False)
+            param_data = param_data.narrow(output_dim, shard_offset, shard_size)
+            start_idx = self.tp_rank * shard_size
+            if not is_sharded_weight:
+                load_tensor_parallel_weight(
+                    param_data,
+                    loaded_weight,
+                    output_dim,
+                    start_idx,
+                    allow_padding=self._allow_loaded_output_shard_padding[
+                        loaded_shard_id
+                    ],
+                    expected_loaded_size=expected_loaded_size,
+                )
+                return
+        # Special case for per-tensor scales in fused case.
+        elif needs_scalar_to_array:
+            param_data, loaded_weight = adjust_scalar_to_fused_array(
+                param_data, loaded_weight, loaded_shard_id
+            )
+
+        else:
+            ignore_warning = getattr(param, "ignore_warning", False)
+            if not ignore_warning:
+                logger.warning(
+                    "Loading a weight without `output_dim` attribute in "
+                    "MergedColumnParallelLinear, assume the weight is "
+                    "the same for all partitions."
+                )
+
+        assert param_data.shape == loaded_weight.shape
+        copy_weight(param_data, loaded_weight)
+
+    def _load_fused_module_from_checkpoint(
+        self,
+        param: BasevLLMParameter,
+        loaded_weight: torch.Tensor,
+        output_sizes: list[int] | None = None,
+        shard_ids: list[int] | None = None,
+        require_exact_axis: bool = False,
+    ):
+        """
+        Handle special case for models where MLP layers are already
+        fused on disk. In this case, we have no shard id. This function
+        determines the shard id by splitting these layers and then calls
+        the weight loader using the shard id.
+
+        An example of a model with these fused layers:
+        https://huggingface.co/microsoft/Phi-3-mini-4k-instruct
+        """
+
+        current_shard_offset = 0
+        shard_offsets: list[tuple[int, int, int]] = []
+        output_sizes = output_sizes or self.loaded_output_sizes
+        shard_ids = shard_ids or list(range(len(output_sizes)))
+        if len(shard_ids) != len(output_sizes):
+            raise ValueError("shard_ids and output_sizes must have the same length")
+        for shard_id, output_size in zip(shard_ids, output_sizes):
+            shard_offsets.append((shard_id, current_shard_offset, output_size))
+            current_shard_offset += output_size
+
+        transformed_shards: list[tuple[int, int, int]] = []
+        for shard_id, shard_offset, shard_size in shard_offsets:
+            if (
+                isinstance(param, (PackedColumnParameter, PackedvLLMParameter))
+                and param.packed_dim == param.output_dim
+            ):
+                shard_size, shard_offset = param.adjust_shard_indexes_for_packing(
+                    shard_size=shard_size, shard_offset=shard_offset
+                )
+            transformed_shards.append((shard_id, shard_offset, shard_size))
+
+        if require_exact_axis:
+            expected_loaded_size = sum(
+                shard_size for _, _, shard_size in transformed_shards
+            )
+            if loaded_weight.shape[param.output_dim] != expected_loaded_size:
+                raise ValueError(
+                    "Padded merged checkpoint axis size mismatch: "
+                    f"expected {expected_loaded_size}, "
+                    f"got {loaded_weight.shape[param.output_dim]}"
+                )
+
+        for shard_id, shard_offset, shard_size in transformed_shards:
+            loaded_weight_shard = loaded_weight.narrow(
+                param.output_dim, shard_offset, shard_size
+            )
+            self.weight_loader_v2(param, loaded_weight_shard, shard_id)
+
+    def weight_loader_v2(
+        self,
+        param: BasevLLMParameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: tuple[int, ...] | int | None = None,
+    ):
+        self.validate_shard_id(loaded_shard_id)
+        if loaded_shard_id is None or isinstance(loaded_shard_id, tuple):
+            if isinstance(param, PerTensorScaleParameter):
+                if isinstance(loaded_shard_id, tuple):
+                    for idx in loaded_shard_id:
+                        param.load_merged_column_weight(
+                            loaded_weight=loaded_weight, shard_id=idx
+                        )
+                else:
+                    # When weights are already fused on disk (e.g. Phi-3's
+                    # gate_up_proj), there is only a single scale for the
+                    # entire fused matrix. Fill all slots with this scale
+                    # to ensure that any subsequent reduction (like .max())
+                    # works correctly while preserving the parameter shape.
+                    for idx in range(param.data.shape[0]):
+                        param.load_merged_column_weight(
+                            loaded_weight=loaded_weight, shard_id=idx
+                        )
+                return
+            elif type(param) in (RowvLLMParameter, BasevLLMParameter):
+                param.load_merged_column_weight(loaded_weight=loaded_weight)
+                return
+            shard_ids = (
+                list(loaded_shard_id)
+                if loaded_shard_id is not None
+                else list(range(len(self.loaded_output_sizes)))
+            )
+            output_sizes = [self.loaded_output_sizes[idx] for idx in shard_ids]
+            requires_padding = any(
+                self._allow_loaded_output_shard_padding[shard_id]
+                for shard_id in shard_ids
+            )
+            for shard_id in shard_ids:
+                _validate_packed_loaded_size(
+                    param,
+                    param.output_dim,
+                    self.loaded_output_sizes[shard_id],
+                    f"loaded_output_sizes[{shard_id}]",
+                )
+                if requires_padding:
+                    _validate_padded_axis_layout(
+                        param,
+                        param.output_dim,
+                        self.loaded_output_sizes[shard_id],
+                        sum(self.output_sizes) // self.tp_size,
+                        self.output_sizes[shard_id] // self.tp_size,
+                        sum(self.output_sizes[:shard_id]) // self.tp_size,
+                        f"loaded_output_sizes[{shard_id}]",
+                        getattr(self, "weight_block_size", None),
+                    )
+            if isinstance(param, BlockQuantScaleParameter):
+                weight_block_size = getattr(self, "weight_block_size", None)
+                output_sizes = [
+                    adjust_block_scale_shard(weight_block_size, size, 0)[0]
+                    for size in output_sizes
+                ]
+            # TODO: @dsikka - move to parameter.py
+            self._load_fused_module_from_checkpoint(
+                param,
+                loaded_weight,
+                output_sizes=output_sizes,
+                shard_ids=shard_ids,
+                require_exact_axis=requires_padding,
+            )
+            return
+
+        assert loaded_shard_id < len(self.output_sizes)
+
+        shard_offset = sum(self.output_sizes[:loaded_shard_id])
+        shard_size = self.output_sizes[loaded_shard_id]
+        shard_offset //= self.tp_size
+        shard_size //= self.tp_size
+        output_dim = getattr(param, "output_dim", None)
+        has_padded_axis = (
+            self._allow_loaded_output_shard_padding[loaded_shard_id]
+            and output_dim is not None
+        )
+        expected_loaded_size = None
+        if has_padded_axis:
+            expected_loaded_size = _validate_padded_axis_layout(
+                param,
+                output_dim,
+                self.loaded_output_sizes[loaded_shard_id],
+                sum(self.output_sizes) // self.tp_size,
+                shard_size,
+                shard_offset,
+                f"loaded_output_sizes[{loaded_shard_id}]",
+                getattr(self, "weight_block_size", None),
+            )
+
+        if isinstance(param, BlockQuantScaleParameter):
+            weight_block_size = getattr(self, "weight_block_size", None)
+            shard_size, shard_offset = adjust_block_scale_shard(
+                weight_block_size, shard_size, shard_offset
+            )
+
+        load_kwargs = {
+            "loaded_weight": loaded_weight,
+            "shard_id": loaded_shard_id,
+            "shard_offset": shard_offset,
+            "shard_size": shard_size,
+        }
+        if has_padded_axis:
+            load_kwargs["allow_padding"] = True
+            load_kwargs["expected_loaded_size"] = expected_loaded_size
+        param.load_merged_column_weight(**load_kwargs)
+
+    def load_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[str]:
+        for name, loaded_weight in weights:
+            shard_id = getattr(loaded_weight, "shard_id", None)
+            self.validate_shard_id(shard_id)
+            # Load into self if name is not an attr of self or its submodules
+            param: Parameter
+            if "." in name:
+                submodule, _, attr = name.rpartition(".")
+                param = getattr(self.get_submodule(submodule), attr, self)
+            else:
+                param = getattr(self, name, self)
+            if param is None and name == "bias":
+                continue
+            param.weight_loader(param, loaded_weight, shard_id)
+            logger.debug(
+                "Loaded shard %s with shape %s into %s.%s",
+                shard_id,
+                loaded_weight.shape,
+                self.prefix,
+                name,
+            )
+            yield name
+
+
+class QKVParallelLinear(ColumnParallelLinear):
+    """Linear layers for the attention's QKV transformation.
+
+    Linear layers for the linear transformation of the query, key, and value
+    vectors in the attention layer. The weight matrix is concatenated along
+    the output dimension. The layer is parallelized along the head dimension.
+    When the number of key/value heads is smaller than the number of query
+    heads (e.g., multi-query/grouped-query attention), the key/value head may
+    be replicated while the query heads are partitioned.
+
+    Args:
+        hidden_size: input hidden state size of the transformer.
+        head_size: size of each attention head.
+        total_num_heads: total number of attention query heads.
+        total_num_kv_heads: total number of attention key/value heads. If
+                            None, assume total_num_kv_heads = total_num_heads.
+        bias: If true, add bias.
+        skip_bias_add: This was added to enable performance optimizations where
+                       bias can be fused with other element-wise operations. we
+                       skip adding bias but instead return it.
+        params_dtype: Data type for the parameters.
+        quant_config: Quantization configure.
+        prefix: The name of the layer in the state dict, including all parents
+                        (e.g. model.layers.0.qkv_proj)
+        return_bias: If true, return bias together with outputs in forward pass.
+        disable_tp: If true, weights matrix won't be sharded through tp rank.
+        loaded_total_num_heads: Query-head count represented by the checkpoint.
+            Defaults to ``total_num_heads``.
+        loaded_total_num_kv_heads: KV-head count represented by the checkpoint.
+            Defaults to ``total_num_kv_heads``.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        head_size: int,
+        total_num_heads: int,
+        total_num_kv_heads: int | None = None,
+        bias: bool = True,
+        skip_bias_add: bool = False,
+        params_dtype: torch.dtype | None = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+        *,
+        return_bias: bool = True,
+        disable_tp: bool = False,
+        v_head_size: int | None = None,
+        loaded_total_num_heads: int | None = None,
+        loaded_total_num_kv_heads: int | None = None,
+    ):
+        self.hidden_size = hidden_size
+        self.head_size = head_size
+        self.v_head_size = v_head_size if v_head_size is not None else head_size
+        self.total_num_heads = total_num_heads
+        if total_num_kv_heads is None:
+            total_num_kv_heads = total_num_heads
+        self.total_num_kv_heads = total_num_kv_heads
+        self.loaded_total_num_heads = (
+            total_num_heads
+            if loaded_total_num_heads is None
+            else loaded_total_num_heads
+        )
+        self.loaded_total_num_kv_heads = (
+            total_num_kv_heads
+            if loaded_total_num_kv_heads is None
+            else loaded_total_num_kv_heads
+        )
+        _validate_loaded_axis_size(
+            "loaded_total_num_heads",
+            self.loaded_total_num_heads,
+            self.total_num_heads,
+        )
+        _validate_loaded_axis_size(
+            "loaded_total_num_kv_heads",
+            self.loaded_total_num_kv_heads,
+            self.total_num_kv_heads,
+        )
+        self._allow_loaded_qkv_padding = {
+            "q": loaded_total_num_heads is not None
+            and self.loaded_total_num_heads != self.total_num_heads,
+            "k": loaded_total_num_kv_heads is not None
+            and self.loaded_total_num_kv_heads != self.total_num_kv_heads,
+            "v": loaded_total_num_kv_heads is not None
+            and self.loaded_total_num_kv_heads != self.total_num_kv_heads,
+        }
+        # Divide the weight matrix along the last dimension.
+        tp_size = get_tensor_model_parallel_world_size() if not disable_tp else 1
+        self.num_heads = divide(self.total_num_heads, tp_size)
+        if tp_size >= self.total_num_kv_heads:
+            self.num_kv_heads = 1
+            self.num_kv_head_replicas = divide(tp_size, self.total_num_kv_heads)
+        else:
+            self.num_kv_heads = divide(self.total_num_kv_heads, tp_size)
+            self.num_kv_head_replicas = 1
+        input_size = self.hidden_size
+        self.output_sizes = [
+            self.num_heads * self.head_size * tp_size,  # q_proj
+            self.num_kv_heads * self.head_size * tp_size,  # k_proj
+            self.num_kv_heads * self.v_head_size * tp_size,  # v_proj
+        ]
+        output_size = sum(self.output_sizes)
+
+        super().__init__(
+            input_size=input_size,
+            output_size=output_size,
+            bias=bias,
+            gather_output=False,
+            skip_bias_add=skip_bias_add,
+            params_dtype=params_dtype,
+            quant_config=quant_config,
+            prefix=prefix,
+            return_bias=return_bias,
+            disable_tp=disable_tp,
+        )
+
+    def validate_shard_id(self, shard_id: Any) -> TypeIs[str | None]:
+        if shard_id in {"q", "k", "v"} or shard_id is None:
+            return True
+        raise ValueError(
+            "Shard id for QKVParallelLinear should be 'q', 'k', or 'v', "
+            f"got shard id {shard_id}."
+        )
+
+    def _get_shard_offset_mapping(self, loaded_shard_id: str):
+        shard_offset_mapping = {
+            "q": 0,
+            "k": self.num_heads * self.head_size,
+            "v": (self.num_heads + self.num_kv_heads) * self.head_size,
+            "total": (self.num_heads + self.num_kv_heads) * self.head_size
+            + self.num_kv_heads * self.v_head_size,
+        }
+        return shard_offset_mapping.get(loaded_shard_id)
+
+    def _get_shard_size_mapping(self, loaded_shard_id: str):
+        shard_size_mapping = {
+            "q": self.num_heads * self.head_size,
+            "k": self.num_kv_heads * self.head_size,
+            "v": self.num_kv_heads * self.v_head_size,
+        }
+        return shard_size_mapping.get(loaded_shard_id)
+
+    def _get_loaded_shard_size_mapping(self, loaded_shard_id: str) -> int:
+        return {
+            "q": self.loaded_total_num_heads * self.head_size,
+            "k": self.loaded_total_num_kv_heads * self.head_size,
+            "v": self.loaded_total_num_kv_heads * self.v_head_size,
+        }[loaded_shard_id]
+
+    def _validate_padded_qkv_layout(
+        self,
+        param: Parameter,
+        output_dim: int,
+        loaded_shard_id: str,
+        shard_offset: int,
+        shard_size: int,
+    ) -> int:
+        physical_size = self._get_shard_offset_mapping("total")
+        assert physical_size is not None
+        return _validate_padded_axis_layout(
+            param,
+            output_dim,
+            self._get_loaded_shard_size_mapping(loaded_shard_id),
+            physical_size,
+            shard_size,
+            shard_offset,
+            f"loaded {loaded_shard_id} size",
+            getattr(self, "weight_block_size", None),
+        )
+
+    def _load_fused_module_from_checkpoint(
+        self, param: BasevLLMParameter, loaded_weight: torch.Tensor
+    ):
+        """
+        Handle special case for models where QKV layers are already
+        fused on disk. In this case, we have no shard id. This function
+        determines the shard id by splitting these layers and then calls
+        the weight loader using the shard id.
+
+        An example of a model with these fused layers:
+        https://huggingface.co/microsoft/Phi-3-mini-4k-instruct
+        """
+        shard_offsets = [
+            # (shard_id, shard_offset, shard_size)
+            ("q", 0, self.loaded_total_num_heads * self.head_size),
+            (
+                "k",
+                self.loaded_total_num_heads * self.head_size,
+                self.loaded_total_num_kv_heads * self.head_size,
+            ),
+            (
+                "v",
+                (self.loaded_total_num_heads + self.loaded_total_num_kv_heads)
+                * self.head_size,
+                self.loaded_total_num_kv_heads * self.v_head_size,
+            ),
+        ]
+
+        requires_padding = any(self._allow_loaded_qkv_padding.values())
+        transformed_shards: list[tuple[str, int, int]] = []
+        for shard_id, shard_offset, shard_size in shard_offsets:
+            local_shard_offset = self._get_shard_offset_mapping(shard_id)
+            local_shard_size = self._get_shard_size_mapping(shard_id)
+            assert local_shard_offset is not None and local_shard_size is not None
+            _validate_packed_loaded_size(
+                param,
+                param.output_dim,
+                self._get_loaded_shard_size_mapping(shard_id),
+                f"loaded {shard_id} size",
+            )
+            if requires_padding:
+                self._validate_padded_qkv_layout(
+                    param,
+                    param.output_dim,
+                    shard_id,
+                    local_shard_offset,
+                    local_shard_size,
+                )
+            if isinstance(param, BlockQuantScaleParameter):
+                weight_block_size = getattr(self, "weight_block_size", None)
+                shard_size, shard_offset = adjust_block_scale_shard(
+                    weight_block_size, shard_size, shard_offset
+                )
+            elif (
+                isinstance(param, (PackedColumnParameter, PackedvLLMParameter))
+                and param.packed_dim == param.output_dim
+            ):
+                shard_size, shard_offset = param.adjust_shard_indexes_for_packing(
+                    shard_size=shard_size, shard_offset=shard_offset
+                )
+            transformed_shards.append((shard_id, shard_offset, shard_size))
+
+        if requires_padding:
+            expected_loaded_size = sum(
+                shard_size for _, _, shard_size in transformed_shards
+            )
+            if loaded_weight.shape[param.output_dim] != expected_loaded_size:
+                raise ValueError(
+                    "Padded QKV checkpoint axis size mismatch: "
+                    f"expected {expected_loaded_size}, "
+                    f"got {loaded_weight.shape[param.output_dim]}"
+                )
+
+        for shard_id, shard_offset, shard_size in transformed_shards:
+            loaded_weight_shard = loaded_weight.narrow(
+                param.output_dim, shard_offset, shard_size
+            )
+            self.weight_loader_v2(param, loaded_weight_shard, shard_id)
+
+    def weight_loader_v2(
+        self,
+        param: BasevLLMParameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: str | None = None,
+    ):
+        self.validate_shard_id(loaded_shard_id)
+        if loaded_shard_id is None:  # special case for certain models
+            if isinstance(param, PerTensorScaleParameter):
+                # When weights are already fused on disk (e.g. Phi-3's
+                # qkv_proj), there is only a single scale for the entire
+                # fused matrix. Fill all slots (q, k, v) with this scale
+                # to ensure that any subsequent reduction (like .max())
+                # works correctly while preserving the parameter shape.
+                for idx in range(param.data.shape[0]):
+                    param.load_qkv_weight(loaded_weight=loaded_weight, shard_id=idx)
+                return
+            elif type(param) in (RowvLLMParameter, BasevLLMParameter):
+                param.load_qkv_weight(loaded_weight=loaded_weight)
+                return
+            # TODO: @dsikka - move to parameter.py
+            self._load_fused_module_from_checkpoint(param, loaded_weight)
+            return
+
+        assert loaded_shard_id in ["q", "k", "v"]
+
+        shard_offset = self._get_shard_offset_mapping(loaded_shard_id)
+        shard_size = self._get_shard_size_mapping(loaded_shard_id)
+        assert shard_offset is not None and shard_size is not None
+        output_dim = getattr(param, "output_dim", None)
+        has_padded_axis = (
+            self._allow_loaded_qkv_padding[loaded_shard_id]
+            and output_dim is not None
+        )
+        expected_loaded_size = None
+        if has_padded_axis:
+            expected_loaded_size = self._validate_padded_qkv_layout(
+                param,
+                output_dim,
+                loaded_shard_id,
+                shard_offset,
+                shard_size,
+            )
+
+        if isinstance(param, BlockQuantScaleParameter):
+            weight_block_size = getattr(self, "weight_block_size", None)
+            shard_size, shard_offset = adjust_block_scale_shard(
+                weight_block_size, shard_size, shard_offset
+            )
+
+        load_kwargs = {
+            "loaded_weight": loaded_weight,
+            "num_heads": self.num_kv_head_replicas,
+            "shard_id": loaded_shard_id,
+            "shard_offset": shard_offset,
+            "shard_size": shard_size,
+        }
+        if has_padded_axis:
+            load_kwargs["allow_padding"] = True
+            load_kwargs["expected_loaded_size"] = expected_loaded_size
+        param.load_qkv_weight(**load_kwargs)
+
+    def weight_loader(
+        self,
+        param: Parameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: str | None = None,
+    ):
+        self.validate_shard_id(loaded_shard_id)
+
+        param_data = param.data
+        output_dim = getattr(param, "output_dim", None)
+
+        # Special case for per-tensor scales in fused case.
+        needs_scalar_to_array = getattr(param, "needs_scalar_to_array", False)
+
+        if loaded_shard_id is None:
+            # Loaded weight is already fused on disk (qkv).
+            # (e.g., Phi-3's qkv_proj).
+            if output_dim is None:
+                if needs_scalar_to_array:
+                    param_data, loaded_weight = adjust_scalar_to_fused_array(
+                        param_data, loaded_weight, 0
+                    )
+
+                assert param_data.shape == loaded_weight.shape
+                copy_weight(param_data, loaded_weight)
+                return
+            shard_offsets = [
+                # (shard_id, shard_offset, shard_size)
+                ("q", 0, self.loaded_total_num_heads * self.head_size),
+                (
+                    "k",
+                    self.loaded_total_num_heads * self.head_size,
+                    self.loaded_total_num_kv_heads * self.head_size,
+                ),
+                (
+                    "v",
+                    (self.loaded_total_num_heads + self.loaded_total_num_kv_heads)
+                    * self.head_size,
+                    self.loaded_total_num_kv_heads * self.v_head_size,
+                ),
+            ]
+            packed_dim = getattr(param, "packed_dim", None)
+            transformed_shards: list[tuple[str, int, int]] = []
+            requires_padding = any(self._allow_loaded_qkv_padding.values())
+            for shard_id, shard_offset, shard_size in shard_offsets:
+                local_shard_offset = self._get_shard_offset_mapping(shard_id)
+                local_shard_size = self._get_shard_size_mapping(shard_id)
+                assert local_shard_offset is not None and local_shard_size is not None
+                _validate_packed_loaded_size(
+                    param,
+                    output_dim,
+                    self._get_loaded_shard_size_mapping(shard_id),
+                    f"loaded {shard_id} size",
+                )
+                if requires_padding:
+                    self._validate_padded_qkv_layout(
+                        param,
+                        output_dim,
+                        shard_id,
+                        local_shard_offset,
+                        local_shard_size,
+                    )
+                if isinstance(param, BlockQuantScaleParameter):
+                    weight_block_size = getattr(self, "weight_block_size", None)
+                    shard_size, shard_offset = adjust_block_scale_shard(
+                        weight_block_size, shard_size, shard_offset
+                    )
+                if packed_dim == output_dim:
+                    shard_size = round(shard_size // param.packed_factor)
+                    shard_offset = round(shard_offset // param.packed_factor)
+                    shard_size, shard_offset = adjust_marlin_shard(
+                        param, shard_size, shard_offset
+                    )
+                transformed_shards.append((shard_id, shard_offset, shard_size))
+
+            if requires_padding:
+                expected_loaded_size = sum(
+                    shard_size for _, _, shard_size in transformed_shards
+                )
+                if loaded_weight.shape[output_dim] != expected_loaded_size:
+                    raise ValueError(
+                        "Padded QKV checkpoint axis size mismatch: "
+                        f"expected {expected_loaded_size}, "
+                        f"got {loaded_weight.shape[output_dim]}"
+                    )
+
+            for shard_id, shard_offset, shard_size in transformed_shards:
+                loaded_weight_shard = loaded_weight.narrow(
+                    output_dim, shard_offset, shard_size
+                )
+                self.weight_loader(param, loaded_weight_shard, shard_id)
+            return
+
+        assert loaded_shard_id in ["q", "k", "v"]
+
+        # If output dim is defined, use the default loading process.
+        if output_dim is not None:
+            if loaded_shard_id == "q":
+                shard_offset = 0
+                shard_size = self.num_heads * self.head_size
+            elif loaded_shard_id == "k":
+                shard_offset = self.num_heads * self.head_size
+                shard_size = self.num_kv_heads * self.head_size
+            elif loaded_shard_id == "v":
+                shard_offset = (self.num_heads + self.num_kv_heads) * self.head_size
+                shard_size = self.num_kv_heads * self.v_head_size
+            expected_loaded_size = None
+            if self._allow_loaded_qkv_padding[loaded_shard_id]:
+                expected_loaded_size = self._validate_padded_qkv_layout(
+                    param,
+                    output_dim,
+                    loaded_shard_id,
+                    shard_offset,
+                    shard_size,
+                )
+
+            if isinstance(param, BlockQuantScaleParameter):
+                weight_block_size = getattr(self, "weight_block_size", None)
+                shard_size, shard_offset = adjust_block_scale_shard(
+                    weight_block_size, shard_size, shard_offset
+                )
+
+            # Special case for Quantized Weights.
+            # If quantized, we need to adjust the offset and size to account
+            # for the packing.
+            packed_dim = getattr(param, "packed_dim", None)
+            if packed_dim == output_dim:
+                shard_size = round(shard_size // param.packed_factor)
+                shard_offset = round(shard_offset // param.packed_factor)
+
+                # Special case for Marlin.
+                shard_size, shard_offset = adjust_marlin_shard(
+                    param, shard_size, shard_offset
+                )
+
+            is_sharded_weight = getattr(param, "is_sharded_weight", False)
+            param_data = param_data.narrow(output_dim, shard_offset, shard_size)
+            if loaded_shard_id == "q":
+                shard_rank = self.tp_rank
+            else:
+                shard_rank = self.tp_rank // self.num_kv_head_replicas
+            start_idx = shard_rank * shard_size
+
+            if not is_sharded_weight:
+                load_tensor_parallel_weight(
+                    param_data,
+                    loaded_weight,
+                    output_dim,
+                    start_idx,
+                    allow_padding=self._allow_loaded_qkv_padding[
+                        loaded_shard_id
+                    ],
+                    expected_loaded_size=expected_loaded_size,
+                )
+                return
+
+        # Special case for per-tensor scales in fused case.
+        elif needs_scalar_to_array:
+            param_data, loaded_weight = adjust_scalar_to_fused_array(
+                param_data, loaded_weight, loaded_shard_id
+            )
+        else:
+            ignore_warning = getattr(param, "ignore_warning", False)
+            if not ignore_warning:
+                logger.warning(
+                    "Loading a weight without `output_dim` attribute in "
+                    "QKVParallelLinear, assume the weight is the same "
+                    "for all partitions."
+                )
+
+        assert param_data.shape == loaded_weight.shape
+        copy_weight(param_data, loaded_weight)
+
+    def load_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[str]:
+        for name, loaded_weight in weights:
+            shard_id = getattr(loaded_weight, "shard_id", None)
+            self.validate_shard_id(shard_id)
+            # Load into self if name is not an attr of self or its submodules
+            param: Parameter
+            if "." in name:
+                submodule, _, attr = name.rpartition(".")
+                param = getattr(self.get_submodule(submodule), attr, self)
+            else:
+                param = getattr(self, name, self)
+            if param is None and name == "bias":
+                continue
+            param.weight_loader(param, loaded_weight, shard_id)
+            logger.debug(
+                "Loaded shard %s with shape %s into %s.%s",
+                shard_id,
+                loaded_weight.shape,
+                self.prefix,
+                name,
+            )
+            yield name
+
+
+class MinimaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
+    """QKV projection fused with a lightning-indexer's index_q/index_k.
+
+    NOTE: MiniMax-M3-specific. This is tailored to the M3 sparse-attention
+    layers (it assumes the indexer's head count equals the KV head count and
+    shares the main head_dim); it is not a general-purpose linear layer. It
+    lives here only to sit alongside QKVParallelLinear, whose sharding /
+    weight-loading machinery it reuses.
+
+    A single column-parallel GEMM emits, per rank::
+
+        [q | k | v | index_q | index_k]
+
+    ``index_q`` must have the same head count as the KV heads
+    (``total_num_index_heads == total_num_kv_heads``) and ``index_head_size ==
+    head_size``, so it shards exactly like K/V -- including the KV-head
+    *replication* path when ``tp_size > total_num_kv_heads`` (this is what makes
+    a TP size greater than the KV-head count work). ``index_k`` is a single
+    shared head, replicated to every rank.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        head_size: int,
+        total_num_heads: int,
+        total_num_kv_heads: int,
+        total_num_index_heads: int,
+        index_head_size: int,
+        bias: bool = False,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
+        # index_q rides the KV-head sharding/replication path, so its head count
+        # must match the KV heads.
+        assert total_num_index_heads == total_num_kv_heads, (
+            "MinimaxM3QKVParallelLinearWithIndexer requires "
+            "total_num_index_heads == total_num_kv_heads"
+        )
+        self.hidden_size = hidden_size
+        self.head_size = head_size
+        self.v_head_size = head_size
+        self.total_num_heads = total_num_heads
+        self.total_num_kv_heads = total_num_kv_heads
+        self.total_num_index_heads = total_num_index_heads
+        self.index_head_size = index_head_size
+
+        tp_size = get_tensor_model_parallel_world_size()
+        self.num_heads = divide(self.total_num_heads, tp_size)
+        if tp_size >= self.total_num_kv_heads:
+            self.num_kv_heads = 1
+            self.num_kv_head_replicas = divide(tp_size, self.total_num_kv_heads)
+        else:
+            self.num_kv_heads = divide(self.total_num_kv_heads, tp_size)
+            self.num_kv_head_replicas = 1
+        # index_q shards identically to the KV heads.
+        self.num_index_heads = self.num_kv_heads
+
+        # Global per-group sizes (replicated groups counted x tp_size, matching
+        # the QKVParallelLinear convention). index_k is a single replicated head.
+        q = self.num_heads * self.head_size
+        kv = self.num_kv_heads * self.head_size
+        iq = self.num_index_heads * self.index_head_size
+        ik = self.index_head_size
+        self.output_sizes = [
+            q * tp_size,  # q
+            kv * tp_size,  # k
+            kv * tp_size,  # v
+            iq * tp_size,  # index_q
+            ik * tp_size,  # index_k (replicated)
+        ]
+
+        # Skip QKVParallelLinear.__init__ (3-group layout); build the 5-group
+        # column-parallel weight directly.
+        ColumnParallelLinear.__init__(
+            self,
+            input_size=self.hidden_size,
+            output_size=sum(self.output_sizes),
+            bias=bias,
+            gather_output=False,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
+
+    def validate_shard_id(self, shard_id: Any) -> TypeIs[str | None]:
+        if shard_id in {"q", "k", "v", "index_q", "index_k"} or shard_id is None:
+            return True
+        raise ValueError(
+            "Shard id for MinimaxM3QKVParallelLinearWithIndexer must be one of "
+            "'q', 'k', 'v', 'index_q', 'index_k'; got "
+            f"{shard_id}."
+        )
+
+    def _get_shard_offset_mapping(self, loaded_shard_id: str) -> int | None:
+        h = self.head_size
+        nq, nkv, nidx = self.num_heads, self.num_kv_heads, self.num_index_heads
+        return {
+            "q": 0,
+            "k": nq * h,
+            "v": (nq + nkv) * h,
+            "index_q": (nq + 2 * nkv) * h,
+            "index_k": (nq + 2 * nkv + nidx) * h,
+        }.get(loaded_shard_id)
+
+    def _get_shard_size_mapping(self, loaded_shard_id: str) -> int | None:
+        h = self.head_size
+        return {
+            "q": self.num_heads * h,
+            "k": self.num_kv_heads * h,
+            "v": self.num_kv_heads * h,
+            "index_q": self.num_index_heads * h,
+            "index_k": self.index_head_size,
+        }.get(loaded_shard_id)
+
+    def weight_loader_v2(
+        self,
+        param: BasevLLMParameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: str | None = None,
+    ) -> None:
+        self.validate_shard_id(loaded_shard_id)
+        # Index checkpoints are never pre-fused on disk; a shard id is always given.
+        assert loaded_shard_id in ("q", "k", "v", "index_q", "index_k")
+
+        shard_offset = self._get_shard_offset_mapping(loaded_shard_id)
+        shard_size = self._get_shard_size_mapping(loaded_shard_id)
+        assert shard_offset is not None and shard_size is not None
+        if isinstance(param, BlockQuantScaleParameter):
+            weight_block_size = getattr(self, "weight_block_size", None)
+            shard_size, shard_offset = adjust_block_scale_shard(
+                weight_block_size, shard_size, shard_offset
+            )
+
+        # index_k is fully replicated: num_heads == tp_size makes
+        # load_qkv_weight pick shard_id_int == 0 on every rank. q/k/v/index_q ride
+        # the KV-head replication factor.
+        num_heads = (
+            self.tp_size if loaded_shard_id == "index_k" else self.num_kv_head_replicas
+        )
+        param.load_qkv_weight(
+            loaded_weight=loaded_weight,
+            num_heads=num_heads,
+            shard_id=loaded_shard_id,
+            shard_offset=shard_offset,
+            shard_size=shard_size,
+        )
+
+    def weight_loader(
+        self,
+        param: Parameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: str | None = None,
+    ) -> None:
+        # Unquantized (bf16) path. MXFP8 checkpoints use weight_loader_v2; this
+        # keeps an unquantized load correct too.
+        self.validate_shard_id(loaded_shard_id)
+        assert loaded_shard_id in ("q", "k", "v", "index_q", "index_k")
+        output_dim = getattr(param, "output_dim", None)
+        assert output_dim is not None
+
+        shard_offset = self._get_shard_offset_mapping(loaded_shard_id)
+        shard_size = self._get_shard_size_mapping(loaded_shard_id)
+        assert shard_offset is not None and shard_size is not None
+        if isinstance(param, BlockQuantScaleParameter):
+            weight_block_size = getattr(self, "weight_block_size", None)
+            shard_size, shard_offset = adjust_block_scale_shard(
+                weight_block_size, shard_size, shard_offset
+            )
+
+        param_data = param.data.narrow(output_dim, shard_offset, shard_size)
+        if loaded_shard_id == "q":
+            shard_rank = self.tp_rank
+        elif loaded_shard_id == "index_k":
+            shard_rank = 0  # replicated to every rank
+        else:
+            shard_rank = self.tp_rank // self.num_kv_head_replicas
+        loaded_weight = load_tensor_parallel_shard(
+            loaded_weight,
+            output_dim,
+            shard_rank * shard_size,
+            shard_size,
+            allow_padding=getattr(param, "allow_tp_padding", False),
+        )
+        assert param_data.shape == loaded_weight.shape
+        copy_weight(param_data, loaded_weight)
+
+
+class KimiK3MergedQKVGateLinear(MergedColumnParallelLinear):
+    """Kimi-K3 QKV-A projection fused with its output-gate projection.
+
+    NOTE: Kimi-K3-specific. This is tailored to its replicated Q/KV latent
+    projections and tensor-parallel output gate; it is not a general-purpose
+    linear layer. It lives here alongside ``MergedColumnParallelLinear``, whose
+    sharding and weight-loading machinery it reuses.
+
+    The per-rank shard layout is ``[q_a | kv_a | gate]``. The latent shards
+    stay replicated across tensor-parallel ranks while the gate shard is
+    tensor-parallel, matching the standalone projections they replace.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        q_lora_rank: int,
+        kv_lora_rank: int,
+        qk_rope_head_dim: int,
+        total_num_heads: int,
+        v_head_dim: int,
+        bias: bool = False,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
+        tp_size = get_tensor_model_parallel_world_size()
+
+        # MergedColumnParallelLinear divides every logical shard by TP size.
+        # Inflate the replicated latent shards to retain their checkpoint widths.
+        output_sizes = [
+            q_lora_rank * tp_size,
+            (kv_lora_rank + qk_rope_head_dim) * tp_size,
+            total_num_heads * v_head_dim,
+        ]
+        super().__init__(
+            input_size=hidden_size,
+            output_sizes=output_sizes,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
+
+    def _load_with_replicated_latents(
+        self,
+        loader: Callable[..., None],
+        param: Parameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: tuple[int, ...] | int | None,
+    ) -> None:
+        is_replicated = isinstance(loaded_shard_id, int) and loaded_shard_id < 2
+        if not is_replicated:
+            loader(param, loaded_weight, loaded_shard_id)
+            return
+
+        # The base loader narrows every checkpoint shard using its TP rank.
+        # Replicated latent shards instead load the rank-zero slice on every rank.
+        tp_rank = self.tp_rank
+        param_tp_rank = getattr(param, "tp_rank", None)
+        self.tp_rank = 0
+        if param_tp_rank is not None:
+            param.tp_rank = 0
+        try:
+            loader(param, loaded_weight, loaded_shard_id)
+        finally:
+            self.tp_rank = tp_rank
+            if param_tp_rank is not None:
+                param.tp_rank = param_tp_rank
+
+    def weight_loader(
+        self,
+        param: Parameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: tuple[int, ...] | int | None = None,
+    ) -> None:
+        self._load_with_replicated_latents(
+            super().weight_loader, param, loaded_weight, loaded_shard_id
+        )
+
+    def weight_loader_v2(
+        self,
+        param: BasevLLMParameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: tuple[int, ...] | int | None = None,
+    ) -> None:
+        self._load_with_replicated_latents(
+            super().weight_loader_v2, param, loaded_weight, loaded_shard_id
+        )
+
+
+# --8<-- [start:row_parallel_linear]
+@PluggableLayer.register("row_parallel_linear")
+class RowParallelLinear(LinearBase):
+    """Linear layer with row parallelism.
+
+    The linear layer is defined as Y = XA + b. A is parallelized along
+    its first dimension and X along its second dimension as:
+               -   -
+              | A_1 |
+              | .   |
+          A = | .   |        X = [X_1, ..., X_p]
+              | .   |
+              | A_p |
+               -   -
+    Arguments:
+        input_size: first dimension of matrix A.
+        output_size: second dimension of matrix A.
+        bias: If true, add bias. Note that bias is not parallelized.
+        input_is_parallel: If true, we assume that the input is already
+                           split across the GPUs and we do not split
+                           again.
+        skip_bias_add: This was added to enable performance optimization where
+                       bias can be fused with other element-wise operations.
+                       We skip adding bias but instead return it.
+        params_dtype: Data type for the parameters.
+        reduce_results: If true, call all-reduce on output and make Y available
+                       to all GPUs, otherwise, every GPU will have its output
+                       which is Y = X_iA_i
+        quant_config: Quantization configure.
+        prefix: The name of the layer in the state dict, including all parents
+                        (e.g. model.layers.0.down_proj)
+        return_bias: If true, return bias together with outputs in forward pass.
+        disable_tp: If true, weights matrix won't be sharded through tp rank.
+        loaded_input_size: Input dimension represented by the checkpoint.
+            Defaults to ``input_size``. A smaller explicit value enables
+            destination-local zero padding for the physical TP shard tail.
+    """
+
+    # --8<-- [end:row_parallel_linear]
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        bias: bool = True,
+        input_is_parallel: bool = True,
+        skip_bias_add: bool = False,
+        params_dtype: torch.dtype | None = None,
+        reduce_results: bool = True,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+        *,
+        return_bias: bool = True,
+        disable_tp: bool = False,
+        loaded_input_size: int | None = None,
+    ):
+        # Divide the weight matrix along the first dimension.
+        self.tp_rank = get_tensor_model_parallel_rank() if not disable_tp else 0
+        self.tp_size = get_tensor_model_parallel_world_size() if not disable_tp else 1
+        self.loaded_input_size = (
+            input_size if loaded_input_size is None else loaded_input_size
+        )
+        _validate_loaded_axis_size(
+            "loaded_input_size", self.loaded_input_size, input_size
+        )
+        self._allow_loaded_input_padding = (
+            loaded_input_size is not None
+            and self.loaded_input_size != input_size
+        )
+        self.input_size_per_partition = divide(input_size, self.tp_size)
+        self.output_size_per_partition = output_size
+        self.output_partition_sizes = [output_size]
+
+        super().__init__(
+            input_size,
+            output_size,
+            bias,
+            skip_bias_add,
+            params_dtype,
+            quant_config,
+            prefix,
+            return_bias=return_bias,
+            disable_tp=disable_tp,
+        )
+
+        _register_b12x_row_parallel_collective(
+            self,
+            prefix,
+            self.output_size,
+            reduce_results and self.tp_size > 1,
+        )
+        self.input_is_parallel = input_is_parallel
+        self.reduce_results = reduce_results
+
+        allocate_weights(
+            self.quant_method.create_weights,
+            layer=self,
+            input_size_per_partition=self.input_size_per_partition,
+            output_partition_sizes=self.output_partition_sizes,
+            input_size=self.input_size,
+            output_size=self.output_size,
+            params_dtype=self.params_dtype,
+            weight_loader=(
+                self.weight_loader_v2
+                if self.quant_method.__class__.__name__ in WEIGHT_LOADER_V2_SUPPORTED
+                else self.weight_loader
+            ),
+        )
+        if not reduce_results and (bias and not skip_bias_add):
+            raise ValueError(
+                "When not reduce the results, adding bias to the "
+                "results can lead to incorrect results"
+            )
+
+        if bias:
+            self.bias = Parameter(
+                allocate_weights(torch.empty, self.output_size, dtype=params_dtype),
+                requires_grad=False,
+            )
+            set_weight_attrs(
+                self.bias,
+                {
+                    "output_dim": 0,
+                    "weight_loader": self.weight_loader,
+                },
+            )
+        else:
+            self.register_parameter("bias", None)
+        self.update_param_tp_status()
+
+    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+        input_dim = getattr(param, "input_dim", None)
+        is_sharded_weight = getattr(param, "is_sharded_weight", False)
+
+        param_data = param.data
+        if input_dim is not None and not is_sharded_weight:
+            _validate_packed_loaded_size(
+                param,
+                input_dim,
+                self.loaded_input_size,
+                "loaded_input_size",
+            )
+            expected_loaded_size = None
+            if self._allow_loaded_input_padding:
+                expected_loaded_size = _validate_padded_axis_layout(
+                    param,
+                    input_dim,
+                    self.loaded_input_size,
+                    self.input_size,
+                    self.input_size_per_partition,
+                    self.tp_rank * self.input_size_per_partition,
+                    "loaded_input_size",
+                    getattr(self, "weight_block_size", None),
+                )
+            shard_size = param_data.shape[input_dim]
+            start_idx = self.tp_rank * shard_size
+            load_tensor_parallel_weight(
+                param_data,
+                loaded_weight,
+                input_dim,
+                start_idx,
+                allow_padding=self._allow_loaded_input_padding,
+                expected_loaded_size=expected_loaded_size,
+            )
+            return
+
+        # Special case for loading scales off disk, which often do not
+        # have a shape (such as in the case of AutoFP8).
+        if len(loaded_weight.shape) == 0:
+            loaded_weight = loaded_weight.reshape(1)
+
+        assert param_data.shape == loaded_weight.shape
+        copy_weight(param_data, loaded_weight)
+
+    def weight_loader_v2(self, param: BasevLLMParameter, loaded_weight: torch.Tensor):
+        # Special case for loading scales off disk, which often do not
+        # have a shape (such as in the case of AutoFP8).
+        if len(loaded_weight.shape) == 0:
+            assert loaded_weight.numel() == 1
+            loaded_weight = loaded_weight.reshape(1)
+
+        input_dim = getattr(param, "input_dim", None)
+        if self._allow_loaded_input_padding and input_dim is not None:
+            expected_loaded_size = _validate_padded_axis_layout(
+                param,
+                input_dim,
+                self.loaded_input_size,
+                self.input_size,
+                self.input_size_per_partition,
+                self.tp_rank * self.input_size_per_partition,
+                "loaded_input_size",
+                getattr(self, "weight_block_size", None),
+            )
+            param.load_row_parallel_weight(
+                loaded_weight=loaded_weight,
+                allow_padding=True,
+                expected_loaded_size=expected_loaded_size,
+            )
+        else:
+            param.load_row_parallel_weight(loaded_weight=loaded_weight)
+
+    def forward(
+        self,
+        input_,
+    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        if self.input_is_parallel:
+            input_parallel = input_
+        else:
+            split_input = split_tensor_along_last_dim(
+                input_, num_partitions=self.tp_size
+            )
+            input_parallel = split_input[self.tp_rank].contiguous()
+
+        # Matrix multiply.
+        # Only fuse bias add into GEMM for rank 0 (this ensures that
+        # bias will not get added more than once in TP>1 case)
+        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+        output_parallel = self.quant_method.apply(self, input_parallel, bias_)
+
+        # Optional model-installed callback fired before the all-reduce (GLM-5.3
+        # L2 weight prefetch: the reduction leaves device memory idle).
+        _hook = getattr(self, "_l2_prefetch_pre_reduce_hook", None)
+        if _hook is not None:
+            _hook(output_parallel.shape[0])
+        if self.reduce_results and self.tp_size > 1:
+            output = tensor_model_parallel_all_reduce(output_parallel)
+        else:
+            output = output_parallel
+
+        if not self.return_bias:
+            return output
+        output_bias = self.bias if self.skip_bias_add else None
+        return output, output_bias
+
+    def extra_repr(self) -> str:
+        s = f"in_features={self.input_size_per_partition}"
+        s += f", output_features={self.output_size}"
+        s += f", bias={self.bias is not None}"
+        s += f", tp_size={self.tp_size}"
+        s += f", reduce_results={self.reduce_results}"
+        return s

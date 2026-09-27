@@ -1,0 +1,39 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 356B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/glm53-kraken-tp3:20260925
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [internal] load build context
+#4 transferring context: 600.72kB done
+#4 DONE 0.0s
+
+#5 [1/4] FROM docker.io/library/glm53-kraken-tp3:20260925@sha256:b713ab3da82424fe53d5596fb7f7a9c2ab3683df4bd7946f926c9737b3850a50
+#5 resolve docker.io/library/glm53-kraken-tp3:20260925@sha256:b713ab3da82424fe53d5596fb7f7a9c2ab3683df4bd7946f926c9737b3850a50 0.0s done
+#5 DONE 1.2s
+
+#6 [2/4] COPY src/ /opt/venv/lib/python3.12/site-packages/
+#6 DONE 0.0s
+
+#7 [3/4] COPY serve-glm53-flash-tp3-kraken.py /usr/local/bin/serve-glm53-flash-tp3-kraken.py
+#7 DONE 0.0s
+
+#8 [4/4] COPY support-receipt.json /opt/lil/glm53-20260927.json
+#8 DONE 0.0s
+
+#9 exporting to image
+#9 exporting layers 0.1s done
+#9 exporting manifest sha256:eecf0a4c6eef1c62be04af0f733edc8ef6643e291720ec565c4a9d54bc5430af 0.0s done
+#9 exporting config sha256:2bf1cb685038805bc9ec589a207171ad321783d4d022b1769d714db3c21ce1e5 done
+#9 exporting attestation manifest sha256:0db2d5009ca3fdcf5b8cdb319543e238f868ca485dc7fb4490744eec1a7ddbfd done
+#9 exporting manifest list sha256:03304994fa8184d0d5c6f9878cfe42b00bcea37263d55492d4fd2ebaf4fb890f done
+#9 naming to docker.io/library/glm53-kraken-tp3:20260927 done
+#9 unpacking to docker.io/library/glm53-kraken-tp3:20260927 0.0s done
+#9 DONE 0.2s

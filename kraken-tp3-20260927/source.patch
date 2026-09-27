@@ -1,0 +1,924 @@
+--- a/vllm/envs.py
++++ b/vllm/envs.py
+@@ -167,6 +167,7 @@
+     VLLM_RUST_FRONTEND_PATH: str | None = "auto"
+     VLLM_SERVER_DEV_MODE: bool = False
+     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
++    VLLM_SCHEDULER_UNCAP_PREFILL_ONLY_STEPS: bool = False
+     VLLM_MLA_DISABLE: bool = False
+     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
+     VLLM_RAY_BUNDLE_INDICES: str = ""
+@@ -191,6 +192,7 @@
+     VLLM_HUMMING_USE_F16_ACCUM: bool = False
+     VLLM_HUMMING_MOE_GEMM_TYPE: Literal["indexed", "grouped", "auto"] | None = None
+     VLLM_B12X_MOE_FP4_FORCE_A16: bool = False
++    VLLM_B12X_BF16_GEMV: bool = False
+     VLLM_B12X_MOE_FP4_LAYER_MAX_INPUT_SCALE: Literal["0", "1", "all", "w13", "w2"] = "0"
+     VLLM_DEFAULT_MOE_BACKEND: str = "auto"
+     VLLM_B12X_DENSE_ACTIVATION_MODE: Literal["auto", "a16", "quantized"] = "auto"
+@@ -1456,6 +1458,12 @@
+     "VLLM_V1_OUTPUT_PROC_CHUNK_SIZE": lambda: int(
+         os.getenv("VLLM_V1_OUTPUT_PROC_CHUNK_SIZE", "128")
+     ),
++    # Let a scheduling step with no runnable decode use the full
++    # max_num_batched_tokens for prefill instead of max_num_scheduled_tokens,
++    # which only exists to keep decode streams moving.
++    "VLLM_SCHEDULER_UNCAP_PREFILL_ONLY_STEPS": lambda: (
++        os.getenv("VLLM_SCHEDULER_UNCAP_PREFILL_ONLY_STEPS", "0") == "1"
++    ),
+     # If set, vLLM will disable the MLA attention optimizations.
+     "VLLM_MLA_DISABLE": lambda: bool(int(os.getenv("VLLM_MLA_DISABLE", "0"))),
+     # If set, vLLM will pick up the provided Flash Attention MLA
+@@ -1655,6 +1663,9 @@
+     "VLLM_B12X_MOE_FP4_FORCE_A16": lambda: bool(
+         int(os.getenv("VLLM_B12X_MOE_FP4_FORCE_A16", "0"))
+     ),
++    # Opt-in: under --linear-backend b12x, serve decode-sized (<= 8 row) BF16
++    # linears through b12x gemm.bf16_gemv plans autotuned against cuBLAS.
++    "VLLM_B12X_BF16_GEMV": lambda: os.getenv("VLLM_B12X_BF16_GEMV", "0") == "1",
+     # Select layer-wide activation scales for b12x NVFP4 MoE projections.
+     "VLLM_B12X_MOE_FP4_LAYER_MAX_INPUT_SCALE": env_with_choices(
+         "VLLM_B12X_MOE_FP4_LAYER_MAX_INPUT_SCALE",
+--- a/vllm/utils/b12x.py
++++ b/vllm/utils/b12x.py
+@@ -262,6 +262,7 @@
+         "b12x.attention.compressed_sparse_mla",
+         "b12x.attention.dsa_indexer",
+         "b12x.attention.qsa",
++        "b12x.gemm.bf16_gemv",
+         "b12x.gemm.bf16_vocab_projection",
+         "b12x.gemm.blockscaled",
+         "b12x.gemm.mla_query_projection",
+@@ -297,6 +298,10 @@
+     return _get_submodule("b12x.gemm.blockscaled")
+ 
+ 
++def get_b12x_bf16_gemv() -> ModuleType | None:
++    return _get_submodule("b12x.gemm.bf16_gemv")
++
++
+ def get_b12x_bf16_vocab_projection() -> ModuleType | None:
+     return _get_submodule("b12x.gemm.bf16_vocab_projection")
+ 
+--- a/b12x/gemm/bf16_gemv/_tensor_core.py
++++ b/b12x/gemm/bf16_gemv/_tensor_core.py
+@@ -0,0 +1,154 @@
++"""Tensor-core GEMV for up to eight BF16 rows.
++
++At decode row counts the projection streams the weight once, so its cost is
++the weight read.  Each CTA owns 16 output features and its warps split K into
++64-wide chunks.  Weights are the ``m16n8k16`` MMA's 16-row A operand and the
++live rows its 8-column B operand, so one weight fragment serves every row.
++Products accumulate in FP32; the warps reduce through shared memory in a fixed
++order and the result is rounded once, so the output is deterministic.
++
++Within a chunk, K is permuted identically for both operands so that each
++thread's fragments come from 32 contiguous bytes (two 16-byte loads); the
++chunk sum covers the same products.
++"""
++
++from __future__ import annotations
++
++import cuda.bindings.driver as cuda
++import cutlass
++import cutlass.cute as cute
++from cutlass import BFloat16, Float32, Int32, Int64
++
++from b12x._lib.intrinsics import (
++    bf16_mma_m16n8k16_f32,
++    get_ptr_as_int64,
++    ld_global_nc_v4_u32,
++)
++
++TC_MAX_ROWS = 8
++TC_WARPS = 8
++TC_K_MULTIPLE = 64 * TC_WARPS
++_LANES = 32
++
++
++@cute.jit
++def _flat(pointer: cute.Pointer):
++    return cute.make_tensor(pointer, cute.make_layout((Int64(1) << Int64(50),)))
++
++
++class TensorCoreGemvKernel:
++    """``out[m, n] = sum_k x[m, k] * w[n, k]`` for at most eight live rows."""
++
++    def __init__(self, n: int, k: int):
++        if k % TC_K_MULTIPLE:
++            raise ValueError(f"tensor-core GEMV requires K to be a multiple of {TC_K_MULTIPLE}")
++        self.n, self.k = int(n), int(k)
++        self.chunks_per_warp = (self.k // 64) // TC_WARPS
++
++    def _shared_storage_cls(self):
++        class SharedStorage:
++            pass
++
++        SharedStorage.__annotations__ = {
++            "partials": cute.struct.Align[
++                cute.struct.MemRange[Float32, TC_WARPS * _LANES * 4], 16
++            ],
++        }
++        return cute.struct(SharedStorage)
++
++    @cute.jit
++    def __call__(
++        self,
++        x: cute.Pointer,
++        weight: cute.Pointer,
++        bias: cute.Pointer,
++        output: cute.Pointer,
++        rows: Int32,
++        x_stride: Int64,
++        weight_stride: Int64,
++        output_stride: Int64,
++        x_column_stride: Int64,
++        weight_column_stride: Int64,
++        vector_loads: Int32,
++        stream: cuda.CUstream,
++    ):
++        # Unit column strides and 16-byte rows are part of the eligibility
++        # contract; bias is not (the selector keeps biased calls elsewhere).
++        del bias, x_column_stride, weight_column_stride, vector_loads
++        self.kernel(
++            _flat(x), _flat(weight), _flat(output), rows, x_stride, weight_stride,
++            output_stride,
++        ).launch(
++            grid=((self.n + 15) // 16, 1, 1),
++            block=(TC_WARPS * _LANES, 1, 1),
++            stream=stream,
++        )
++
++    @cute.kernel
++    def kernel(
++        self,
++        x: cute.Tensor,
++        weight: cute.Tensor,
++        output: cute.Tensor,
++        rows: Int32,
++        x_stride: Int64,
++        weight_stride: Int64,
++        output_stride: Int64,
++    ):
++        thread, _, _ = cute.arch.thread_idx()
++        block, _, _ = cute.arch.block_idx()
++        warp = Int32(thread) // _LANES
++        lane = Int32(thread) % _LANES
++        group = lane // 4
++        quad = lane % 4
++        first = Int32(block) * 16
++        # Clamped loads keep partial tiles and absent rows in bounds; their
++        # stores are masked.
++        row_a = cutlass.min(first + group, Int32(self.n - 1))
++        row_b = cutlass.min(first + group + 8, Int32(self.n - 1))
++        token = cutlass.min(group, rows - 1)
++        weight_base = get_ptr_as_int64(weight, Int64(0))
++        x_base = get_ptr_as_int64(x, Int64(0))
++        acc0 = Float32(0.0)
++        acc1 = Float32(0.0)
++        acc2 = Float32(0.0)
++        acc3 = Float32(0.0)
++        for step in cutlass.range_constexpr(self.chunks_per_warp):
++            chunk = warp * self.chunks_per_warp + step
++            offset = Int64(chunk * 128 + quad * 32)
++            pa = weight_base + Int64(row_a) * weight_stride * 2 + offset
++            pb = weight_base + Int64(row_b) * weight_stride * 2 + offset
++            px = x_base + Int64(token) * x_stride * 2 + offset
++            wa0, wa1, wa2, wa3 = ld_global_nc_v4_u32(pa)
++            wa4, wa5, wa6, wa7 = ld_global_nc_v4_u32(pa + Int64(16))
++            wb0, wb1, wb2, wb3 = ld_global_nc_v4_u32(pb)
++            wb4, wb5, wb6, wb7 = ld_global_nc_v4_u32(pb + Int64(16))
++            x0, x1, x2, x3 = ld_global_nc_v4_u32(px)
++            x4, x5, x6, x7 = ld_global_nc_v4_u32(px + Int64(16))
++            wa = (wa0, wa1, wa2, wa3, wa4, wa5, wa6, wa7)
++            wb = (wb0, wb1, wb2, wb3, wb4, wb5, wb6, wb7)
++            xs = (x0, x1, x2, x3, x4, x5, x6, x7)
++            for s in cutlass.range_constexpr(4):
++                acc0, acc1, acc2, acc3 = bf16_mma_m16n8k16_f32(
++                    acc0, acc1, acc2, acc3,
++                    wa[2 * s], wb[2 * s], wa[2 * s + 1], wb[2 * s + 1],
++                    xs[2 * s], xs[2 * s + 1],
++                )
++
++        storage = cutlass.utils.SmemAllocator().allocate(self._shared_storage_cls())
++        partials = storage.partials.get_tensor(cute.make_layout((TC_WARPS * _LANES * 4,)))
++        base = (warp * _LANES + lane) * 4
++        partials[base] = acc0
++        partials[base + 1] = acc1
++        partials[base + 2] = acc2
++        partials[base + 3] = acc3
++        cute.arch.sync_threads()
++        if warp == 0:
++            for e in cutlass.range_constexpr(4):
++                total = Float32(0.0)
++                for w in cutlass.range_constexpr(TC_WARPS):
++                    total = total + partials[Int32(w * _LANES * 4) + lane * 4 + e]
++                feature = first + group + (8 if e >= 2 else 0)
++                row = quad * 2 + (e % 2)
++                if feature < self.n and row < rows:
++                    output[Int64(row) * output_stride + Int64(feature)] = total.to(BFloat16)
+--- a/b12x/gemm/bf16_gemv/_tuning.py
++++ b/b12x/gemm/bf16_gemv/_tuning.py
+@@ -48,6 +48,24 @@
+             and query.out_features >= 256 and query.in_features >= 16)
+ 
+ 
++def _tc_eligible(query):
++    from ._tensor_core import TC_K_MULTIPLE, TC_MAX_ROWS
++    return (
++        query.source_dtype == query.weight_dtype == query.output_dtype == "bfloat16"
++        and query.bias_dtype is None
++        and query.max_rows <= TC_MAX_ROWS
++        and query.in_features % TC_K_MULTIPLE == 0
++        and query.source_contiguous and query.source_aligned
++        and query.weight_contiguous and query.weight_aligned
++        and query.output_contiguous
++    )
++
++
++def _torch_eligible(query):
++    return (query.source_dtype == query.weight_dtype == query.output_dtype == "bfloat16"
++            and query.bias_dtype in (None, "bfloat16"))
++
++
+ def _prefill_eligible(query):
+     return (
+         query.bias_dtype is None
+@@ -63,6 +81,8 @@
+     prefill_min_rows = 128 if query.out_features == 1024 else 256
+     if _prefill_eligible(query) and query.max_rows >= prefill_min_rows:
+         return GemvConfig(backend="prefill")
++    if _torch_eligible(query) and query.max_rows > 8:
++        return GemvConfig(backend="torch")
+     n_tiles = (query.out_features + 63) // 64
+     minimum_mma_rows = 24 if n_tiles >= 64 else ((64 + n_tiles - 1) // n_tiles) * 32
+     if _mma_eligible(query) and query.max_rows >= minimum_mma_rows:
+@@ -94,6 +114,10 @@
+         raise ValueError("rows_per_tile only configures SIMT projection")
+     if config.backend == "mma" and _mma_eligible(query):
+         return
++    if config.backend == "tc" and _tc_eligible(query):
++        return
++    if config.backend == "torch" and _torch_eligible(query):
++        return
+     if config.backend == "prefill" and _prefill_eligible(query):
+         return
+     raise ValueError(f"projection backend {config.backend!r} is ineligible for this query")
+@@ -103,8 +127,12 @@
+     backends = ["simt"]
+     if _mma_eligible(query):
+         backends.append("mma")
++    if _tc_eligible(query):
++        backends.append("tc")
+     if _prefill_eligible(query):
+         backends.append("prefill")
++    if _torch_eligible(query):
++        backends.append("torch")
+     return ParameterSpace.create(
+         TUNING.knobs, values={"backend": tuple(backends)}, predicates=(_eligible,),
+     )
+@@ -117,7 +145,7 @@
+ TUNING = TuningContract(
+     component_id="gemm.bf16_gemv",
+     query_schema_version=4,
+-    config_schema_version=4,
++    config_schema_version=5,
+     query_fields=frozenset(field.name for field in fields(GemvQuery)),
+     config_fields=frozenset(field.name for field in fields(GemvConfig)),
+     encode_query=asdict,
+@@ -130,7 +158,7 @@
+         Knob(name="backend", values=None, binding=ParameterBinding.COMPILE),
+         Knob(name="rows_per_tile", values=(1, 2, 4, 8), binding=ParameterBinding.COMPILE),
+     ),
+-    candidate_contract_version=2,
++    candidate_contract_version=4,
+     parameters=_parameters,
+     materialize=lambda query, device, choice: GemvConfig(**dict(choice)),
+ )
+--- a/b12x/gemm/bf16_gemv/_preparation.py
++++ b/b12x/gemm/bf16_gemv/_preparation.py
+@@ -50,6 +50,8 @@
+     config = GemvConfig(**dict(config_payload))
+     TUNING.validate_query(query, None)
+     TUNING.validate_config(query, config, None)
++    if config.backend == "torch":
++        return {}
+     if config.backend == "prefill":
+         from ._prefill import compile_prefill
+         launcher = compile_prefill(ordinal, query.max_rows, query.out_features,
+@@ -64,6 +66,13 @@
+     return {"gemv": launcher}
+ 
+ 
++def _torch_projection(x, weight, out, bias):
++    if bias is None:
++        torch.mm(x, weight.T, out=out)
++    else:
++        torch.addmm(bias, x, weight.T, out=out)
++
++
+ @dataclass(frozen=True)
+ class _GemvExecutionState:
+     query: GemvQuery
+@@ -108,6 +117,8 @@
+         raise ValueError("projection invocation semantics belong in GemvQuery")
+ 
+     def compile_jobs(config, device):
++        if config.backend == "torch":
++            return ()
+         return (CompileJob.create(
+             "b12x.gemm.bf16_gemv._preparation:compile_gemv",
+             TUNING.encode_query(query), TUNING.encode_config(config), device.ordinal,
+@@ -118,6 +129,8 @@
+         return MemoryRequirements()
+ 
+     def materialize(selection, device):
++        if selection.config.backend == "torch":
++            return _GemvExecutionState(query, torch.device("cuda", device.ordinal), _torch_projection)
+         programs = compile_gemv(
+             TUNING.encode_query(query), TUNING.encode_config(selection.config), device.ordinal,
+         )
+--- a/b12x/gemm/bf16_gemv/_kernel.py
++++ b/b12x/gemm/bf16_gemv/_kernel.py
+@@ -553,13 +553,16 @@
+     x_type, w_type, y_type = (getattr(torch, name) for name in (
+         source_dtype, weight_dtype, output_dtype,
+     ))
+-    kernel = (
+-        SmallNGemvKernel(n, k, x_type == w_type == torch.bfloat16,
+-                        bias_dtype is not None, rows_per_tile)
+-        if backend == "simt" else Bf16GemmKernel(n, k, bias_dtype is not None)
+-    )
+-    if backend not in ("simt", "mma"):
+-        raise ValueError("projection compiler requires a selected SIMT or MMA backend")
++    if backend not in ("simt", "mma", "tc"):
++        raise ValueError("projection compiler requires a selected SIMT, MMA or TC backend")
++    if backend == "simt":
++        kernel = SmallNGemvKernel(n, k, x_type == w_type == torch.bfloat16,
++                                  bias_dtype is not None, rows_per_tile)
++    elif backend == "tc":
++        from ._tensor_core import TensorCoreGemvKernel
++        kernel = TensorCoreGemvKernel(n, k)
++    else:
++        kernel = Bf16GemmKernel(n, k, bias_dtype is not None)
+     types = (x_type, w_type, x_type if bias_dtype is None else getattr(torch, bias_dtype), y_type)
+     key = (ordinal, backend, rows_per_tile if backend == "simt" else None,
+            n, k, source_dtype, weight_dtype, output_dtype, bias_dtype)
+--- a/vllm/transformers_utils/configs/glm53_tp3.py
++++ b/vllm/transformers_utils/configs/glm53_tp3.py
+@@ -223,9 +223,7 @@
+             if getattr(config, "draft_vocab_size", None) is None:
+                 config.draft_vocab_size = 154880
+         config.glm53_tp3_padding = True
+-        if moe_tp_width and hasattr(config, "moe_intermediate_size"):
+-            config.original_moe_intermediate_size = 2048
+-            config.moe_intermediate_size = moe_tp_width
++        # DFlash drafts are dense: no routed-expert width to pad (MOE_TP).
+         config.glm53_tp3_vocab_padding_size = 192
+         config.glm53_tp3_vocab_storage_size = 154944
+ 
+--- a/vllm/distributed/device_communicators/cuda_communicator.py
++++ b/vllm/distributed/device_communicators/cuda_communicator.py
+@@ -2,6 +2,7 @@
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ 
+ 
++import os
+ import torch
+ from torch.distributed import ProcessGroup
+ 
+@@ -26,6 +27,52 @@
+ logger = init_logger(__name__)
+ 
+ 
++# PyNCCL communicators shared by groups over the same ranks and device
++# (VLLM_SHARE_PYNCCL_COMMS): key -> [communicator, owners].
++_SHARED_PYNCCL: dict[tuple, list] = {}
++
++
++def _acquire_pynccl(group, device: torch.device):
++    """Return (communicator, share key, created).
++
++    With VLLM_SHARE_PYNCCL_COMMS, groups over the same ranks (for example TP,
++    DCP and EP at TP2+DCP2) reuse one NCCL communicator instead of each
++    allocating channel and P2P buffers. Every rank creates its groups in the
++    same order, so each rank makes the same reuse decision. The groups' device
++    collectives are issued from the current stream, so their order on the
++    shared communicator matches on every rank.
++    """
++    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
++
++    if os.environ.get("VLLM_SHARE_PYNCCL_COMMS", "0") != "1" or isinstance(group, StatelessProcessGroup):
++        return PyNcclCommunicator(group=group, device=device), None, True
++    import torch.distributed as dist
++
++    key = (tuple(dist.get_process_group_ranks(group)), str(device))
++    entry = _SHARED_PYNCCL.get(key)
++    if entry is not None:
++        entry[1] += 1
++        logger.info("Reusing the PyNCCL communicator of ranks %s", key[0])
++        return entry[0], key, False
++    comm = PyNcclCommunicator(group=group, device=device)
++    _SHARED_PYNCCL[key] = [comm, 1]
++    return comm, key, True
++
++
++def _release_pynccl(comm, key: tuple | None) -> None:
++    if key is None:
++        comm.destroy()
++        return
++    entry = _SHARED_PYNCCL.get(key)
++    if entry is None or entry[0] is not comm:
++        comm.destroy()
++        return
++    entry[1] -= 1
++    if entry[1] == 0:
++        del _SHARED_PYNCCL[key]
++        comm.destroy()
++
++
+ class CudaCommunicator(DeviceCommunicatorBase):
+     def __init__(
+         self,
+@@ -109,12 +156,13 @@
+         from vllm.distributed.device_communicators.symm_mem import SymmMemCommunicator
+ 
+         self.pynccl_comm: PyNcclCommunicator | None = None
++        self._pynccl_share_key: tuple | None = None
+         if self.world_size > 1:
+-            self.pynccl_comm = PyNcclCommunicator(
+-                group=self.cpu_group if tcp_store_group is None else tcp_store_group,
+-                device=self.device,
++            group = self.cpu_group if tcp_store_group is None else tcp_store_group
++            self.pynccl_comm, self._pynccl_share_key, created = _acquire_pynccl(
++                group, self.device
+             )
+-            if is_symmetric_memory_enabled():
++            if created and is_symmetric_memory_enabled():
+                 register_nccl_symmetric_ops(self.pynccl_comm)
+ 
+         self.ca_comm: CustomAllreduce | None = None
+@@ -726,7 +774,7 @@
+             self.b12x_ar_comm.close()
+             self.b12x_ar_comm = None
+         if self.pynccl_comm is not None:
+-            self.pynccl_comm.destroy()
++            _release_pynccl(self.pynccl_comm, self._pynccl_share_key)
+             self.pynccl_comm = None
+         if self.ca_comm is not None:
+             self.ca_comm = None
+--- a/vllm/model_executor/layers/utils.py
++++ b/vllm/model_executor/layers/utils.py
+@@ -591,6 +591,13 @@
+     elif not current_platform.is_cuda():
+         return default_unquantized_gemm
+ 
++    if linear_backend == "b12x":
++        from vllm.model_executor.kernels.linear.b12x_unquantized import (
++            b12x_unquantized_gemm,
++        )
++
++        return b12x_unquantized_gemm
++
+     backend_spec = _FLASHINFER_BF16_BACKENDS.get(linear_backend)
+     if backend_spec is None:
+         return default_unquantized_gemm
+--- a/vllm/model_executor/layers/linear.py
++++ b/vllm/model_executor/layers/linear.py
+@@ -326,6 +326,7 @@
+         linear_backend = (
+             config.kernel_config.linear_backend if config is not None else "auto"
+         )
++        self._linear_backend = linear_backend
+         self._gemm_impl = dispatch_unquantized_gemm(linear_backend)
+ 
+     def create_weights(
+@@ -358,6 +359,12 @@
+         set_weight_attrs(weight, extra_weight_attrs)
+ 
+     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
++        if self._linear_backend == "b12x" and current_platform.is_cuda():
++            from vllm.model_executor.kernels.linear.b12x_unquantized import (
++                maybe_attach_b12x_bf16_gemv,
++            )
++
++            maybe_attach_b12x_bf16_gemv(layer)
+         if current_platform.is_cpu():
+             # MLA's kv_b_proj (see `skip_weight_relayout`): not perf-critical,
+             # so skip packing and use a plain fallback.
+--- a/vllm/model_executor/kernels/linear/b12x_unquantized.py
++++ b/vllm/model_executor/kernels/linear/b12x_unquantized.py
+@@ -0,0 +1,220 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""Decode-sized unquantized linears through b12x ``gemm.bf16_gemv``.
++
++Under ``--linear-backend b12x``, BF16 linear layers declare b12x projection
++plans for the CUDA-graph token counts up to ``MAX_ROWS``.  Preparation
++autotunes each plan across b12x's GEMV kernels and cuBLAS (b12x's ``torch``
++backend), so a layer leaves cuBLAS only where a native kernel measures faster;
++a layer whose plans all keep cuBLAS traces a plain ``F.linear``.  Larger
++batches keep ``F.linear``.
++"""
++
++from collections.abc import Sequence
++
++import torch
++
++import vllm.envs as envs
++from vllm.config import get_current_vllm_config_or_none
++from vllm.platforms import current_platform
++from vllm.utils.b12x import (
++    B12xPreparationUnit,
++    B12xWorkload,
++    b12x_layer,
++    b12x_layer_prefix,
++    get_b12x_bf16_gemv,
++    register_b12x_layer,
++    set_b12x_preparation_provider,
++)
++from vllm.utils.torch_utils import (
++    LayerNameType,
++    _encode_layer_name,
++    _resolve_layer_name,
++    direct_register_custom_op,
++)
++
++MAX_ROWS = 8
++
++
++def _aligned(tensor: torch.Tensor) -> bool:
++    return tensor.data_ptr() % 16 == 0 and tensor.stride(0) % 8 == 0
++
++
++def _plan(api, layer: torch.nn.Module, rows: int, bias: torch.Tensor | None):
++    n, k = map(int, layer.weight.shape)
++    return api.plan(
++        api.GemvQuery(
++            source_dtype="bfloat16",
++            weight_dtype="bfloat16",
++            max_rows=rows,
++            in_features=k,
++            out_features=n,
++            source_contiguous=True,
++            source_aligned=True,
++            weight_contiguous=True,
++            weight_aligned=True,
++            bias_dtype=None if bias is None else "bfloat16",
++        )
++    )
++
++
++def _b12x_bf16_linear(
++    x: torch.Tensor,
++    weight: torch.Tensor,
++    bias: torch.Tensor | None,
++    layer_name: LayerNameType,
++) -> torch.Tensor:
++    layer = b12x_layer(_resolve_layer_name(layer_name))
++    rows = int(x.shape[0])
++    plan = min(
++        (
++            (capacity, plan)
++            for capacity, plan in layer.b12x_bf16_gemv_plans.items()
++            if capacity >= rows
++        ),
++        default=(None, None),
++        key=lambda item: item[0],
++    )[1]
++    if plan is None or rows == 0 or not x.is_contiguous() or not _aligned(x):
++        return torch.nn.functional.linear(x, weight, bias)
++    api = get_b12x_bf16_gemv()
++    assert api is not None
++    return api.mm(x, weight, plan=plan, bias=bias)
++
++
++def _b12x_bf16_linear_fake(
++    x: torch.Tensor,
++    weight: torch.Tensor,
++    bias: torch.Tensor | None,
++    layer_name: LayerNameType,
++) -> torch.Tensor:
++    del bias, layer_name
++    return x.new_empty((x.shape[0], weight.shape[0]))
++
++
++direct_register_custom_op(
++    op_name="b12x_bf16_linear",
++    op_func=_b12x_bf16_linear,
++    fake_impl=_b12x_bf16_linear_fake,
++)
++
++
++def b12x_bf16_gemv_enabled() -> bool:
++    """Routing needs autotuning: only measured plans may leave cuBLAS."""
++    config = get_current_vllm_config_or_none()
++    return (
++        envs.VLLM_B12X_BF16_GEMV
++        and config is not None
++        and config.kernel_config.enable_b12x_autotune
++        and current_platform.is_cuda()
++        and current_platform.is_device_capability_family(120)
++        and get_b12x_bf16_gemv() is not None
++    )
++
++
++def maybe_attach_b12x_bf16_gemv(layer: torch.nn.Module) -> bool:
++    """Route the layer's decode-sized calls through b12x when its weight fits."""
++    weight = getattr(layer, "weight", None)
++    bias = getattr(layer, "bias", None)
++    if (
++        not b12x_bf16_gemv_enabled()
++        or not isinstance(weight, torch.Tensor)
++        or weight.dtype != torch.bfloat16
++        or weight.ndim != 2
++        or not weight.is_contiguous()
++        or not _aligned(weight)
++        or (bias is not None and bias.dtype != torch.bfloat16)
++        or getattr(layer, "b12x_preparation_suppressed", False)
++    ):
++        return False
++    name = b12x_layer_prefix(layer)
++    register_b12x_layer(name, layer)
++    layer.b12x_layer_name = _encode_layer_name(name)
++    # Plain-string copy for the trace-time routing check: torch.compile sees
++    # the opaque LayerName as a FakeScriptObject.
++    layer.b12x_bf16_gemv_name = name
++    layer.b12x_bf16_gemv_plans = {}
++    set_b12x_preparation_provider(layer, _B12xBf16GemvProvider())
++    return True
++
++
++@torch.compiler.assume_constant_result
++def _selects_native_kernel(layer_name: str) -> bool:
++    """Whether preparation picked a b12x kernel over cuBLAS for any row count.
++
++    Weight-stage preparation completes before the model is first traced, so a
++    layer whose plans all chose cuBLAS keeps a plain ``F.linear``.
++    """
++    plans = b12x_layer(layer_name).b12x_bf16_gemv_plans
++    return any(
++        plan.selection is not None and plan.selection.config.backend != "torch"
++        for plan in plans.values()
++    )
++
++
++def b12x_unquantized_gemm(
++    layer: torch.nn.Module,
++    x: torch.Tensor,
++    weight: torch.Tensor,
++    bias: torch.Tensor | None = None,
++) -> torch.Tensor:
++    if (
++        getattr(layer, "b12x_bf16_gemv_plans", None) is None
++        or x.ndim != 2
++        or not _selects_native_kernel(layer.b12x_bf16_gemv_name)
++    ):
++        return torch.nn.functional.linear(x, weight, bias)
++    return torch.ops.vllm.b12x_bf16_linear(x, weight, bias, layer.b12x_layer_name)
++
++
++class _B12xBf16GemvProvider:
++    """Declares one autotuned projection plan per decode token count."""
++
++    def get_b12x_preparation_units(
++        self,
++        layer: torch.nn.Module,
++        workload: B12xWorkload,
++    ) -> Sequence[B12xPreparationUnit]:
++        api = get_b12x_bf16_gemv()
++        weight = layer.weight
++        # GLM-5.3 FP8 decode layers replace their BF16 weight after loading
++        # (and run their own FP8 kernels); plan only layers still in BF16.
++        if api is None or weight.is_meta or weight.dtype != torch.bfloat16:
++            return ()
++        bias = getattr(layer, "bias", None)
++        k = int(weight.shape[1])
++        prefix = _resolve_layer_name(layer.b12x_layer_name)
++        plans = layer.b12x_bf16_gemv_plans
++        requests = []
++        for rows in sorted({r for r in workload.token_counts if r <= MAX_ROWS}):
++            plan = plans.get(rows)
++            if plan is None:
++                plan = plans[rows] = _plan(api, layer, rows, bias)
++
++            def call(state, *, m=rows):
++                from b12x.preparation import PreparedCall
++
++                x = torch.empty((m, k), dtype=torch.bfloat16, device=weight.device)
++                return PreparedCall(
++                    run=lambda: state.run(x, weight, bias=bias),
++                    produce=lambda: x.normal_(),
++                    owners=(weight,) if bias is None else (weight, bias),
++                )
++
++            requests.append(
++                plan.request(
++                    name=f"linear.bf16_gemv.{prefix}.m{rows}",
++                    prepare_call=call,
++                    benchmark_call=call,
++                )
++            )
++        if not requests:
++            return ()
++        return (
++            B12xPreparationUnit(
++                name="BF16_GEMV",
++                key=(prefix, workload.token_counts),
++                requests=tuple(requests),
++                stage="weights",
++            ),
++        )
+--- a/vllm/models/glm5next/nvidia/glm53_fp8_dense.py
++++ b/vllm/models/glm5next/nvidia/glm53_fp8_dense.py
+@@ -216,9 +216,26 @@
+         self._inner = inner
+         self._max_m = _max_m()
+         self._packed: nn.Module | None = None
++        self._bf16_dropped = False
++        self._drop_pending = False
++
++    def _release_bf16(self, layer: nn.Module) -> None:
++        # Every logits call then uses the FP8 copy; only >max_m-row batches
++        # (prompt log-probabilities) change kernel. The MTP draft shares this
++        # module. A zero-stride view keeps the parameter's shape for code that
++        # inspects it; its values are never read.
++        weight = layer.weight
++        placeholder = torch.zeros(1, dtype=weight.dtype, device=weight.device)
++        layer.weight = nn.Parameter(placeholder.expand(weight.shape), requires_grad=False)
++        del weight
++        self._drop_pending = False
++        self._bf16_dropped = True
++        logger.info_once(
++            "GLM-5.3 FP8 decode: LM head BF16 weight released; all logits use FP8"
++        )
+ 
+     def __getattr__(self, name: str):
+-        if name.startswith("__") or name in ("_inner", "_max_m", "_packed"):
++        if name.startswith("__") or name in ("_inner", "_max_m", "_packed", "_bf16_dropped", "_drop_pending"):
+             raise AttributeError(name)
+         return getattr(self._inner, name)
+ 
+@@ -240,6 +257,9 @@
+             return
+         self._packed = _pack_marlin_fp8(weight)
+         logger.info_once("GLM-5.3 FP8 decode: LM head packed to Marlin FP8")
++        # Release the BF16 head (403.5 MiB/rank at TP3) at the first logits
++        # call: the MTP draft builds its own head copy from it after loading.
++        self._drop_pending = _flag("VLLM_GLM53_FP8_LM_HEAD_DROP_BF16", "0")
+ 
+     def apply(
+         self,
+@@ -252,6 +272,22 @@
+         )
+ 
+         p = self._packed
++        if p is not None and self._drop_pending:
++            self._release_bf16(layer)
++        if p is not None and self._bf16_dropped:
++            flat = x.reshape(-1, x.shape[-1])
++            if flat.dtype != torch.bfloat16:
++                flat = flat.to(torch.bfloat16)
++            out = apply_fp8_marlin_linear(
++                flat,
++                p.weight,
++                p.weight_scale,
++                p.workspace,
++                p.output_size_per_partition,
++                p.input_size_per_partition,
++                bias,
++            )
++            return out.reshape(*x.shape[:-1], -1)
+         if p is not None and _decode_eligible(x, bias, self._max_m):
+             return apply_fp8_marlin_linear(
+                 x,
+--- a/vllm/models/glm5next/nvidia/pooled_indexer.py
++++ b/vllm/models/glm5next/nvidia/pooled_indexer.py
+@@ -432,7 +432,11 @@
+                 num_cache_blocks=self._main_cache_num_blocks,
+                 **plan_kwargs,
+             ),
+-            owners=(pools, positions, requests, table, output, active_counts),
++            # These tensors are warmup-only. The run closure owns them through
++            # preparation; the published state contains a compiled program and
++            # receives all live pointers at invocation. Do not retain a separate
++            # 40 MiB warmup allocation per layer for the serving lifetime.
++            owners=(),
+         )
+ 
+     def get_b12x_physical_selection_preparation_request(self):
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -8,6 +8,7 @@
+ from dataclasses import replace
+ from typing import Any
+ 
++import vllm.envs as envs
+ from vllm.compilation.cuda_graph import CUDAGraphStat
+ from vllm.config import KVEventsConfig, VllmConfig
+ from vllm.distributed.ec_transfer.ec_connector.base import (
+@@ -860,6 +861,18 @@
+             else 0
+         )
+         has_eligible_decode = num_runnable_decodes > 0
++        # max_num_scheduled_tokens keeps decode streams moving while a long
++        # prompt prefills. With no runnable decode it only shrinks the prefill
++        # chunk, so such a step may use the full batched-token budget.
++        step_token_cap = self.max_num_scheduled_tokens
++        if (
++            envs.VLLM_SCHEDULER_UNCAP_PREFILL_ONLY_STEPS
++            and needs_decode_count
++            and not has_eligible_decode
++            and token_budget > 0
++            and step_token_cap < input_budget
++        ):
++            step_token_cap = token_budget = input_budget
+         prefill_interleave_step = (
+             self.prefill_interleave_controller.begin_step(
+                 running=self.running,
+@@ -1892,7 +1905,7 @@
+ 
+         # Check if the scheduling constraints are satisfied.
+         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
+-        assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
++        assert total_num_scheduled_tokens <= step_token_cap
+         assert token_budget >= 0
+         assert input_budget >= 0
+         assert draft_input_budget >= 0
+--- a/serve-glm53-flash-tp3-kraken.py
++++ b/serve-glm53-flash-tp3-kraken.py
+@@ -5,6 +5,15 @@
+ import re
+ import sys
+ 
++# Explicit KV budget for the one combination it was sized and stress-tested in
++# (default/MTP3/DCP1/MOE_TP=1, 8 slots, batch 4096, graph 32): 1779 blocks,
++# 3,319,246 tokens; three ~1M contexts resident with 1.5 GB/GPU headroom at peak.
++KV_RECLAIM_BYTES = 24707662848
++# DCP3/MOE_TP=1 (experimental): 1774 blocks (blocks are 13,888,512 B/GPU),
++# 8,417,076 tokens; 8x~895K stress with 6 resident (63.5% KV), 0 preemptions,
++# peak 96,364 MiB/GPU (1.5 GB free).
++KV_RECLAIM_BYTES_BY_DCP = {'1': KV_RECLAIM_BYTES, '3': 1774 * 13888512}
++
+ CHECKPOINTS = {
+     'default': ('local-inference-lab/GLM-5.3-Flash-NVFP4', '175ae8ce3b5af842b0d0140dbeb43e9cfc557c49'),
+     'uncensored': ('orcarouter/GLM-5.3-Flash-Uncensored-NVFP4', 'ec0adf4f49c9570807cc11a5f650538c1893ae54'),
+@@ -38,8 +47,9 @@
+     moe_tp = value('MOE_TP', '0')
+     if moe_tp not in ('0', '1'):
+         raise ValueError('MOE_TP must be 0 or 1')
+-    if moe_tp == '1' and (checkpoint != 'default' or mode != 'mtp' or dcp != '1'):
+-        raise ValueError('MOE_TP=1 is tested only with CHECKPOINT=default MODE=mtp DCP=1')
++    # MOE_TP=1 is qualified at DCP1; DCP3 is an experimental combination.
++    if moe_tp == '1' and (checkpoint != 'default' or mode != 'mtp' or dcp not in ('1', '3')):
++        raise ValueError('MOE_TP=1 is supported only with CHECKPOINT=default MODE=mtp DCP=1 (DCP=3 experimental)')
+     for retired in ('EPLB', 'KDA_NO_COPY'):
+         if value(retired, '0').lower() not in ('0', 'false'):
+             raise ValueError(f'{retired} was retired after slower repeated tests; remove it')
+@@ -110,6 +120,26 @@
+         if not re.fullmatch('[0-9a-f]{40}', draft_revision):
+             raise ValueError('A custom DFLASH_MODEL requires its immutable DFLASH_MODEL_REVISION')
+         args += ['--draft-tokens', '7', '--draft-model', draft, '--draft-revision', draft_revision]
++    # KV_RECLAIM: auto (default) enables the LM-head BF16 release, the shared
++    # TP/EP PyNCCL communicator and the explicit KV budget only for the tested
++    # combination; every other setting keeps vLLM's automatic KV sizing. 0 = off.
++    reclaim = value('KV_RECLAIM', 'auto').lower()
++    if reclaim not in ('auto', '0'):
++        raise ValueError('KV_RECLAIM must be auto or 0')
++    tested = (checkpoint == 'default' and mode == 'mtp' and dcp in KV_RECLAIM_BYTES_BY_DCP and moe_tp == '1'
++              and positive('MAX_NUM_SEQS', 8) == 8 and positive('MAX_NUM_BATCHED_TOKENS', 4096) == 4096
++              and maximum == 32 and not env.get('CUDAGRAPH_CAPTURE_SIZES')
++              and positive('MAX_MODEL_LEN', 1048576) == 1048576
++              and value('GPU_MEMORY_UTILIZATION', '0.95') == '0.95')
++    kv_bytes = value('KV_CACHE_MEMORY_BYTES', '')
++    if kv_bytes and not re.fullmatch(r'[1-9][0-9]*', kv_bytes):
++        raise ValueError('KV_CACHE_MEMORY_BYTES must be a positive integer')
++    if reclaim == 'auto' and tested:
++        args += ['--kv-cache-memory-bytes', kv_bytes or str(KV_RECLAIM_BYTES_BY_DCP[dcp])]
++    elif kv_bytes:
++        raise ValueError('KV_CACHE_MEMORY_BYTES is only accepted with KV_RECLAIM=auto in the tested '
++                         'default/MTP3/DCP1 or DCP3 with MOE_TP=1 configuration')
++    env['_GLM53_KV_RECLAIM_ACTIVE'] = '1' if reclaim == 'auto' and tested else '0'
+     return args
+ 
+ 
+@@ -134,13 +164,18 @@
+         raise ValueError('EPLB was retired after slower repeated tests')
+     os.environ['VLLM_GLM53_TP3_MOE_TP'] = '2112' if moe_tp == '1' else '0'
+     os.environ['VLLM_GLM53_KDA_NO_COPY'] = '0'
++    active = os.environ.pop('_GLM53_KV_RECLAIM_ACTIVE', '0') == '1'
++    os.environ['VLLM_GLM53_FP8_LM_HEAD_DROP_BF16'] = '1' if active else '0'
++    os.environ['VLLM_SHARE_PYNCCL_COMMS'] = '1' if active else '0'
++    print(f'GLM-5.3 KV reclaim {"active" if active else "inactive (automatic KV sizing)"}', flush=True)
+     # These belong to this wrapper; native Kraken explicitly rejects MODE.
+     for key in ("CHECKPOINT", "MODE", "MODEL", "MODEL_REVISION", "DFLASH_MODEL",
+                 "DFLASH_MODEL_REVISION", "DCP", "MAX_NUM_BATCHED_TOKENS",
+                 "MAX_CUDAGRAPH_CAPTURE_SIZE", "CUDAGRAPH_CAPTURE_SIZES",
+                 "MAX_NUM_SEQS", "MAX_MODEL_LEN", "GPU_MEMORY_UTILIZATION",
+                 "REASONING_EFFORT", "CLEAR_THINKING", "SERVED_MODEL_NAME",
+-                "MOE_TP", "EPLB", "EPLB_WINDOW_SIZE", "EPLB_STEP_INTERVAL", "KDA_NO_COPY"):
++                "MOE_TP", "EPLB", "EPLB_WINDOW_SIZE", "EPLB_STEP_INTERVAL", "KDA_NO_COPY",
++                "KV_RECLAIM", "KV_CACHE_MEMORY_BYTES"):
+         os.environ.pop(key, None)
+     # Blank optional environment entries mean use the native defaults.
+     for key in list(os.environ):
