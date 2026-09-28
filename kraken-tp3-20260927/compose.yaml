@@ -26,7 +26,7 @@ services:
       # default = released NVFP4; uncensored = orcarouter NVFP4 checkpoint.
       # Both checkpoints are qualified in all four mode/DCP combinations;
       # see release/kraken-20260921/VARIATIONS.md.
-      CHECKPOINT: "${CHECKPOINT:-default}"
+      CHECKPOINT: "${CHECKPOINT:-uncensored}"
       MODEL: "${MODEL:-}"
       MODEL_REVISION: "${MODEL_REVISION:-}"
       SERVED_MODEL_NAME: "${SERVED_MODEL_NAME:-GLM-5.3-Flash-TP3}"
@@ -35,12 +35,13 @@ services:
       # Draft arguments are added only in DFlash mode.
       MODE: "${MODE:-mtp}"
       # 0 = baseline EP3; 1 = TP-sharded routed experts (704 channels/rank),
-      # +2.8-4% C1. MTP only: qualified at DCP1, experimental at DCP3; DFlash,
-      # MTP0 and other checkpoints need MOE_TP=0.
-      MOE_TP: "${MOE_TP:-1}"
+      # +2.8-4% C1. MTP only: default checkpoint qualified at DCP1; DCP3 and the
+      # uncensored checkpoint (Marlin TP experts) experimental; DFlash/MTP0 need 0.
+      MOE_TP: "${MOE_TP:-0}"
       # auto = LM-head BF16 release + shared PyNCCL + explicit KV budget, applied
-      # only for default/MTP3/MOE_TP=1 with default slots/batch/graph/length:
-      # DCP1 3,319,246 KV (3,180,865 with LMCACHE=l1); DCP3 8,417,076 (experimental).
+      # only for MTP3/MOE_TP=1 with default slots/batch/graph/length: default
+      # checkpoint DCP1 3,319,246 KV (3,180,865 with LMCACHE=l1), DCP3 8,417,076;
+      # uncensored DCP1 3,211,030, DCP3 8,398,097 (DCP3/uncensored experimental).
       # Any other setting uses automatic KV sizing. 0 = off everywhere.
       KV_RECLAIM: "${KV_RECLAIM:-auto}"
       # off = GPU prefix cache only; l1 = LMCache host-RAM tier (LMCACHE_L1_GB GiB,

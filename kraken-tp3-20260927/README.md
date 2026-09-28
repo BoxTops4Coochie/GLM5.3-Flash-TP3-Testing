@@ -1,10 +1,12 @@
 # GLM-5.3 Flash Kraken TP3 — 20260927
 
 Image: **`azallaza/glm53-kraken-tp3:20260927`** (local `glm53-kraken-tp3:20260927`,
-`sha256:4281708cbf5ad2230447b6443601e44c5c1339346692814553d19e6862272ce0`), derived from `glm53-kraken-tp3:20260925`; includes `lil-bench`.
+`sha256:3d3e687359bc229e942cd6a39a7d4574fb6525d5d78695d5cdbe519e4be6943f`), derived from `glm53-kraken-tp3:20260925`; includes `lil-bench`.
 Earlier local builds of this tag are kept as `20260927-pre-dflash-fix`,
-`20260927-pre-lmcache` and `20260927-pre-lilbench` (the first upload,
-`sha256:697f2787…`, identical except for `lil-bench`).
+`20260927-pre-lmcache`, `20260927-pre-lilbench` and
+`20260927-pre-uncensored-moetp` (earlier uploads `sha256:697f2787…` and
+`sha256:4281708c…`; the newest differs only in the launcher's uncensored
+MOE_TP / KV reclaim support).
 
 ```bash
 docker pull azallaza/glm53-kraken-tp3:20260927
@@ -31,13 +33,15 @@ batch 4096, graph 32, 8 slots, max length 1,048,576. Host settings unchanged:
 | DFlash draft geometry fix (DFlash could not start on 20260925) | always | DFlash works again |
 | LMCache L1 at TP3: lil `cache.py` accepts TP3 (contract hash updated), launcher `LMCACHE=l1`, stale-arena cleanup | `LMCACHE=l1` | host-RAM prefix tier |
 | `lil-bench` (upstream standardized benchmark, llm-inference-bench v0.7.3, p2pmark) | `docker exec … lil-bench` | tooling only |
+| MOE_TP=1 + KV reclaim for the uncensored checkpoint (Marlin TP experts) | `CHECKPOINT=uncensored MOE_TP=1` | KV 3,211,030 (DCP1) / 8,398,097 (DCP3) |
 
-`KV_RECLAIM=auto` applies the three memory items **only** for default
-checkpoint / MTP3 / MOE_TP=1 at DCP1 (1,779 blocks) or DCP3 (1,774 blocks,
-experimental) with the default slot/batch/graph/length settings — the
-configurations they were sized and stress-tested in. Any other setting
-(MOE_TP=0, DFlash, MTP0, other checkpoint, different slots...) keeps vLLM's
-automatic KV sizing and launches exactly as before; the launcher prints
+`KV_RECLAIM=auto` applies the three memory items **only** for MTP3 / MOE_TP=1
+with the default slot/batch/graph/length settings, in the configurations they
+were sized and stress-tested in: default checkpoint DCP1 (1,779 blocks; 1,720
+with `LMCACHE=l1`) and DCP3 (1,774), uncensored DCP1 (1,721) and DCP3 (1,770);
+DCP3 and uncensored are experimental. Any other setting (MOE_TP=0, DFlash, MTP0,
+uncensored with L1, different slots...) keeps vLLM's automatic KV sizing and
+launches exactly as before; the launcher prints
 `GLM-5.3 KV reclaim active|inactive`. `KV_RECLAIM=0` turns it off everywhere.
 BF16 GEMV applies to BF16 linears with at most 8 rows in any mode; C8 (32
 rows) and FP8 layers are unaffected.
@@ -52,6 +56,9 @@ rows) and FP8 layers are unaffected.
 | DFlash2 / DCP1 / EP3 | 2,807,197 | 206.6 / 205.6 / 227.7 | lavd 27+3 near; hotel-lights 83/90 over 3 runs; retrieval, long-gen 4/4 |
 | DFlash2 / DCP3 / EP3 | 6,498,779 | 190.2 / 196.2 / 187.8 | 8/8, retrieval pass, hotel-lights 28/1/1 trunc |
 | MTP3 / DCP1 / MOE_TP=1 + LMCache L1 96 GB | 3,180,865 | not re-measured | 8/8, L1 reload verified (below) |
+| Uncensored MTP3 / DCP1 / MOE_TP=1 (experimental) | 3,211,030 | not measured | 8/8, retrieval 128K/900K, 3x895K stress |
+| Uncensored MTP3 / DCP3 / MOE_TP=1 (experimental) | 8,398,097 (8.01x) | not measured | 8/8, retrieval 128K/900K, 8x895K stress |
+| Uncensored MTP3 / DCP1 / EP3 | 3,166,251 | not measured | launch (automatic sizing) |
 
 MTP3/DCP1/MOE_TP=1 is the recommended default: fastest and best-scoring.
 
@@ -61,6 +68,8 @@ docker compose up -d                               # defaults above
 DCP=3 docker compose up -d                         # MTP3/DCP3/MOE_TP=1 + KV reclaim (experimental)
 MODE=dflash2 MOE_TP=0 docker compose up -d         # DFlash2 (EP3 required)
 LMCACHE=l1 docker compose up -d                    # + LMCache L1 host-RAM tier
+CHECKPOINT=uncensored docker compose up -d         # uncensored, MOE_TP=1 + reclaim (experimental)
+CHECKPOINT=uncensored DCP=3 docker compose up -d   # uncensored DCP3, 8.01x 1M (experimental)
 KV_RECLAIM=0 docker compose up -d                  # automatic KV sizing
 BF16_GEMV=0 docker compose up -d                   # cuBLAS for BF16 decode linears
 ```
@@ -288,6 +297,32 @@ refuses to run while the server has other requests (`--allow-busy` overrides).
 Run it at the tested host settings (350 W/GPU, +6000 memory offset) with the
 GPUs cool.
 
+## Uncensored checkpoint with MOE_TP and KV reclaim (experimental)
+
+`orcarouter/GLM-5.3-Flash-Uncensored-NVFP4` (compressed-tensors
+`nvfp4-pack-quantized`) now runs with TP-sharded experts. The padded
+2048 -> 2112 expert loading is in the routed-expert weight loader and works for
+compressed-tensors unchanged (runtime proof `tp_experts_verified`); the launcher
+keeps this checkpoint on the Marlin MoE backend (EP off) instead of FlashInfer
+CUTLASS. The `w1_weight_global_scale must match w3_weight_global_scale` warning
+comes from the checkpoint and also appears on EP3. Startup briefly runs
+out of allocator headroom while Marlin repacks the experts (expandable-segment
+warnings); loading completes and serving is unaffected.
+
+| Setting | KV tokens | Peak free (GPU) | Checks |
+| --- | ---: | ---: | --- |
+| Uncensored DCP1 EP3, automatic | 3,166,251 | — | running before this change |
+| Uncensored DCP1 MOE_TP=1, automatic | 2,875,187 | — | 8/8 |
+| **Uncensored DCP1 MOE_TP=1 + reclaim (1,721 blocks)** | **3,211,030** | 1.85 GB | 8/8, retrieval 128K/900K, 3 x 895K resident (86.8% KV), 0 preemptions |
+| **Uncensored DCP3 MOE_TP=1 + reclaim (1,770 blocks)** | **8,398,097** (8.01x 1M) | 1.39 GB | 8/8, retrieval 128K/900K, 8 x 895K (5 resident), 0 preemptions |
+
+Reclaim frees about 0.8 GB/GPU for this checkpoint. At DCP3, 1,686 blocks
+(7,999,543) also passed the same stress with 2.5 GB free; 1,770 was chosen for
+8 full 1M contexts, with a slightly smaller margin than the default checkpoint.
+Speed and answer-quality qualification are not yet run for the uncensored
+MOE_TP configurations. Evidence: `../../optimization/uncensored-moetp-20260927/`,
+`../../optimization/uncensored-moetp-dcp3-20260927/`.
+
 ## Example Compose
 
 Download [compose.yaml](compose.yaml) and
@@ -306,7 +341,9 @@ DCP=3 MOE_TP=0 docker compose up -d                    # MTP3 / DCP3 / EP3, auto
 MODE=dflash2 MOE_TP=0 docker compose up -d             # DFlash2 depth 7 (MXFP8 draft)
 MODE=dflash2 MOE_TP=0 DCP=3 docker compose up -d       # DFlash2 at DCP3
 MODE=mtp0 MOE_TP=0 docker compose up -d                # no speculation
-CHECKPOINT=uncensored MOE_TP=0 docker compose up -d    # orcarouter NVFP4 checkpoint
+CHECKPOINT=uncensored docker compose up -d             # orcarouter NVFP4, MOE_TP=1 + reclaim (experimental)
+CHECKPOINT=uncensored DCP=3 docker compose up -d       # uncensored DCP3, 8,398,097 KV (experimental)
+CHECKPOINT=uncensored MOE_TP=0 docker compose up -d    # uncensored EP3, automatic KV
 KV_RECLAIM=0 docker compose up -d                      # automatic KV sizing
 BF16_GEMV=0 docker compose up -d                       # cuBLAS for BF16 decode linears
 ```
@@ -315,13 +352,13 @@ BF16_GEMV=0 docker compose up -d                       # cuBLAS for BF16 decode 
 | --- | --- | --- |
 | `MODE` | `mtp` | `mtp` (depth 3), `dflash2` (depth 7), `mtp0` (off) |
 | `DCP` | `1` | `1`, `3` (KV sharded across the 3 GPUs) |
-| `MOE_TP` | `1` | `1` TP experts (MTP only), `0` EP3 |
+| `MOE_TP` | `1` | `1` TP experts (MTP only; uncensored experimental), `0` EP3 |
 | `KV_RECLAIM` | `auto` | `auto`, `0` |
 | `KV_CACHE_MEMORY_BYTES` | empty | explicit bytes/GPU for the reclaim configurations |
 | `LMCACHE` / `LMCACHE_L1_GB` | `off` / `96` | `off`, `l1` / GiB of host RAM |
 | `BF16_GEMV` | `1` | `1`, `0` |
 | `NATIVE_DCP` | `1` | native PCIe DCP collectives at DCP3 (`0` = off) |
-| `CHECKPOINT` | `default` | `default`, `uncensored` (untested on this image) |
+| `CHECKPOINT` | `default` | `default`, `uncensored` (experimental with MOE_TP) |
 
 ```yaml
 # Kraken TP3 release example, image azallaza/glm53-kraken-tp3:20260927.
@@ -352,7 +389,7 @@ services:
       # default = released NVFP4; uncensored = orcarouter NVFP4 checkpoint.
       # Both checkpoints are qualified in all four mode/DCP combinations;
       # see release/kraken-20260921/VARIATIONS.md.
-      CHECKPOINT: "${CHECKPOINT:-default}"
+      CHECKPOINT: "${CHECKPOINT:-uncensored}"
       MODEL: "${MODEL:-}"
       MODEL_REVISION: "${MODEL_REVISION:-}"
       SERVED_MODEL_NAME: "${SERVED_MODEL_NAME:-GLM-5.3-Flash-TP3}"
@@ -361,12 +398,13 @@ services:
       # Draft arguments are added only in DFlash mode.
       MODE: "${MODE:-mtp}"
       # 0 = baseline EP3; 1 = TP-sharded routed experts (704 channels/rank),
-      # +2.8-4% C1. MTP only: qualified at DCP1, experimental at DCP3; DFlash,
-      # MTP0 and other checkpoints need MOE_TP=0.
-      MOE_TP: "${MOE_TP:-1}"
+      # +2.8-4% C1. MTP only: default checkpoint qualified at DCP1; DCP3 and the
+      # uncensored checkpoint (Marlin TP experts) experimental; DFlash/MTP0 need 0.
+      MOE_TP: "${MOE_TP:-0}"
       # auto = LM-head BF16 release + shared PyNCCL + explicit KV budget, applied
-      # only for default/MTP3/MOE_TP=1 with default slots/batch/graph/length:
-      # DCP1 3,319,246 KV (3,180,865 with LMCACHE=l1); DCP3 8,417,076 (experimental).
+      # only for MTP3/MOE_TP=1 with default slots/batch/graph/length: default
+      # checkpoint DCP1 3,319,246 KV (3,180,865 with LMCACHE=l1), DCP3 8,417,076;
+      # uncensored DCP1 3,211,030, DCP3 8,398,097 (DCP3/uncensored experimental).
       # Any other setting uses automatic KV sizing. 0 = off everywhere.
       KV_RECLAIM: "${KV_RECLAIM:-auto}"
       # off = GPU prefix cache only; l1 = LMCache host-RAM tier (LMCACHE_L1_GB GiB,

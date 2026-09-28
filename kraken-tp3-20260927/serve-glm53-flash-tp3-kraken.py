@@ -16,6 +16,11 @@ KV_RECLAIM_BYTES_BY_DCP = {'1': KV_RECLAIM_BYTES, '3': 1774 * 13888512}
 # With LMCACHE=l1 (DCP1 only): 1720 blocks, 3,180,865 tokens; LMCache's GPU-side
 # transfer buffers need ~0.8 GB more headroom (1,779 blocks hangs in autotune).
 KV_RECLAIM_BYTES_L1 = {'1': 1720 * 13888512}
+# Uncensored checkpoint, MOE_TP=1 (Marlin TP experts, experimental), no LMCache:
+# DCP1 1721 blocks = 3,211,030 tokens (3x~895K resident, 86.8% KV, peak 1.85 GB free);
+# DCP3 1770 blocks = 8,398,097 tokens, 8.01x 1M (8x895K stress, 5 resident, 0
+# preemptions, peak 1.39 GB free; 1686 blocks also passed).
+KV_RECLAIM_BYTES_UNCENSORED = {'1': 1721 * 13888512, '3': 1770 * 13888512}
 
 CHECKPOINTS = {
     'default': ('local-inference-lab/GLM-5.3-Flash-NVFP4', '175ae8ce3b5af842b0d0140dbeb43e9cfc557c49'),
@@ -51,8 +56,10 @@ def build_args(env):
     if moe_tp not in ('0', '1'):
         raise ValueError('MOE_TP must be 0 or 1')
     # MOE_TP=1 is qualified at DCP1; DCP3 is an experimental combination.
-    if moe_tp == '1' and (checkpoint != 'default' or mode != 'mtp' or dcp not in ('1', '3')):
-        raise ValueError('MOE_TP=1 is supported only with CHECKPOINT=default MODE=mtp DCP=1 (DCP=3 experimental)')
+    # MOE_TP=1 is qualified for default/MTP/DCP1; DCP3 and the uncensored checkpoint
+    # (Marlin TP experts) are experimental.
+    if moe_tp == '1' and (mode != 'mtp' or dcp not in ('1', '3')):
+        raise ValueError('MOE_TP=1 is supported only with MODE=mtp and DCP=1 (DCP=3 experimental)')
     for retired in ('EPLB', 'KDA_NO_COPY'):
         if value(retired, '0').lower() not in ('0', 'false'):
             raise ValueError(f'{retired} was retired after slower repeated tests; remove it')
@@ -108,7 +115,8 @@ def build_args(env):
             '--mm-encoder-tp-mode', 'weights']
     if moe_tp == '1':
         args.remove('--enable-expert-parallel')
-        args[args.index('--moe-backend') + 1] = 'flashinfer_cutlass'
+        if checkpoint != 'uncensored':
+            args[args.index('--moe-backend') + 1] = 'flashinfer_cutlass'
     args += ['--cudagraph-capture-sizes', *map(str, sizes)]
     if checkpoint == 'uncensored':
         args += ['--quantization', 'compressed-tensors', '--load-format', 'auto']
@@ -140,8 +148,11 @@ def build_args(env):
     reclaim = value('KV_RECLAIM', 'auto').lower()
     if reclaim not in ('auto', '0'):
         raise ValueError('KV_RECLAIM must be auto or 0')
-    budgets = KV_RECLAIM_BYTES_L1 if lmcache == 'l1' else KV_RECLAIM_BYTES_BY_DCP
-    tested = (checkpoint == 'default' and mode == 'mtp' and dcp in budgets and moe_tp == '1'
+    if checkpoint == 'uncensored':
+        budgets = {} if lmcache == 'l1' else KV_RECLAIM_BYTES_UNCENSORED
+    else:
+        budgets = KV_RECLAIM_BYTES_L1 if lmcache == 'l1' else KV_RECLAIM_BYTES_BY_DCP
+    tested = (mode == 'mtp' and dcp in budgets and moe_tp == '1'
               and positive('MAX_NUM_SEQS', 8) == 8 and positive('MAX_NUM_BATCHED_TOKENS', 4096) == 4096
               and maximum == 32 and not env.get('CUDAGRAPH_CAPTURE_SIZES')
               and positive('MAX_MODEL_LEN', 1048576) == 1048576
@@ -193,8 +204,8 @@ def main():
     if moe_tp == '1':
         if not os.path.isfile('/opt/lil/glm53-tp-experts.json'):
             raise ValueError('MOE_TP=1 requires glm53-kraken-tp3:20260925 or a compatible derived image')
-        if '--enable-expert-parallel' in args or args[args.index('--moe-backend') + 1] != 'flashinfer_cutlass':
-            raise ValueError('MOE_TP=1 requires expert parallelism off and flashinfer_cutlass')
+        if '--enable-expert-parallel' in args or args[args.index('--moe-backend') + 1] not in ('flashinfer_cutlass', 'marlin'):
+            raise ValueError('MOE_TP=1 requires expert parallelism off and flashinfer_cutlass (or marlin)')
     if '--enable-eplb' in args:
         raise ValueError('EPLB was retired after slower repeated tests')
     os.environ['VLLM_GLM53_TP3_MOE_TP'] = '2112' if moe_tp == '1' else '0'
