@@ -1,12 +1,12 @@
 # GLM-5.3 Flash Kraken TP3 — 20260927
 
 Image: **`azallaza/glm53-kraken-tp3:20260927`** (local `glm53-kraken-tp3:20260927`,
-`sha256:3d3e687359bc229e942cd6a39a7d4574fb6525d5d78695d5cdbe519e4be6943f`), derived from `glm53-kraken-tp3:20260925`; includes `lil-bench`.
+`sha256:ed0340333e9fd26e901e60096ab9adac7f5e2452005951246a7bc61f11f90ce2`), derived from `glm53-kraken-tp3:20260925`; includes `lil-bench` and fastokens.
 Earlier local builds of this tag are kept as `20260927-pre-dflash-fix`,
 `20260927-pre-lmcache`, `20260927-pre-lilbench` and
-`20260927-pre-uncensored-moetp` (earlier uploads `sha256:697f2787…` and
-`sha256:4281708c…`; the newest differs only in the launcher's uncensored
-MOE_TP / KV reclaim support).
+`20260927-pre-uncensored-moetp`, `20260927-pre-moebackend`, `20260927-pre-fastokens`
+(earlier uploads `sha256:697f2787…`, `sha256:4281708c…` and `sha256:823716b9…`;
+the newest adds fastokens on top of 823716b9).
 
 ```bash
 docker pull azallaza/glm53-kraken-tp3:20260927
@@ -34,6 +34,7 @@ batch 4096, graph 32, 8 slots, max length 1,048,576. Host settings unchanged:
 | LMCache L1 at TP3: lil `cache.py` accepts TP3 (contract hash updated), launcher `LMCACHE=l1`, stale-arena cleanup | `LMCACHE=l1` | host-RAM prefix tier |
 | `lil-bench` (upstream standardized benchmark, llm-inference-bench v0.7.3, p2pmark) | `docker exec … lil-bench` | tooling only |
 | MOE_TP=1 + KV reclaim for the uncensored checkpoint (Marlin TP experts) | `CHECKPOINT=uncensored MOE_TP=1` | KV 3,211,030 (DCP1) / 8,398,097 (DCP3) |
+| fastokens 0.3.2 Rust tokenizer (upstream hash-pinned wheel, docker #109) + `max_token_id` fix (vllm #934); token parity identical | `FASTOKENS=1` (sets `VLLM_USE_FASTOKENS`) | **cached-prefix TTFT 396K 0.58 -> 0.21 s, 894K 1.28 -> 0.41 s**; decode unchanged |
 
 `KV_RECLAIM=auto` applies the three memory items **only** for MTP3 / MOE_TP=1
 with the default slot/batch/graph/length settings, in the configurations they
@@ -72,6 +73,7 @@ CHECKPOINT=uncensored docker compose up -d         # uncensored, MOE_TP=1 + recl
 CHECKPOINT=uncensored DCP=3 docker compose up -d   # uncensored DCP3, 8.01x 1M (experimental)
 KV_RECLAIM=0 docker compose up -d                  # automatic KV sizing
 BF16_GEMV=0 docker compose up -d                   # cuBLAS for BF16 decode linears
+FASTOKENS=0 docker compose up -d                   # Hugging Face tokenizer instead of fastokens
 ```
 
 To go back to the previous release, use its own compose and launcher from
@@ -323,6 +325,14 @@ Speed and answer-quality qualification are not yet run for the uncensored
 MOE_TP configurations. Evidence: `../../optimization/uncensored-moetp-20260927/`,
 `../../optimization/uncensored-moetp-dcp3-20260927/`.
 
+## TP-expert MoE backend
+
+`MOE_TP_BACKEND` selects the MoE kernels for TP experts (empty = FlashInfer
+CUTLASS for the default checkpoint, Marlin for uncensored). b12x was measured
+with real weights on default MTP3/DCP1: C1 -4.5%, C8 -3.4%, prefill -4 to -9%
+versus FlashInfer CUTLASS at 32K, despite running cooler; it stays opt-in only
+(`../../optimization/b12x-moe-20260928/RESULTS.md`).
+
 ## Example Compose
 
 Download [compose.yaml](compose.yaml) and
@@ -346,6 +356,7 @@ CHECKPOINT=uncensored DCP=3 docker compose up -d       # uncensored DCP3, 8,398,
 CHECKPOINT=uncensored MOE_TP=0 docker compose up -d    # uncensored EP3, automatic KV
 KV_RECLAIM=0 docker compose up -d                      # automatic KV sizing
 BF16_GEMV=0 docker compose up -d                       # cuBLAS for BF16 decode linears
+FASTOKENS=0 docker compose up -d                       # Hugging Face tokenizer instead of fastokens
 ```
 
 | Variable | Default | Values |
@@ -357,6 +368,7 @@ BF16_GEMV=0 docker compose up -d                       # cuBLAS for BF16 decode 
 | `KV_CACHE_MEMORY_BYTES` | empty | explicit bytes/GPU for the reclaim configurations |
 | `LMCACHE` / `LMCACHE_L1_GB` | `off` / `96` | `off`, `l1` / GiB of host RAM |
 | `BF16_GEMV` | `1` | `1`, `0` |
+| `FASTOKENS` | `1` | `1` fastokens tokenizer, `0` Hugging Face tokenizer |
 | `NATIVE_DCP` | `1` | native PCIe DCP collectives at DCP3 (`0` = off) |
 | `CHECKPOINT` | `default` | `default`, `uncensored` (experimental with MOE_TP) |
 
@@ -406,6 +418,9 @@ services:
       # checkpoint DCP1 3,319,246 KV (3,180,865 with LMCACHE=l1), DCP3 8,417,076;
       # uncensored DCP1 3,211,030, DCP3 8,398,097 (DCP3/uncensored experimental).
       # Any other setting uses automatic KV sizing. 0 = off everywhere.
+      # TP-expert MoE backend (MOE_TP=1): empty = flashinfer_cutlass (default
+      # checkpoint) / marlin (uncensored); b12x measured slower, opt-in only.
+      MOE_TP_BACKEND: "${MOE_TP_BACKEND:-}"
       KV_RECLAIM: "${KV_RECLAIM:-auto}"
       # off = GPU prefix cache only; l1 = LMCache host-RAM tier (LMCACHE_L1_GB GiB,
       # must fit the host's /dev/shm; ipc: host). Reloads evicted prefixes from RAM
@@ -418,6 +433,7 @@ services:
       # b12x tensor-core BF16 GEMV for decode BF16 linears <=8 rows (C1): ~+2.6-3%
       # C1 steps/s, C8 unchanged, quality-qualified 2026-09-27. 0 = cuBLAS as before.
       VLLM_B12X_BF16_GEMV: "${BF16_GEMV:-1}"
+      VLLM_USE_FASTOKENS: "${FASTOKENS:-1}"
       DFLASH_MODEL: "${DFLASH_MODEL:-local-inference-lab/GLM-5.3-Flash-DFlash2}"
       DFLASH_MODEL_REVISION: "${DFLASH_MODEL_REVISION:-}"
 

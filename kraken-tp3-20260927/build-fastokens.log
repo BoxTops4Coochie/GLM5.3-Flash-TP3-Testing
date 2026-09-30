@@ -1,0 +1,66 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 1.18kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/glm53-kraken-tp3:20260925
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [ 1/10] FROM docker.io/library/glm53-kraken-tp3:20260925@sha256:b713ab3da82424fe53d5596fb7f7a9c2ab3683df4bd7946f926c9737b3850a50
+#4 resolve docker.io/library/glm53-kraken-tp3:20260925@sha256:b713ab3da82424fe53d5596fb7f7a9c2ab3683df4bd7946f926c9737b3850a50 0.0s done
+#4 CACHED
+
+#5 [internal] load build context
+#5 transferring context: 11.60kB done
+#5 DONE 0.0s
+
+#6 [ 2/10] COPY fastokens-requirements.txt /tmp/fastokens-requirements.txt
+#6 DONE 0.0s
+
+#7 [ 3/10] RUN /opt/venv/bin/python -m pip install --no-deps --require-hashes -r /tmp/fastokens-requirements.txt && rm /tmp/fastokens-requirements.txt
+#7 0.879 Collecting fastokens==0.3.2 (from -r /tmp/fastokens-requirements.txt (line 1))
+#7 1.161   Downloading fastokens-0.3.2-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (3.4 MB)
+#7 2.494      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.4/3.4 MB 2.8 MB/s  0:00:01
+#7 2.509 Installing collected packages: fastokens
+#7 2.551 Successfully installed fastokens-0.3.2
+#7 DONE 2.6s
+
+#8 [ 4/10] COPY src/ /opt/venv/lib/python3.12/site-packages/
+#8 DONE 0.0s
+
+#9 [ 5/10] COPY serve-glm53-flash-tp3-kraken.py /usr/local/bin/serve-glm53-flash-tp3-kraken.py
+#9 DONE 0.0s
+
+#10 [ 6/10] COPY support-receipt.json /opt/lil/glm53-20260927.json
+#10 DONE 0.0s
+
+#11 [ 7/10] COPY lil/cache.py /opt/lil/runtime/cache.py
+#11 DONE 0.0s
+
+#12 [ 8/10] COPY lil/image-contract.json /opt/lil/runtime/image-contract.json
+#12 DONE 0.0s
+
+#13 [ 9/10] COPY install_lil_bench.py lil-bench.lock.json /tmp/lil-bench/
+#13 DONE 0.0s
+
+#14 [10/10] RUN /opt/venv/bin/python /tmp/lil-bench/install_lil_bench.py --lock /tmp/lil-bench/lil-bench.lock.json && rm -rf /tmp/lil-bench
+#14 1.381 make: Entering directory '/opt/lil/bench/tools/p2pmark'
+#14 1.381 /usr/local/cuda/bin/nvcc -O2 -std=c++20 -gencode arch=compute_100,code=sm_100 -gencode arch=compute_120,code=sm_120 -gencode arch=compute_121,code=sm_121 -gencode arch=compute_120,code=compute_120 -o llm_p2pmark llm_p2pmark.cu -lcudart -lnccl
+#14 9.675 make: Leaving directory '/opt/lil/bench/tools/p2pmark'
+#14 DONE 9.9s
+
+#15 exporting to image
+#15 exporting layers
+#15 exporting layers 0.3s done
+#15 exporting manifest sha256:97270e71d88a375a9ee514152fae76db93128899e5c27101743a0aeba19d200a done
+#15 exporting config sha256:24d1b94aa3788e85b39b388dd6b3b7954c229d02b34fe7ab71aa6ff028d2634d done
+#15 exporting attestation manifest sha256:a4715b70dca4664eb9674aa6b022757c8b722c2221ac426943817d888ed0ead2 done
+#15 exporting manifest list sha256:ed0340333e9fd26e901e60096ab9adac7f5e2452005951246a7bc61f11f90ce2 done
+#15 naming to docker.io/library/glm53-kraken-tp3:20260927 done
+#15 unpacking to docker.io/library/glm53-kraken-tp3:20260927 0.1s done
+#15 DONE 0.6s

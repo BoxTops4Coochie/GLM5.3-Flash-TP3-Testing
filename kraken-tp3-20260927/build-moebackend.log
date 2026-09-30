@@ -1,0 +1,55 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 848B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/glm53-kraken-tp3:20260925
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [1/8] FROM docker.io/library/glm53-kraken-tp3:20260925@sha256:b713ab3da82424fe53d5596fb7f7a9c2ab3683df4bd7946f926c9737b3850a50
+#4 resolve docker.io/library/glm53-kraken-tp3:20260925@sha256:b713ab3da82424fe53d5596fb7f7a9c2ab3683df4bd7946f926c9737b3850a50 0.0s done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 16.05kB done
+#5 DONE 0.0s
+
+#6 [2/8] COPY src/ /opt/venv/lib/python3.12/site-packages/
+#6 CACHED
+
+#7 [3/8] COPY serve-glm53-flash-tp3-kraken.py /usr/local/bin/serve-glm53-flash-tp3-kraken.py
+#7 DONE 0.0s
+
+#8 [4/8] COPY support-receipt.json /opt/lil/glm53-20260927.json
+#8 DONE 0.0s
+
+#9 [5/8] COPY lil/cache.py /opt/lil/runtime/cache.py
+#9 DONE 0.0s
+
+#10 [6/8] COPY lil/image-contract.json /opt/lil/runtime/image-contract.json
+#10 DONE 0.0s
+
+#11 [7/8] COPY install_lil_bench.py lil-bench.lock.json /tmp/lil-bench/
+#11 DONE 0.0s
+
+#12 [8/8] RUN /opt/venv/bin/python /tmp/lil-bench/install_lil_bench.py --lock /tmp/lil-bench/lil-bench.lock.json && rm -rf /tmp/lil-bench
+#12 0.911 make: Entering directory '/opt/lil/bench/tools/p2pmark'
+#12 0.911 /usr/local/cuda/bin/nvcc -O2 -std=c++20 -gencode arch=compute_100,code=sm_100 -gencode arch=compute_120,code=sm_120 -gencode arch=compute_121,code=sm_121 -gencode arch=compute_120,code=compute_120 -o llm_p2pmark llm_p2pmark.cu -lcudart -lnccl
+#12 9.383 make: Leaving directory '/opt/lil/bench/tools/p2pmark'
+#12 DONE 9.6s
+
+#13 exporting to image
+#13 exporting layers
+#13 exporting layers 0.2s done
+#13 exporting manifest sha256:0ea2c9838436465b8f2813ee4eff7ea8d045d4571f147ff10c7bff404112906f done
+#13 exporting config sha256:404b48aa4dfe9a7668f9b5924b3e33a5c6f99a835f3535152d9fcc2ecda2a5f6 done
+#13 exporting attestation manifest sha256:26c03d7d273f85ed90d002d30cb536aeeee8db2043cb3412b254465951cc15a2 done
+#13 exporting manifest list sha256:823716b9fa270acef447e1c066194ba492e2d5a2c927c3fdf6a38f6fa0669b2f done
+#13 naming to docker.io/library/glm53-kraken-tp3:20260927 done
+#13 unpacking to docker.io/library/glm53-kraken-tp3:20260927 0.1s done
+#13 DONE 0.3s

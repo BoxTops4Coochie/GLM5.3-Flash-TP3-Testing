@@ -115,8 +115,12 @@ def build_args(env):
             '--mm-encoder-tp-mode', 'weights']
     if moe_tp == '1':
         args.remove('--enable-expert-parallel')
-        if checkpoint != 'uncensored':
-            args[args.index('--moe-backend') + 1] = 'flashinfer_cutlass'
+        # MOE_TP_BACKEND: TP-expert MoE kernels. Defaults: flashinfer_cutlass
+        # (default checkpoint), marlin (uncensored). b12x is experimental.
+        backend = value('MOE_TP_BACKEND', 'marlin' if checkpoint == 'uncensored' else 'flashinfer_cutlass')
+        if backend not in ('flashinfer_cutlass', 'marlin', 'b12x'):
+            raise ValueError('MOE_TP_BACKEND must be flashinfer_cutlass, marlin or b12x')
+        args[args.index('--moe-backend') + 1] = backend
     args += ['--cudagraph-capture-sizes', *map(str, sizes)]
     if checkpoint == 'uncensored':
         args += ['--quantization', 'compressed-tensors', '--load-format', 'auto']
@@ -204,8 +208,8 @@ def main():
     if moe_tp == '1':
         if not os.path.isfile('/opt/lil/glm53-tp-experts.json'):
             raise ValueError('MOE_TP=1 requires glm53-kraken-tp3:20260925 or a compatible derived image')
-        if '--enable-expert-parallel' in args or args[args.index('--moe-backend') + 1] not in ('flashinfer_cutlass', 'marlin'):
-            raise ValueError('MOE_TP=1 requires expert parallelism off and flashinfer_cutlass (or marlin)')
+        if '--enable-expert-parallel' in args or args[args.index('--moe-backend') + 1] not in ('flashinfer_cutlass', 'marlin', 'b12x'):
+            raise ValueError('MOE_TP=1 requires expert parallelism off and flashinfer_cutlass, marlin or b12x')
     if '--enable-eplb' in args:
         raise ValueError('EPLB was retired after slower repeated tests')
     os.environ['VLLM_GLM53_TP3_MOE_TP'] = '2112' if moe_tp == '1' else '0'
@@ -221,7 +225,7 @@ def main():
                 "MAX_NUM_SEQS", "MAX_MODEL_LEN", "GPU_MEMORY_UTILIZATION",
                 "REASONING_EFFORT", "CLEAR_THINKING", "SERVED_MODEL_NAME",
                 "MOE_TP", "EPLB", "EPLB_WINDOW_SIZE", "EPLB_STEP_INTERVAL", "KDA_NO_COPY",
-                "KV_RECLAIM", "KV_CACHE_MEMORY_BYTES", "LMCACHE", "LMCACHE_L1_GB"):
+                "KV_RECLAIM", "KV_CACHE_MEMORY_BYTES", "LMCACHE", "LMCACHE_L1_GB", "MOE_TP_BACKEND"):
         os.environ.pop(key, None)
     # Blank optional environment entries mean use the native defaults.
     for key in list(os.environ):

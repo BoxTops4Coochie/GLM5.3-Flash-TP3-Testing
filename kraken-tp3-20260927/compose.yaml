@@ -43,6 +43,9 @@ services:
       # checkpoint DCP1 3,319,246 KV (3,180,865 with LMCACHE=l1), DCP3 8,417,076;
       # uncensored DCP1 3,211,030, DCP3 8,398,097 (DCP3/uncensored experimental).
       # Any other setting uses automatic KV sizing. 0 = off everywhere.
+      # TP-expert MoE backend (MOE_TP=1): empty = flashinfer_cutlass (default
+      # checkpoint) / marlin (uncensored); b12x measured slower, opt-in only.
+      MOE_TP_BACKEND: "${MOE_TP_BACKEND:-}"
       KV_RECLAIM: "${KV_RECLAIM:-auto}"
       # off = GPU prefix cache only; l1 = LMCache host-RAM tier (LMCACHE_L1_GB GiB,
       # must fit the host's /dev/shm; ipc: host). Reloads evicted prefixes from RAM
@@ -55,6 +58,7 @@ services:
       # b12x tensor-core BF16 GEMV for decode BF16 linears <=8 rows (C1): ~+2.6-3%
       # C1 steps/s, C8 unchanged, quality-qualified 2026-09-27. 0 = cuBLAS as before.
       VLLM_B12X_BF16_GEMV: "${BF16_GEMV:-1}"
+      VLLM_USE_FASTOKENS: "${FASTOKENS:-1}"
       DFLASH_MODEL: "${DFLASH_MODEL:-local-inference-lab/GLM-5.3-Flash-DFlash2}"
       DFLASH_MODEL_REVISION: "${DFLASH_MODEL_REVISION:-}"
 

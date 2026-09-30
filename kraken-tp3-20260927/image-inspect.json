@@ -1,16 +1,16 @@
 [
     {
-        "Id": "sha256:3d3e687359bc229e942cd6a39a7d4574fb6525d5d78695d5cdbe519e4be6943f",
+        "Id": "sha256:ed0340333e9fd26e901e60096ab9adac7f5e2452005951246a7bc61f11f90ce2",
         "RepoTags": [
             "azallaza/glm53-kraken-tp3:20260927",
             "glm53-kraken-tp3:20260927"
         ],
         "RepoDigests": [
-            "azallaza/glm53-kraken-tp3@sha256:3d3e687359bc229e942cd6a39a7d4574fb6525d5d78695d5cdbe519e4be6943f",
-            "glm53-kraken-tp3@sha256:3d3e687359bc229e942cd6a39a7d4574fb6525d5d78695d5cdbe519e4be6943f"
+            "azallaza/glm53-kraken-tp3@sha256:ed0340333e9fd26e901e60096ab9adac7f5e2452005951246a7bc61f11f90ce2",
+            "glm53-kraken-tp3@sha256:ed0340333e9fd26e901e60096ab9adac7f5e2452005951246a7bc61f11f90ce2"
         ],
         "Comment": "buildkit.dockerfile.v0",
-        "Created": "2026-09-27T22:42:05.819334684-04:00",
+        "Created": "2026-09-29T20:04:41.209249575-04:00",
         "Config": {
             "ExposedPorts": {
                 "6006/tcp": {},
@@ -121,7 +121,8 @@
                 "VLLM_GLM53_TP3_MOE_TP=0",
                 "VLLM_GLM53_KDA_NO_COPY=0",
                 "VLLM_B12X_BF16_GEMV=1",
-                "VLLM_SCHEDULER_UNCAP_PREFILL_ONLY_STEPS=0"
+                "VLLM_SCHEDULER_UNCAP_PREFILL_ONLY_STEPS=0",
+                "VLLM_USE_FASTOKENS=1"
             ],
             "Entrypoint": [
                 "/usr/local/bin/lil-entrypoint"
@@ -166,7 +167,7 @@
         },
         "Architecture": "amd64",
         "Os": "linux",
-        "Size": 44024527979,
+        "Size": 44044705734,
         "RootFS": {
             "Type": "layers",
             "Layers": [
@@ -249,28 +250,30 @@
                 "sha256:2cb5658ab01cc6e322aa5a04881f91b9e7c8c16c5f207706ed1f938b5abdebe2",
                 "sha256:adfae25c6e9964d3ae2c347d4ea93102ba358cba67f6d4dd8eecdf7bd9adf948",
                 "sha256:850448d42875ffd4fafbb1b8c756a00768893859ad17ffe61b369cefb9aa610a",
-                "sha256:2af1662e469731ca9e0ae2452eb2624969bb585f32312dd96066b86bff929a2f",
-                "sha256:edc2c7b3eb7deae47dcbc2cc5db91e56ef0afbe02c79293e9a1763746f575913",
-                "sha256:6928f29c6d00ee1ec5030edc63ea7769ab117aec0af09f15dbaf2324d0a8352d",
-                "sha256:f23080fc8e32692b901ef5187b570cc2f5417e586696b22527f15905664e1965",
-                "sha256:610ec0be4eaba03c37613c5ae2a781fcc4bc295ff150642a871a5fb52ea0a64d",
-                "sha256:2db06412568e1ece4ba4b25997c04d431651831c709eb1f6e412be086f6c1a8a",
-                "sha256:0a0723ffddccb2c83beec536bd4694e1b92af743e0909ee165543b90f2070f51"
+                "sha256:7231c31fbd768d547850efe6e88705ad8ab18d921dccf8e63c5122ce7141daf6",
+                "sha256:e672fb9f013c9f97013a3aa7072fae2a058f0f84259761a2f451361e1c30159f",
+                "sha256:47adb0ca0e00ab7ad1f957bc804805f616eadc77a39953611c0bbaf90f82a6f6",
+                "sha256:6aa15812572b388df55e2b08197c31097aa6698ae39927247b864411e8d55199",
+                "sha256:67e865af04f94376fa3eb98cdbb9e3f979d0e3d3ab47a1d94cc44f784a9ec218",
+                "sha256:6b3fb319c9f242cd7c8f62d40fcd27f37b8396a83512671c3dc997d2cf8e3723",
+                "sha256:a6f074c7920006a873040f21880d41d73a0c5cf251d8fb87e64c4aaa0c9f0427",
+                "sha256:79b5d9109f564f410fde049724acfadf954f9f6bb4f6f514d0ecea655bfb7c8c",
+                "sha256:0547c669103f2c2b65680b5fa88f098afd6ec2f374cb0e80c7334d4a17255abf"
             ]
         },
         "Metadata": {
-            "LastTagTime": "2026-09-28T02:42:20.850257574Z"
+            "LastTagTime": "2026-09-30T00:04:48.263342646Z"
         },
         "Descriptor": {
             "mediaType": "application/vnd.oci.image.index.v1+json",
-            "digest": "sha256:3d3e687359bc229e942cd6a39a7d4574fb6525d5d78695d5cdbe519e4be6943f",
+            "digest": "sha256:ed0340333e9fd26e901e60096ab9adac7f5e2452005951246a7bc61f11f90ce2",
             "size": 857
         },
         "Identity": {
             "Build": [
                 {
-                    "Ref": "lm98wrcj7ayjjxle1ww63v6aj",
-                    "CreatedAt": "2026-09-27T22:42:06.107193771-04:00"
+                    "Ref": "01dlnubvmffawqz2va1jw46w5",
+                    "CreatedAt": "2026-09-29T20:04:41.747808362-04:00"
                 }
             ]
         }
