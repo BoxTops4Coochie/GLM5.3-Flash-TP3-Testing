@@ -1,0 +1,1809 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from collections.abc import Iterable
+from typing import ClassVar, Literal
+
+import torch
+from torch import nn
+
+import vllm.envs as envs
+from vllm.config import ParallelConfig, VllmConfig
+from vllm.distributed import (
+    get_ep_group,
+    get_pp_group,
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
+)
+from vllm.logger import init_logger
+from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    GateLinear,
+    fused_moe_make_expert_params_mapping,
+)
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    RowParallelLinear,
+)
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFunc,
+    MambaStateCopyFuncCalculator,
+    MambaStateDtypeCalculator,
+    MambaStateShapeCalculator,
+)
+from vllm.model_executor.layers.mhc import (
+    MHCFusedPostPreOp,
+    MHCPostOp,
+    MHCPreOp,
+    hc_contract,
+    hc_expand,
+)
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    MXFP8_SCALE_DTYPE,
+    MXFP8_VALUE_DTYPE,
+    dequant_mxfp8_to_bf16,
+)
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    maybe_remap_kv_scale_name,
+)
+from vllm.model_executor.models.deepseek_v2 import _get_moe_router_dtype
+from vllm.model_executor.models.glm4_1v import (
+    Glm4vDummyInputsBuilder,
+    Glm4vForConditionalGeneration,
+)
+from vllm.model_executor.models.interfaces import (
+    EagleModelMixin,
+    HasInnerState,
+    IsHybrid,
+    MixtureOfExperts,
+    SupportsEagle3,
+    SupportsReplaySSM,
+)
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
+    PPMissingLayer,
+    init_vllm_registered_model,
+    is_pp_missing_parameter,
+    make_layers,
+    maybe_prefix,
+    sequence_parallel_chunk,
+)
+from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.weight_transfer import materialize_weight
+from vllm.models.common.ops.sequence_parallel import (
+    sp_all_gather,
+    sp_reduce_scatter,
+    sp_shard,
+)
+from vllm.models.glm5next.common.multimodal import (
+    Glm5NextMultiModalProcessor,
+    Glm5NextProcessingInfo,
+    Glm5NextVisionTransformer,
+)
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
+from vllm.utils.b12x import get_b12x_mhc, set_b12x_preparation_provider
+
+from . import l2_prefetch as _l2pf
+from .attention import Glm5NextMLAAttention
+from .glm53_fp8_dense import enable_glm53_fp8_dense, enable_glm53_fp8_lm_head
+from .glm53_low_latency_gemm import enable_glm53_low_latency_gemm
+from .kda import Glm5NextLinearAttention
+from .pooled_indexer import Glm5NextIndexerScratch, Glm5NextPooledIndexer
+
+logger = init_logger(__name__)
+
+GLM5NEXT_PACKED_MODULES_MAPPING = {
+    "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+    "gate_up_proj": ["gate_proj", "up_proj"],
+    "in_proj_qkvgfab": ["q_proj", "k_proj", "v_proj", "b_proj", "f_a_proj"],
+    "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
+}
+
+_MHC_WEIGHT_RENAMES = (
+    (".attn_hc.fn", ".hc_attn_fn"),
+    (".attn_hc.base", ".hc_attn_base"),
+    (".attn_hc.scale", ".hc_attn_scale"),
+    (".ffn_hc.fn", ".hc_ffn_fn"),
+    (".ffn_hc.base", ".hc_ffn_base"),
+    (".ffn_hc.scale", ".hc_ffn_scale"),
+)
+
+
+def _remap_glm5next_weight_name(name: str) -> str:
+    name = name.replace(".self_attn.forget_gate.", ".self_attn.")
+    for checkpoint_name, parameter_name in _MHC_WEIGHT_RENAMES:
+        name = name.replace(checkpoint_name, parameter_name)
+    return name
+
+
+def _load_glm5next_fused_conv1d(
+    param: torch.Tensor,
+    loaded_weight: torch.Tensor,
+) -> None:
+    if loaded_weight.shape[0] % 3 != 0:
+        raise ValueError(
+            "GLM5Next fused QKV conv1d weight must contain three equal row "
+            f"groups, got shape {tuple(loaded_weight.shape)}"
+        )
+    rows = loaded_weight.shape[0] // 3
+    weight_loader = param.weight_loader
+    for shard_id in range(3):
+        weight_loader(
+            param,
+            loaded_weight.narrow(0, shard_id * rows, rows),
+            shard_id,
+        )
+
+
+class Glm5NextMLP(nn.Module):
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        quant_config: QuantizationConfig | None = None,
+        reduce_results: bool = True,
+        is_sequence_parallel=False,
+        prefix: str = "",
+        swiglu_limit: float | None = None,
+        loaded_intermediate_size: int | None = None,
+    ) -> None:
+        super().__init__()
+        if loaded_intermediate_size is None:
+            loaded_intermediate_size = intermediate_size
+        if not 0 < loaded_intermediate_size <= intermediate_size:
+            raise ValueError(
+                "loaded_intermediate_size must be positive and no greater than "
+                f"intermediate_size, got {loaded_intermediate_size} and "
+                f"{intermediate_size}"
+            )
+        gate_up_kwargs = {}
+        down_kwargs = {}
+        if loaded_intermediate_size != intermediate_size:
+            gate_up_kwargs["loaded_output_sizes"] = [
+                loaded_intermediate_size
+            ] * 2
+            down_kwargs["loaded_input_size"] = loaded_intermediate_size
+
+
+        # If is_sequence_parallel, the input and output tensors are sharded
+        # across the ranks within the tp_group. In this case the weights are
+        # replicated and no collective ops are needed.
+        # Otherwise we use standard TP with an allreduce at the end.
+        self.gate_up_proj = MergedColumnParallelLinear(
+            hidden_size,
+            [intermediate_size] * 2,
+            bias=False,
+            quant_config=quant_config,
+            disable_tp=is_sequence_parallel,
+            prefix=f"{prefix}.gate_up_proj",
+            **gate_up_kwargs,
+        )
+        self.down_proj = RowParallelLinear(
+            intermediate_size,
+            hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            reduce_results=reduce_results,
+            disable_tp=is_sequence_parallel,
+            prefix=f"{prefix}.down_proj",
+            **down_kwargs,
+        )
+        if hidden_act != "silu":
+            raise ValueError(
+                f"Unsupported activation: {hidden_act}. Only silu is supported for now."
+            )
+
+        self.swiglu_limit = swiglu_limit
+        if self.swiglu_limit is not None:
+            self.act_fn = SiluAndMulWithClamp(swiglu_limit=self.swiglu_limit)
+        else:
+            self.act_fn = SiluAndMul()
+
+    def forward(self, x):
+        gate_up, _ = self.gate_up_proj(x)
+        x = self.act_fn(gate_up)
+        x, _ = self.down_proj(x)
+        return x
+
+
+class Glm5NextMoE(nn.Module):
+    def __init__(
+        self,
+        config: Glm5NextConfig,
+        parallel_config: ParallelConfig,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+        apply_routed_scale_to_output: bool = False,
+    ):
+        super().__init__()
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
+
+        self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
+
+        self.ep_group = get_ep_group().device_group
+        self.ep_rank = get_ep_group().rank_in_group
+        self.ep_size = self.ep_group.size()
+        self.n_routed_experts: int = config.n_routed_experts
+        self.n_shared_experts: int = config.n_shared_experts
+
+        self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+
+        if config.hidden_act != "silu":
+            raise ValueError(
+                f"Unsupported activation: {config.hidden_act}. "
+                "Only silu is supported for now."
+            )
+
+        self.router_dtype = _get_moe_router_dtype(config)
+        self.gate = GateLinear(
+            config.hidden_size,
+            config.n_routed_experts,
+            out_dtype=self.router_dtype,
+            prefix=f"{prefix}.gate",
+        )
+        if getattr(config, "topk_method", None) == "noaux_tc":
+            self.gate.e_score_correction_bias = nn.Parameter(
+                torch.empty(config.n_routed_experts, dtype=torch.float32)
+            )
+        else:
+            self.gate.e_score_correction_bias = None
+
+        # Load balancing settings.
+        eplb_config = parallel_config.eplb_config
+        self.enable_eplb = parallel_config.enable_eplb
+
+        self.n_redundant_experts = eplb_config.num_redundant_experts
+        self.n_logical_experts = self.n_routed_experts
+        self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
+        self.n_local_physical_experts = self.n_physical_experts // self.ep_size
+
+        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
+        self.physical_expert_end = (
+            self.physical_expert_start + self.n_local_physical_experts
+        )
+
+        swiglu_limit = getattr(config, "swiglu_limit", None)
+        if config.n_shared_experts is None:
+            self.shared_experts = None
+        else:
+            checkpoint_intermediate_size = (
+                getattr(config, "original_moe_intermediate_size", config.moe_intermediate_size) * config.n_shared_experts
+            )
+            intermediate_size = getattr(
+                config,
+                "glm53_tp3_shared_expert_intermediate_size",
+                checkpoint_intermediate_size,
+            )
+
+            self.shared_experts = Glm5NextMLP(
+                hidden_size=config.hidden_size,
+                intermediate_size=intermediate_size,
+                hidden_act=config.hidden_act,
+                quant_config=quant_config,
+                is_sequence_parallel=self.is_sequence_parallel,
+                reduce_results=False,
+                prefix=f"{prefix}.shared_experts",
+                swiglu_limit=swiglu_limit,
+                loaded_intermediate_size=checkpoint_intermediate_size,
+            )
+
+        self.experts = FusedMoEFactory(
+            shared_experts=self.shared_experts,
+            num_experts=config.n_routed_experts,
+            top_k=config.num_experts_per_token,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.moe_intermediate_size,
+            renormalize=config.moe_renormalize,
+            quant_config=quant_config,
+            use_grouped_topk=True,
+            num_expert_group=getattr(config, "n_group", 1),
+            topk_group=getattr(config, "topk_group", 1),
+            prefix=f"{prefix}.experts",
+            scoring_func=getattr(config, "scoring_func", "softmax"),
+            routed_scaling_factor=self.routed_scaling_factor,
+            apply_routed_scale_to_output=apply_routed_scale_to_output,
+            e_score_correction_bias=self.gate.e_score_correction_bias,
+            enable_eplb=self.enable_eplb,
+            num_redundant_experts=self.n_redundant_experts,
+            is_sequence_parallel=self.is_sequence_parallel,
+            n_shared_experts=None,
+            router_logits_dtype=self.gate.out_dtype,
+            swiglu_limit=swiglu_limit,
+        )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        already_sequence_parallel: bool = False,
+    ) -> torch.Tensor:
+        num_tokens, hidden_dim = hidden_states.shape
+
+        # Chunk the hidden states so they aren't replicated across TP ranks.
+        # This avoids duplicate computation in self.experts.
+        if self.is_sequence_parallel and not already_sequence_parallel:
+            hidden_states = sequence_parallel_chunk(hidden_states)
+
+        router_logits, _ = self.gate(hidden_states)
+        final_hidden_states = self.experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+        )
+
+        if self.is_sequence_parallel and not already_sequence_parallel:
+            final_hidden_states = tensor_model_parallel_all_gather(
+                final_hidden_states, 0
+            )
+            final_hidden_states = final_hidden_states[:num_tokens]
+
+        return final_hidden_states.view(num_tokens, hidden_dim)
+
+
+class Glm5NextDecoderLayer(nn.Module):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        config: Glm5NextConfig,
+        layer_idx: int,
+        prefix: str = "",
+        topk_indices_buffer: torch.Tensor | None = None,
+        pool_topk_indices_buffer: torch.Tensor | None = None,
+        is_mtp_layer: bool = False,
+        indexer_scratch: Glm5NextIndexerScratch | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__()
+
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        parallel_config = vllm_config.parallel_config
+
+        self.hidden_size = config.hidden_size
+        self.layer_idx = layer_idx
+        self.is_moe = config.is_moe
+        self.num_hidden_layers = config.num_hidden_layers
+        self.rms_norm_eps = config.rms_norm_eps
+        self.num_experts = config.n_routed_experts
+        self.is_mtp_layer = is_mtp_layer
+        self.mhc = config.mhc
+        self.layer_kind = "kda" if config.is_kda_layer(layer_idx) else "mla"
+        self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+
+        if config.is_kda_layer(layer_idx):
+            self.self_attn = Glm5NextLinearAttention(
+                config=config,
+                vllm_config=vllm_config,
+                prefix=f"{prefix}.self_attn",
+            )
+        else:
+            # MLA layers require the latent head dims, which are guaranteed set
+            # on MLA configs; narrow away the `int | None`.
+            assert config.v_head_dim is not None
+            assert config.kv_lora_rank is not None
+            # Mixed ModelOpt checkpoints describe each projection independently;
+            # unlisted projections remain BF16.
+            mla_quant_config = (
+                quant_config
+                if quant_config is not None
+                and quant_config.get_name() in ("modelopt_mixed", "nvfp4_csf")
+                else None
+            )
+            self.self_attn = Glm5NextMLAAttention(
+                vllm_config=vllm_config,
+                config=config,
+                hidden_size=self.hidden_size,
+                num_heads=config.num_attention_heads,
+                qk_nope_head_dim=config.qk_nope_head_dim,
+                qk_rope_head_dim=config.qk_rope_head_dim,
+                v_head_dim=config.v_head_dim,
+                q_lora_rank=config.q_lora_rank,
+                kv_lora_rank=config.kv_lora_rank,
+                max_position_embeddings=config.max_position_embeddings,
+                cache_config=cache_config,
+                quant_config=mla_quant_config,
+                prefix=f"{prefix}.self_attn",
+                topk_indices_buffer=topk_indices_buffer,
+                pool_topk_indices_buffer=pool_topk_indices_buffer,
+                skip_rope=getattr(config, "mla_nope", False),
+                is_mtp_layer=is_mtp_layer,
+                indexer_scratch=indexer_scratch,
+            )
+
+        # MTP layers sit past the base model's hidden layers (layer_idx >=
+        # num_hidden_layers), so they're outside mlp_layer_types; default them
+        # to the last base layer's MLP type (sparse/MoE for these checkpoints).
+        mlp_layer_types = config.mlp_layer_types
+        mlp_type = (
+            mlp_layer_types[layer_idx]
+            if layer_idx < len(mlp_layer_types)
+            else (mlp_layer_types[-1] if mlp_layer_types else "sparse")
+        )
+        if self.is_moe and self.num_experts is not None and mlp_type == "sparse":
+            self.mlp = Glm5NextMoE(
+                config=config,
+                parallel_config=parallel_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.mlp",
+            )
+        else:
+            self.mlp = Glm5NextMLP(
+                hidden_size=self.hidden_size,
+                intermediate_size=config.intermediate_size,
+                hidden_act=config.hidden_act,
+                quant_config=quant_config,
+                prefix=f"{prefix}.mlp",
+                swiglu_limit=config.swiglu_limit,
+            )
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        # Cached for the hot forward path (isinstance per layer per step).
+        self._mlp_is_moe = isinstance(self.mlp, Glm5NextMoE)
+        # L2 weight prefetch (see l2_prefetch.py); plans are built lazily on
+        # the first forward, after weights are loaded and post-processed.
+        object.__setattr__(self, "_l2pf_next", None)
+        self._l2pf_ready = False
+        self._l2pf_plan_b: _l2pf.L2PrefetchPlan | None = None
+        self._l2pf_plan_c: _l2pf.L2PrefetchPlan | None = None
+        # In SP, the attention output projection leaves a partial sum; the
+        # decoder-layer reduce_scatter after attention completes it (DSv4 pattern).
+        # MTP layers use the non-mHC path which has no sp_reduce_scatter, so
+        # their o_proj must still reduce normally.
+        if self.is_sequence_parallel and not is_mtp_layer:
+            self.self_attn.o_proj.reduce_results = False
+        self.post_attention_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+
+        # Read by process_b12x_weights_after_loading on every decoder layer,
+        # including the non-mHC and MTP layers that never build one.
+        self._b12x_mhc = None
+        if self.mhc and not is_mtp_layer:
+            # mhc config
+            self.mhc_num_residual_streams = config.mhc_num_residual_streams
+            self.mhc_no_norm_weight = config.mhc_no_norm_weight
+            self.mhc_tau = config.mhc_tau
+            self.hc_eps = config.hc_eps
+            self.mhc_sinkhorn_iterations = config.mhc_sinkhorn_iterations
+            self.mhc_post_mult_value = config.mhc_post_mult_value
+
+            n = config.mhc_num_residual_streams
+            d_model = n * self.hidden_size
+            mix_hc = (2 + n) * n
+
+            self.n = n
+
+            # attn hc
+            self.hc_attn_fn = nn.Parameter(
+                torch.empty(mix_hc, d_model, dtype=torch.float32)
+            )
+            self.hc_attn_fn_broadcast: torch.Tensor | None = None
+            self.hc_attn_base = nn.Parameter(torch.empty(mix_hc, dtype=torch.float32))
+            self.hc_attn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
+
+            # ffn hc
+            self.hc_ffn_fn = nn.Parameter(
+                torch.empty(mix_hc, d_model, dtype=torch.float32)
+            )
+            self.hc_ffn_base = nn.Parameter(torch.empty(mix_hc, dtype=torch.float32))
+            self.hc_ffn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
+
+            self.mhc_pre_op = MHCPreOp()
+            self.mhc_post_op = MHCPostOp()
+            self.mhc_fused_post_pre_op = MHCFusedPostPreOp()
+            if (
+                current_platform.is_cuda()
+                and current_platform.is_device_capability_family(120)
+            ):
+                b12x_mhc = get_b12x_mhc()
+                if b12x_mhc is not None and b12x_mhc.is_supported():
+                    from vllm.models.deepseek_v4.nvidia.b12x import (
+                        B12xMHCResidual,
+                        MHCOperands,
+                    )
+
+                    self._b12x_mhc = B12xMHCResidual(
+                        hidden_size=self.hidden_size,
+                        hc_mult=self.n,
+                        rms_eps=self.rms_norm_eps,
+                        hc_eps=self.hc_eps,
+                        sinkhorn_iters=self.mhc_sinkhorn_iterations,
+                        # GLM runs both fused post-pre kernels without a BF16
+                        # FFN projection, under its own norm names. The one
+                        # post_pre plan serves the attention and FFN sides:
+                        # both norms use config.rms_norm_eps, and b12x rejects
+                        # a runtime eps that differs from the planned one.
+                        operands=MHCOperands(
+                            attn_norm="input_layernorm",
+                            ffn_norm="post_attention_layernorm",
+                            ffn_fn_bf16=None,
+                        ),
+                    )
+
+    def process_b12x_weights_after_loading(self) -> None:
+        # Runs after Glm5NextModel.finalize_mhc_broadcast_weights(), so the
+        # first layer's published broadcast projection is visible to
+        # preparation, which declares ``pre`` only where it exists.
+        if self._b12x_mhc is not None:
+            set_b12x_preparation_provider(self, self._b12x_mhc)
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None = None,
+        post: torch.Tensor | None = None,
+        comb: torch.Tensor | None = None,
+        output_indices: torch.Tensor | None = None,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
+        # 70B or MTP layers: KDA + MoE without HC.
+        if not self.mhc or self.is_mtp_layer:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+
+            attn_output = self.self_attn(
+                hidden_states=hidden_states,
+                positions=positions,
+            )
+            if output_indices is not None:
+                if not self.is_mtp_layer:
+                    raise ValueError(
+                        "Selective decoder outputs are supported only for MTP layers."
+                    )
+                # Attention must process every prompt token because it owns the
+                # MTP MLA and sparse-index caches. Only request-tail outputs feed
+                # draft sampling, so compact the residual stream before the MoE.
+                attn_output = attn_output.index_select(0, output_indices)
+                residual = residual.index_select(0, output_indices)
+            hidden_states, residual = self.post_attention_layernorm(
+                attn_output, residual=residual
+            )
+            hidden_states = self.mlp(hidden_states)
+            if self.is_mtp_layer:
+                # Return the unsummed pair: the MTP caller feeds it straight
+                # into shared_head's fused_add_rms_norm (one kernel instead of
+                # a separate residual-add + norm). The sum itself is unchanged
+                # (fp32-accumulated inside the fused kernel).
+                return hidden_states, residual, None, None
+            hidden_states = residual + hidden_states
+            return hidden_states, residual, None, None
+
+        # mHC start. `post`/`comb` carry the previous layer's deferred
+        # hc_post inputs (its ffn-pre outputs); when present, fuse that
+        # hc_post with this layer's attn hc_pre into one kernel (inter-layer
+        # fusion). Layer 0 has no incoming state -> standalone hc_pre.
+        if _l2pf.ENABLED and not self._l2pf_ready:
+            self._l2pf_build_plans()
+        x = hidden_states
+        if post is None:
+            if self._b12x_mhc is not None:
+                assert self.hc_attn_fn_broadcast is not None
+                residual, post, comb, x = self._b12x_mhc.run_pre(
+                    x,
+                    self.hc_attn_fn_broadcast,
+                    self.hc_attn_scale,
+                    self.hc_attn_base,
+                    norm_weight=self.input_layernorm.weight,
+                    norm_eps=self.input_layernorm.variance_epsilon,
+                )
+            else:
+                if self.layer_idx == 0:
+                    x = hc_expand(x, self.n)
+                residual = x
+                post, comb, x = self.hc_pre(
+                    x,
+                    self.hc_attn_fn,
+                    self.hc_attn_scale,
+                    self.hc_attn_base,
+                    norm_weight=self.input_layernorm.weight,
+                    norm_eps=self.input_layernorm.variance_epsilon,
+                )
+        else:
+            residual, post, comb, x = self.hc_fused_post_pre(
+                x,
+                residual,
+                post,
+                comb,
+                self.hc_attn_fn,
+                self.hc_attn_scale,
+                self.hc_attn_base,
+                norm_weight=self.input_layernorm.weight,
+                norm_eps=self.input_layernorm.variance_epsilon,
+            )
+
+        # Attention needs the full token sequence; mHC above ran on the SP
+        # shard. Gather for attention, scatter back afterward (DSv4 pattern).
+        if self.is_sequence_parallel:
+            x = sp_all_gather(x)[: positions.shape[0]]
+
+        x = self.self_attn(
+            hidden_states=x,
+            positions=positions,
+        )
+
+        if self.is_sequence_parallel:
+            x = sp_reduce_scatter(x)
+
+        # L2 prefetch window B (fallback issue point when no pre-reduce hook).
+        if _l2pf.ENABLED and not getattr(self, "_l2pf_hooked_b", False):
+            _l2pf.issue(self._l2pf_plan_b, x.shape[0])
+
+        # Fuse post-attn hc_post + pre-FFN hc_pre (+ RMSNorm) into one kernel.
+        residual, post, comb, x = self.hc_fused_post_pre(
+            x,
+            residual,
+            post,
+            comb,
+            self.hc_ffn_fn,
+            self.hc_ffn_scale,
+            self.hc_ffn_base,
+            norm_weight=self.post_attention_layernorm.weight,
+            norm_eps=self.post_attention_layernorm.variance_epsilon,
+        )
+
+        # Fully Connected
+        if self._mlp_is_moe:
+            x = self.mlp(x, already_sequence_parallel=self.is_sequence_parallel)
+        else:
+            x = self.mlp(x)
+
+        # mHC end. The last mHC layer materializes its final hc_post (nothing
+        # to fuse with) then contracts; every other layer defers its hc_post to
+        # the next layer's fused pre, returning the state.
+        # L2 prefetch window C (fallback issue point when no pre-reduce hook).
+        if _l2pf.ENABLED and not getattr(self, "_l2pf_hooked_c", False):
+            _l2pf.issue(self._l2pf_plan_c, x.shape[0])
+
+        if self.layer_idx == self.num_hidden_layers - 1:
+            x = self.hc_post(x, residual, post, comb)
+            x = hc_contract(x, self.n)
+            return x, None, None, None
+
+        return x, residual, post, comb
+
+    # ---- L2 weight prefetch planning (see l2_prefetch.py) -------------------
+    _ATTN_SKIP = ("o_proj", "kv_b_proj", "indexer.index_kpool", "indexer.weights_proj")
+
+    def _l2pf_build_plans(self) -> None:
+        self._l2pf_ready = True
+        try:
+            device = next(self.parameters()).device
+            router_segments: list[_l2pf.Segment] = []
+            if self._mlp_is_moe:
+                # Router weight is read right after the post-attention mHC.
+                router_segments = _l2pf.segments_of(
+                    self.mlp.gate, "mlp.gate.", min_bytes=0
+                )
+            # Window B starts before the attention-output reduction. These
+            # tensors are consumed by the post-attention mHC immediately after
+            # that reduction, so carrying them ahead avoids latency-bound cold
+            # reads without displacing the following projection materially.
+            segs_b = _l2pf.segments_of(
+                self.post_attention_layernorm,
+                "post_attention_layernorm.",
+                min_bytes=0,
+            )
+            for attr in ("hc_ffn_base", "hc_ffn_scale", "hc_ffn_fn"):
+                segment = _l2pf.tensor_segment(attr, getattr(self, attr, None))
+                if segment is not None:
+                    segs_b.append(segment)
+            segs_b += router_segments
+            # Dense-MLP layers (first 3): their 75 MB MLP weights are consumed
+            # right after attention with no idle window -> never prefetched.
+            nxt = self._l2pf_next
+            nxt_segs: list[_l2pf.Segment] = []
+            if nxt is not None:
+                # The next layer consumes its mHC and normalization state before
+                # its first attention projection. Preserve that consumption
+                # order in the prefetch plan, including sub-64-KiB parameters.
+                for attr in (
+                    "hc_attn_fn_broadcast",
+                    "hc_attn_fn",
+                    "hc_attn_scale",
+                    "hc_attn_base",
+                ):
+                    segment = _l2pf.tensor_segment(
+                        f"L{nxt.layer_idx}.{attr}", getattr(nxt, attr, None)
+                    )
+                    if segment is not None:
+                        nxt_segs.append(segment)
+                nxt_segs += _l2pf.segments_of(
+                    nxt.input_layernorm,
+                    f"L{nxt.layer_idx}.input_layernorm.",
+                    min_bytes=0,
+                )
+                # The next layer's o_proj (and MLA kv_b, unused at decode) are
+                # prefetched inside that layer's own attention window (A).
+                nxt_segs += _l2pf.segments_of(
+                    nxt.self_attn,
+                    f"L{nxt.layer_idx}.self_attn.",
+                    skip=self._ATTN_SKIP,
+                    min_bytes=0,
+                )
+            # Window A of this layer's attention: its o_proj plus a head slice
+            # of the next layer's first projection (it survives the expert
+            # stream and shortens window C so the tail is resident in time).
+            is_mla = hasattr(self.self_attn, "mla_attn")
+            segs_a = _l2pf.segments_of(self.self_attn.o_proj, "o_proj.")
+            if nxt_segs and _l2pf.A_NEXT_BYTES > 0 and not is_mla:
+                head_a, rest_first = _l2pf.take_budget(nxt_segs[:1], _l2pf.A_NEXT_BYTES)
+                segs_a += head_a
+                nxt_segs = rest_first + nxt_segs[1:]
+            budget_a = _l2pf.BUDGET_A_MLA if is_mla else _l2pf.BUDGET_A
+            # MLA materializes its absorbed decode weights while executing the
+            # first query projection. Build that attention plan from the hook
+            # immediately after the projection, rather than permanently
+            # omitting tensors which did not exist at layer-entry time.
+            plan_a = None
+            if not is_mla:
+                plan_a, _ = _l2pf.make_plan(segs_a, budget_a, device)
+            plan_b, rest = _l2pf.make_plan(segs_b + nxt_segs, _l2pf.BUDGET_B, device)
+            plan_c, dropped = _l2pf.make_plan(rest, _l2pf.BUDGET_C, device)
+            self._l2pf_plan_b = plan_b
+            self._l2pf_plan_c = plan_c
+            # Fire windows B/C before the all-reduces (+10 us of idle window
+            # each): hooks on this layer's o_proj and on the MoE runner (or the
+            # dense MLP's down_proj).  The in-forward issue points below stay
+            # as the fallback when a hook target is missing.
+            self._l2pf_hooked_b = False
+            self._l2pf_hooked_c = False
+            o_proj = getattr(self.self_attn, "o_proj", None)
+            if (
+                o_proj is not None
+                and plan_b is not None
+                and getattr(o_proj, "reduce_results", False)
+            ):
+                object.__setattr__(
+                    o_proj,
+                    "_l2_prefetch_pre_reduce_hook",
+                    lambda n, p=plan_b: _l2pf.issue(p, n),
+                )
+                self._l2pf_hooked_b = True
+            target_c = (
+                self.mlp.experts
+                if self._mlp_is_moe
+                else getattr(self.mlp, "down_proj", None)
+            )
+            if target_c is not None and plan_c is not None:
+                object.__setattr__(
+                    target_c,
+                    "_l2_prefetch_pre_reduce_hook",
+                    lambda n, p=plan_c: _l2pf.issue(p, n),
+                )
+                self._l2pf_hooked_c = True
+            # Window A fires inside the attention layer, right after its first
+            # projection (hook in the shared KDA / MLA layers).
+            target = self.self_attn.mla_attn if is_mla else self.self_attn
+            if is_mla:
+                mla_state: dict[str, _l2pf.L2PrefetchPlan | bool | None] = {
+                    "ready": False,
+                    "plan": None,
+                }
+
+                def issue_mla_window_a(
+                    num_tokens: int,
+                    wrapper=target,
+                    state=mla_state,
+                    layer_idx=self.layer_idx,
+                    o_proj_segments=segs_a,
+                ) -> None:
+                    if not state["ready"]:
+                        mla_layer = getattr(wrapper, "mla_attn", None)
+                        attn_impl = getattr(mla_layer, "impl", None)
+                        resolved = list(o_proj_segments)
+                        seen = {segment[1] for segment in resolved}
+                        # The generic MLA layer owns W_UV/W_UK_T. Specialized
+                        # backends may instead own packed W_UV/W_UK variants
+                        # on their implementation object.
+                        for owner_name, owner in (
+                            ("mla_attn", mla_layer),
+                            ("impl", attn_impl),
+                        ):
+                            for attr in (
+                                "W_UV",
+                                "W_UK_T",
+                                "W_UK",
+                                "W_K",
+                                "W_V",
+                            ):
+                                tensor = (
+                                    getattr(owner, attr, None)
+                                    if owner is not None
+                                    else None
+                                )
+                                segment = _l2pf.tensor_segment(
+                                    f"{owner_name}.{attr}", tensor, min_bytes=0
+                                )
+                                if segment is not None and segment[1] not in seen:
+                                    resolved.append(segment)
+                                    seen.add(segment[1])
+                        state["plan"], _ = _l2pf.make_plan(
+                            resolved, _l2pf.BUDGET_A_MLA, device
+                        )
+                        state["ready"] = True
+                        if layer_idx in (0, 3, 4):
+                            dynamic_plan = state["plan"]
+                            logger.info(
+                                "[l2_prefetch] layer %d deferred MLA A: %s",
+                                layer_idx,
+                                dynamic_plan.describe() if dynamic_plan else "-",
+                            )
+                    _l2pf.issue(state["plan"], num_tokens)
+
+                object.__setattr__(target, "_l2_prefetch_hook", issue_mla_window_a)
+            elif plan_a is not None:
+                object.__setattr__(
+                    target, "_l2_prefetch_hook", lambda n, p=plan_a: _l2pf.issue(p, n)
+                )
+            is_logged_layer = self.layer_idx in (0, 2, 3, 4)
+            if is_logged_layer or self.layer_idx == self.num_hidden_layers - 1:
+                logger.info(
+                    "[l2_prefetch] layer %d A: %s | B: %s | C: %s | dropped %.1f MB",
+                    self.layer_idx,
+                    "deferred" if is_mla else (plan_a.describe() if plan_a else "-"),
+                    plan_b.describe() if plan_b else "-",
+                    plan_c.describe() if plan_c else "-",
+                    sum(s[2] for s in dropped) / 1e6,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[l2_prefetch] layer %d plan failed: %s", self.layer_idx, exc
+            )
+            self._l2pf_plan_b = None
+            self._l2pf_plan_c = None
+
+    def hc_pre(
+        self,
+        x: torch.Tensor,
+        hc_fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        norm_weight: torch.Tensor | None = None,
+        norm_eps: float = 0.0,
+    ):
+        post_mix, res_mix, layer_input = self.mhc_pre_op(
+            residual=x,
+            fn=hc_fn,
+            hc_scale=hc_scale,
+            hc_base=hc_base,
+            rms_eps=self.rms_norm_eps,
+            hc_pre_eps=self.hc_eps,
+            hc_sinkhorn_eps=self.hc_eps,
+            hc_post_mult_value=self.mhc_post_mult_value,
+            sinkhorn_repeat=self.mhc_sinkhorn_iterations,
+            norm_weight=norm_weight,
+            norm_eps=norm_eps,
+        )
+        return post_mix, res_mix, layer_input
+
+    def hc_post(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        post: torch.Tensor,
+        comb: torch.Tensor,
+    ):
+        if self._b12x_mhc is not None:
+            return self._b12x_mhc.run_post(x, residual, post, comb)
+        return self.mhc_post_op(x, residual, post, comb)
+
+    def hc_fused_post_pre(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        post: torch.Tensor,
+        comb: torch.Tensor,
+        hc_fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        norm_weight: torch.Tensor | None = None,
+        norm_eps: float = 0.0,
+    ):
+        if self._b12x_mhc is not None:
+            return self._b12x_mhc.run_post_pre(
+                x,
+                residual,
+                post,
+                comb,
+                hc_fn,
+                hc_scale,
+                hc_base,
+                norm_weight=norm_weight,
+                norm_eps=norm_eps,
+            )
+        return self.mhc_fused_post_pre_op(
+            x=x,
+            residual=residual,
+            post_layer_mix=post,
+            comb_res_mix=comb,
+            fn=hc_fn,
+            hc_scale=hc_scale,
+            hc_base=hc_base,
+            rms_eps=self.rms_norm_eps,
+            hc_pre_eps=self.hc_eps,
+            hc_sinkhorn_eps=self.hc_eps,
+            hc_post_mult_value=self.mhc_post_mult_value,
+            sinkhorn_repeat=self.mhc_sinkhorn_iterations,
+            n_splits=1,
+            tile_n=1,
+            norm_weight=norm_weight,
+            norm_eps=norm_eps,
+        )
+
+
+class Glm5NextModel(nn.Module, EagleModelMixin):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        self.config = config
+        speculative_config = vllm_config.speculative_config
+        self.dflash_capture = speculative_config is not None and (
+            speculative_config.use_dflash()
+            or (
+                speculative_config.use_dspark()
+                and speculative_config.draft_model_config.hf_config.model_type
+                == "glm53_dspark"
+            )
+        )
+
+        self.vocab_size = config.vocab_size
+        self.device = current_platform.device_type
+
+        self.is_v32 = getattr(config, "index_topk", None) is not None
+        if self.is_v32:
+            topk_tokens = config.index_topk
+            kpool = getattr(config, "index_kpool", 1) or 1
+            buffer_width = topk_tokens + (kpool - 1 if kpool > 1 else 0)
+            topk_indices_buffer = torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                buffer_width,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            pool_topk_indices_buffer = torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                topk_tokens // kpool,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            indexer_scratch = Glm5NextIndexerScratch(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                vllm_config.scheduler_config.max_num_seqs,
+                torch.device(self.device),
+            )
+        else:
+            # Full-MLA config (no kpool sparse indexer): no topk buffer.
+            topk_indices_buffer = None
+            pool_topk_indices_buffer = None
+            indexer_scratch = None
+
+        if get_pp_group().is_first_rank:
+            vocab_kwargs = {}
+            if getattr(config, "glm53_tp3_padding", False):
+                vocab_kwargs["padding_size"] = (
+                    config.glm53_tp3_vocab_padding_size
+                )
+            self.embed_tokens = VocabParallelEmbedding(
+                config.vocab_size,
+                config.hidden_size,
+                prefix=f"{prefix}.embed_tokens",
+                **vocab_kwargs,
+            )
+            host_embedding_if_requested(self.embed_tokens)
+        else:
+            self.embed_tokens = PPMissingLayer()
+
+        def get_layer(prefix: str):
+            layer_idx = int(prefix.rsplit(".", 1)[1])
+            return Glm5NextDecoderLayer(
+                vllm_config=vllm_config,
+                config=config,
+                layer_idx=layer_idx,
+                prefix=prefix,
+                topk_indices_buffer=topk_indices_buffer,
+                pool_topk_indices_buffer=pool_topk_indices_buffer,
+                indexer_scratch=indexer_scratch,
+            )
+
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            config.num_hidden_layers,
+            get_layer,
+            prefix=f"{prefix}.layers",
+        )
+        # The active slice is fixed after construction; cache it so forward
+        # doesn't rebuild the slice (a fresh list) every step.
+        self._active_layers = self.layers[self.start_layer : self.end_layer]
+        # L2 prefetch chain: each layer prefetches its successor's projections;
+        # the last layer prefetches the first layer's for the next step.
+        # (object.__setattr__ keeps the link out of the nn.Module registry.)
+        active = list(self._active_layers)
+        for i, layer in enumerate(active):
+            object.__setattr__(layer, "_l2pf_next", active[(i + 1) % len(active)])
+        if _l2pf.ENABLED and active:
+            prefetch_device = next(active[0].parameters()).device
+            if prefetch_device.type == "cuda":
+                # Create the side stream and apply the optional context-wide L2
+                # reservation before any CUDA graph capture can begin.
+                _l2pf.L2Prefetcher.get(prefetch_device)
+
+        if get_pp_group().is_last_rank:
+            self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        else:
+            self.norm = PPMissingLayer()
+
+        self.is_sequence_parallel = (
+            vllm_config.parallel_config.use_sequence_parallel_moe
+        )
+
+        world_size = get_tensor_model_parallel_world_size()
+        assert config.num_attention_heads % world_size == 0, (
+            "num_attention_heads must be divisible by world_size"
+        )
+
+    def finalize_mhc_broadcast_weights(self) -> None:
+        if self.start_layer >= self.end_layer:
+            return
+        first_layer = self.layers[self.start_layer]
+        if (
+            not isinstance(first_layer, Glm5NextDecoderLayer)
+            or first_layer._b12x_mhc is None
+        ):
+            return
+        broadcast = (
+            first_layer.hc_attn_fn.detach()
+            .view(-1, first_layer.n, first_layer.hidden_size)
+            .sum(dim=1)
+        )
+        if first_layer.hc_attn_fn_broadcast is None:
+            first_layer.hc_attn_fn_broadcast = broadcast
+        else:
+            first_layer.hc_attn_fn_broadcast.copy_(broadcast)
+
+    def process_b12x_weights_after_loading(self) -> None:
+        for layer in self.layers[self.start_layer : self.end_layer]:
+            if isinstance(layer, Glm5NextDecoderLayer):
+                layer.process_b12x_weights_after_loading()
+
+    def update_max_model_len(self, max_model_len: int) -> None:
+        for module in self.modules():
+            if isinstance(module, Glm5NextPooledIndexer):
+                module.update_max_model_len(max_model_len)
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
+
+    def _prepare_aux_hidden_state(
+        self,
+        layer: Glm5NextDecoderLayer,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+        post: torch.Tensor | None,
+        comb: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if not layer.mhc or residual is None:
+            return hidden_states
+
+        assert post is not None and comb is not None
+        aux_hidden_state = layer.hc_post(hidden_states, residual, post, comb)
+        if self.dflash_capture:
+            return hc_contract(aux_hidden_state, layer.n)
+        return aux_hidden_state.flatten(1)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        if get_pp_group().is_first_rank:
+            if inputs_embeds is not None:
+                hidden_states = inputs_embeds
+            else:
+                hidden_states = self.embed_input_ids(input_ids)
+            residual = None
+            post = None
+            comb = None
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+            residual = intermediate_tensors["residual"]
+            # post/comb (deferred mHC hc_post state) are not propagated across
+            # PP ranks; the receiving rank's first mHC layer uses standalone pre.
+            post = None
+            comb = None
+
+        full_num_tokens = positions.shape[0]
+        if self.is_sequence_parallel:
+            hidden_states = sp_shard(hidden_states)
+
+        aux_hidden_states: list[torch.Tensor] = []
+        if self.start_layer in self.aux_hidden_state_layers:
+            aux_hidden_states.append(hidden_states)
+
+        for layer_idx, layer in enumerate(self._active_layers, start=self.start_layer):
+            hidden_states, residual, post, comb = layer(
+                positions, hidden_states, residual, post, comb
+            )
+            if layer_idx + 1 in self.aux_hidden_state_layers:
+                aux_hidden_state = self._prepare_aux_hidden_state(
+                    layer, hidden_states, residual, post, comb
+                )
+                if self.is_sequence_parallel:
+                    aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
+                aux_hidden_states.append(aux_hidden_state)
+
+        # Rejoin the L2 prefetch side stream once per forward, before any
+        # early return, so a CUDA-graph capture never ends with a forked
+        # side stream (capture safety on every PP rank).
+        _l2pf.join_all()
+
+        if not get_pp_group().is_last_rank:
+            # Pipeline parallelism is rejected because post/comb are the
+            # deferred mHC state and must be propagated across rank boundaries.
+            return IntermediateTensors(
+                {"hidden_states": hidden_states, "residual": residual}
+            )
+
+        if self.is_sequence_parallel:
+            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+
+        hidden_states = self.norm(hidden_states)
+        if aux_hidden_states:
+            return hidden_states, aux_hidden_states
+        return hidden_states
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            (".gate_up_proj", ".gate_proj", 0),
+            (".gate_up_proj", ".up_proj", 1),
+            # MLA: fuse q_a_proj and kv_a_proj_with_mqa
+            (".fused_qkv_a_proj", ".q_a_proj", 0),
+            (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
+            # KDA: reuse the shared Kimi projected-GDN layer.
+            (".in_proj_qkvgfab", ".q_proj", 0),
+            (".in_proj_qkvgfab", ".k_proj", 1),
+            (".in_proj_qkvgfab", ".v_proj", 2),
+            (".in_proj_qkvgfab", ".b_proj", 3),
+            (".in_proj_qkvgfab", ".f_a_proj", 4),
+            (".conv1d", ".q_conv1d", 0),
+            (".conv1d", ".k_conv1d", 1),
+            (".conv1d", ".v_conv1d", 2),
+        ]
+        if self.config.is_moe:
+            # Params for weights, fp8 weight scales, fp8 activation scales
+            # (param_name, weight_name, expert_id, shard_id)
+            expert_params_mapping = fused_moe_make_expert_params_mapping(
+                self,
+                ckpt_gate_proj_name="gate_proj",
+                ckpt_down_proj_name="down_proj",
+                ckpt_up_proj_name="up_proj",
+                num_experts=self.config.n_routed_experts,
+            )
+        else:
+            expert_params_mapping = []
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+
+        # GLM-5.3-Flash NoPE checkpoints omit the RoPE rows from
+        # ``kv_a_proj_with_mqa``; pad them with zeros for the model shape.
+        kv_a_pad_size = 0
+        if self.config.mla_nope and self.config.qk_rope_head_dim > 0:
+            kv_a_pad_size = self.config.qk_rope_head_dim
+
+        pending_attn_weights: dict = {}
+
+        for args in weights:
+            name, loaded_weight = args[:2]
+            kwargs: dict = args[2] if len(args) > 2 else {}
+            if "rotary_emb.inv_freq" in name:
+                continue
+
+            # The checkpoint groups KDA decay parameters under ``forget_gate``;
+            # the shared projected-GDN layer owns the same tensors directly.
+            name = _remap_glm5next_weight_name(name)
+
+            spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
+            if spec_layer is not None:
+                continue  # skip spec decode layers for main model
+            if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
+                # Models trained using ColossalAI may include these tensors in
+                # the checkpoint. Skip them.
+                continue
+
+            # GLM serializes Q/K/V short-convolution rows in one tensor. The
+            # shared KDA parameter loader accepts one logical shard at a time
+            # so it can select the correct TP-local rows.
+            if name.endswith(".self_attn.conv1d.weight"):
+                if is_pp_missing_parameter(name, self):
+                    continue
+                _load_glm5next_fused_conv1d(params_dict[name], loaded_weight)
+                loaded_params.add(name)
+                continue
+
+            if _try_load_mxfp8_bf16_attn_proj(
+                name,
+                loaded_weight,
+                pending_attn_weights,
+                params_dict,
+                loaded_params,
+            ):
+                continue
+
+            # Dequantize legacy block-FP8 projections kept in BF16.
+            if _try_load_fp8_attn_proj(
+                name,
+                loaded_weight,
+                pending_attn_weights,
+                params_dict,
+                loaded_params,
+                kv_a_pad_size,
+            ):
+                continue
+
+            # Pad kv_a_proj_with_mqa for NoPE models
+            if kv_a_pad_size > 0 and ".kv_a_proj_with_mqa." in name:
+                pad = torch.zeros(
+                    kv_a_pad_size,
+                    *loaded_weight.shape[1:],
+                    dtype=loaded_weight.dtype,
+                    device=loaded_weight.device,
+                )
+                loaded_weight = torch.cat([loaded_weight, pad], dim=0)
+
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                # We have mlp.experts[0].gate_proj in the checkpoint.
+                # Since we handle the experts below in expert_params_mapping,
+                # we need to skip here BEFORE we update the name, otherwise
+                # name will be updated to mlp.experts[0].gate_up_proj, which
+                # will then be updated below in expert_params_mapping
+                # for mlp.experts[0].gate_gate_up_proj, which breaks load.
+                if ("mlp.experts." in name) and name not in params_dict:
+                    continue
+                name_mapped = name.replace(weight_name, param_name)
+                # QKV fusion: skip if fused module doesn't exist in model
+                if param_name == ".fused_qkv_a_proj" and name_mapped not in params_dict:
+                    continue
+                name = name_mapped
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                if is_pp_missing_parameter(name, self):
+                    continue
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                for idx, (
+                    param_name,
+                    weight_name,
+                    expert_id,
+                    expert_shard_id,
+                ) in enumerate(expert_params_mapping):
+                    if weight_name not in name:
+                        continue
+                    name = name.replace(weight_name, param_name)
+                    if is_pp_missing_parameter(name, self):
+                        continue
+                    param = params_dict[name]
+                    weight_loader = param.weight_loader
+                    weight_loader(
+                        param,
+                        loaded_weight,
+                        name,
+                        expert_id=expert_id,
+                        shard_id=expert_shard_id,
+                    )
+                    break
+                else:
+                    # Skip loading extra bias for GPTQ models.
+                    if (
+                        name.endswith(".bias")
+                        and name not in params_dict
+                        and not self.config.is_linear_attn
+                    ):  # noqa: E501
+                        continue
+                    # Remapping the name of FP8 kv-scale.
+                    remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                    if remapped_name is None:
+                        continue
+                    name = remapped_name
+                    if is_pp_missing_parameter(name, self):
+                        continue
+
+                    param = params_dict[name]
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
+                    weight_loader(param, loaded_weight, **kwargs)
+            loaded_params.add(name)
+        return loaded_params
+
+
+class Glm5NextForCausalLM(
+    nn.Module,
+    HasInnerState,
+    MixtureOfExperts,
+    IsHybrid,
+    SupportsEagle3,
+    SupportsReplaySSM,
+):
+    packed_modules_mapping = GLM5NEXT_PACKED_MODULES_MAPPING
+    supports_pp: ClassVar[Literal[False]] = False
+
+    @staticmethod
+    def get_model_state_cls():
+        from ..model_state import Glm5NextModelState
+
+        return Glm5NextModelState
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        self.model_config = vllm_config.model_config
+        self.vllm_config = vllm_config
+        self.config = self.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        self.quant_config = quant_config
+        self.model = Glm5NextModel(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
+        # Register main-model experts with the V2 EPLB controller.
+        # The shipped class inherits the protocol but never fills its metadata.
+        if vllm_config.parallel_config.enable_eplb:
+            assert vllm_config.parallel_config.eplb_config.num_redundant_experts == 0
+            self.moe_mlp_layers = [layer.mlp for layer in self.model.layers
+                if isinstance(getattr(layer, "mlp", None), Glm5NextMoE)]
+            assert self.moe_mlp_layers
+            self.moe_layers = [moe.experts for moe in self.moe_mlp_layers]
+            self.num_moe_layers = len(self.moe_layers)
+            self.num_expert_groups = getattr(self.config, "n_group", 1)
+            self.expert_weights = []
+            example = self.moe_mlp_layers[0]
+            for name in ("logical_experts", "physical_experts", "local_physical_experts",
+                         "routed_experts", "shared_experts", "redundant_experts"):
+                setattr(self, "num_" + name, getattr(example, "n_" + name))
+            logger.info("GLM53 registered GLM target EPLB metadata: %d layers",
+                        self.num_moe_layers)
+
+        from .glm53_low_latency_gemm import enable_glm53_low_latency_gemm
+
+        enable_glm53_low_latency_gemm(
+            self.model, getattr(vllm_config.model_config, "dtype", None)
+        )
+        from .glm53_fp8_dense import enable_glm53_fp8_dense, enable_glm53_fp8_lm_head
+
+        # Opt-in (VLLM_GLM53_FP8_DENSE=1): FP8 weight-only decode for the large
+        # BF16 projections; wraps the methods chosen above.
+        enable_glm53_fp8_dense(self.model)
+        if get_pp_group().is_last_rank:
+            vocab_kwargs = {}
+            if getattr(self.config, "glm53_tp3_padding", False):
+                vocab_kwargs["padding_size"] = (
+                    self.config.glm53_tp3_vocab_padding_size
+                )
+            self.lm_head = ParallelLMHead(
+                self.config.vocab_size,
+                self.config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+                **vocab_kwargs,
+            )
+            enable_glm53_fp8_lm_head(self.lm_head)
+        else:
+            self.lm_head = PPMissingLayer()
+        logit_scale = getattr(self.config, "logit_scale", 1.0)
+        self.logits_processor = LogitsProcessor(
+            self.config.vocab_size, scale=logit_scale
+        )
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
+
+    def update_max_model_len(self, max_model_len: int) -> None:
+        self.model.update_max_model_len(max_model_len)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        hidden_states = self.model(
+            input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
+        )
+        return hidden_states
+
+    @classmethod
+    def get_mamba_state_dtype_from_config(
+        cls,
+        vllm_config: "VllmConfig",
+    ) -> tuple[torch.dtype, ...]:
+        dtypes = MambaStateDtypeCalculator.kda_state_dtype(
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
+        )
+        if vllm_config.cache_config.use_kda_recoverssm:
+            dtypes = MambaStateDtypeCalculator.append_kda_recoverssm_record(
+                dtypes, vllm_config.model_config.dtype
+            )
+        return dtypes
+
+    @classmethod
+    def get_mamba_state_shape_from_config(
+        cls, vllm_config: "VllmConfig"
+    ) -> (
+        tuple[tuple[int, int], tuple[int, int, int]]
+        | tuple[
+            tuple[int, int],
+            tuple[int, int, int],
+            tuple[int, int, int],
+            tuple[int, int, int],
+        ]
+    ):
+        parallel_config = vllm_config.parallel_config
+        hf_config = vllm_config.model_config.hf_config
+        tp_size = parallel_config.tensor_parallel_size
+        num_spec = (
+            vllm_config.speculative_config.num_speculative_tokens
+            if vllm_config.speculative_config
+            else 0
+        )
+        shapes = MambaStateShapeCalculator.kda_state_shape(
+            tp_size,
+            hf_config.linear_num_heads,
+            hf_config.linear_head_dim,
+            conv_kernel_size=hf_config.linear_conv_kernel_dim,
+            num_spec=num_spec,
+        )
+        if vllm_config.cache_config.use_kda_recoverssm:
+            return MambaStateShapeCalculator.append_kda_recoverssm_record(
+                shapes,
+                hf_config.linear_num_heads,
+                hf_config.linear_head_dim,
+                tp_world_size=tp_size,
+                spec_query_len=1 + num_spec,
+            )
+        return shapes
+
+    @classmethod
+    def get_mamba_state_copy_func(
+        cls,
+    ) -> tuple[
+        MambaStateCopyFunc, MambaStateCopyFunc, MambaStateCopyFunc, MambaStateCopyFunc
+    ]:
+        return MambaStateCopyFuncCalculator.kda_state_copy_func()
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor | None:
+        logits = self.logits_processor(self.lm_head, hidden_states)
+        return logits
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
+        loaded_params = loader.load_weights(weights)
+        self.process_weights_after_loading()
+        return loaded_params
+
+    def process_weights_after_loading(self) -> None:
+        self.model.finalize_mhc_broadcast_weights()
+        # Register mHC preparation only after the broadcast projection exists.
+        self.model.process_b12x_weights_after_loading()
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    Glm5NextMultiModalProcessor,
+    info=Glm5NextProcessingInfo,
+    dummy_inputs=Glm4vDummyInputsBuilder,
+)
+class Glm5NextForConditionalGeneration(
+    Glm4vForConditionalGeneration,
+    HasInnerState,
+    IsHybrid,
+    SupportsEagle3,
+    SupportsReplaySSM,
+):
+    packed_modules_mapping = GLM5NEXT_PACKED_MODULES_MAPPING
+    # The text model (KDA + dense-MLA + MoE) is a hybrid mamba model. The
+    # multimodal wrapper must declare the same interfaces so vLLM treats it as
+    # hybrid (auto-aligns mamba/attention block sizes, sizes the mamba state
+    # cache); the mamba-state classmethods delegate to the text model.
+    has_inner_state: ClassVar[Literal[True]] = True
+    is_hybrid: ClassVar[Literal[True]] = True
+    supports_pp: ClassVar[Literal[False]] = False  # type: ignore[assignment]
+
+    @staticmethod
+    def get_model_state_cls():
+        from ..model_state import Glm5NextModelState
+
+        return Glm5NextModelState
+
+    # NOTE: weight-prefix mapping is inherited from Glm4vForConditionalGeneration
+    # (``model.visual.`` -> ``visual.``, ``model.language_model.`` ->
+    # ``language_model.model.``, ``lm_head.`` -> ``language_model.lm_head.``),
+    # matching the GLM-OCR / GLM-4V serialization convention. If the real
+    # checkpoint's safetensors keys differ (e.g. ``language_model.model.`` with
+    # no outer ``model.``), override ``hf_to_vllm_mapper`` accordingly.
+
+    @classmethod
+    def get_mamba_state_dtype_from_config(cls, vllm_config: VllmConfig):
+        from .model import Glm5NextForCausalLM
+
+        return Glm5NextForCausalLM.get_mamba_state_dtype_from_config(vllm_config)
+
+    @classmethod
+    def get_mamba_state_shape_from_config(cls, vllm_config: VllmConfig):
+        from .model import Glm5NextForCausalLM
+
+        return Glm5NextForCausalLM.get_mamba_state_shape_from_config(vllm_config)
+
+    @classmethod
+    def get_mamba_state_copy_func(cls):
+        from .model import Glm5NextForCausalLM
+
+        return Glm5NextForCausalLM.get_mamba_state_copy_func()
+
+    def process_weights_after_loading(self) -> None:
+        self.language_model.process_weights_after_loading()
+
+    def update_max_model_len(self, max_model_len: int) -> None:
+        self.language_model.update_max_model_len(max_model_len)
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super(Glm4vForConditionalGeneration, self).__init__()
+        config = vllm_config.model_config.hf_config
+        multimodal_config = vllm_config.model_config.multimodal_config
+        assert multimodal_config is not None
+
+        self.config = config
+        self.model_config = vllm_config.model_config
+        self.multimodal_config = multimodal_config
+        self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
+        self.is_multimodal_pruning_enabled = (
+            multimodal_config.is_multimodal_pruning_enabled()
+        )
+
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
+            self.visual = Glm5NextVisionTransformer(
+                config.text_config,
+                config.vision_config,
+                # Read eps from the VISION sub-config, not the top-level
+                # `config.rms_norm_eps`: Glm5NextConfig.__getattribute__ mirrors
+                # the latter onto text_config (1e-5), silently ignoring the
+                # vision tower's own (1e-6) rms_norm_eps.
+                norm_eps=config.vision_config.rms_norm_eps,
+                # The vision tower ships BF16 weights; it is quantized only
+                # on request (VLLM_GLM53_VISION_MXFP8).
+                quant_config=_vision_quant_config(),
+                prefix=maybe_prefix(prefix, "visual"),
+            )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+                architectures=["Glm5NextForCausalLM"],
+            )
+
+        # Pipeline parallelism is disabled until deferred mHC state is carried
+        # across rank boundaries.
+
+    def get_encoder_cudagraph_config(self):
+        # The forked vision tower (multimodal.py) has no abs-pos embeddings, so its
+        # prepare_encoder_metadata does not produce "pos_embeds". Drop it from the
+        # buffer_keys inherited from Glm4vForConditionalGeneration so encoder
+        # CUDA-graph capture/replay does not expect a buffer that is never filled.
+        config = super().get_encoder_cudagraph_config()
+        config.buffer_keys = [k for k in config.buffer_keys if k != "pos_embeds"]
+        return config
+
+
+def get_spec_layer_idx_from_weight_name(
+    config: Glm5NextConfig, weight_name: str
+) -> int | None:
+    if hasattr(config, "num_nextn_predict_layers") and (
+        config.num_nextn_predict_layers > 0
+    ):
+        layer_idx = config.num_hidden_layers
+        for i in range(config.num_nextn_predict_layers):
+            if weight_name.startswith(
+                f"model.layers.{layer_idx + i}."
+            ) or weight_name.startswith(f"layers.{layer_idx + i}."):
+                return layer_idx + i
+    return None
+
+
+def _dequant_fp8_block(
+    weight_fp8: torch.Tensor,
+    scale_inv: torch.Tensor,
+    block_size: int = 128,
+) -> torch.Tensor:
+    """Dequantize a block-FP8 (e4m3) weight with per-block scale to BF16.
+
+    Partial edge blocks are zero-padded before scale broadcast and trimmed
+    after dequantization (for example, 576 rows = 4*128 + 64).
+    """
+    out_dim, in_dim = weight_fp8.shape
+    pad_out = (-out_dim) % block_size
+    pad_in = (-in_dim) % block_size
+    w = weight_fp8
+    if pad_out or pad_in:
+        w = torch.nn.functional.pad(w, (0, pad_in, 0, pad_out))
+    # scale_inv is (ceil(out/block), ceil(in/block)); broadcast to (out, in).
+    s = scale_inv.to(torch.float32)
+    s_full = s.repeat_interleave(block_size, dim=0).repeat_interleave(block_size, dim=1)
+    out = (w.to(torch.float32) * s_full).to(torch.bfloat16)
+    return out[:out_dim, :in_dim].contiguous()
+
+
+# Legacy FP8 checkpoint projections that the model keeps in BF16, so the
+# block-FP8 weight and scale must be dequantized on load.
+# Maps checkpoint proj-suffix -> (buffer key, model target base, fused shard id
+# or None for a direct projection, whether NoPE rope-padding applies).
+_FP8_ATTN_PROJS = {
+    ".q_a_proj.": ("q_a", "fused_qkv_a_proj", 0, False),
+    ".kv_a_proj_with_mqa.": ("kv_a", "fused_qkv_a_proj", 1, True),
+    ".q_b_proj.": ("q_b", "q_b_proj", None, False),
+    ".o_proj.": ("o_proj", "o_proj", None, False),
+}
+
+
+def _try_load_fp8_attn_proj(
+    name,
+    tensor,
+    buf,
+    params_dict,
+    loaded_params,
+    kv_a_pad_size: int,
+) -> bool:
+    """Dequantize legacy block-FP8 attention projections to BF16 on load.
+
+    When the runtime projection has a serialized scale parameter, the normal
+    loader owns it instead.
+    """
+    matched = None
+    for suffix, info in _FP8_ATTN_PROJS.items():
+        if suffix in name:
+            matched = (suffix, info)
+            break
+    if matched is None:
+        return False
+    suffix, (key, target_base, shard_id, is_kva) = matched
+    is_weight = name.endswith(".weight") and tensor.dtype == torch.float8_e4m3fn
+    is_scale = "weight_scale_inv" in name
+    if not is_weight and not is_scale:
+        return False
+
+    layer_prefix = name.rsplit(suffix, 1)[0]
+    target_w = f"{layer_prefix}.{target_base}.weight"
+    target_scale_inv = f"{layer_prefix}.{target_base}.weight_scale_inv"
+    target_scale = f"{layer_prefix}.{target_base}.weight_scale"
+    # Quantized runtime projections own their serialized scale parameter. Let
+    # the normal path load either block-FP8 or MXFP8 weights directly.
+    if target_scale_inv in params_dict or target_scale in params_dict:
+        return False
+
+    entry = buf.setdefault(layer_prefix, {}).setdefault(key, {})
+    # Streaming loaders can recycle the source before the paired tensor arrives.
+    entry["weight" if is_weight else "scale"] = materialize_weight(tensor)
+    if "weight" not in entry or "scale" not in entry:
+        return True
+
+    weight_fp8, scale_inv = entry["weight"], entry["scale"]
+    buf[layer_prefix].pop(key, None)
+    block_size = weight_fp8.shape[1] // scale_inv.shape[1]
+    weight_bf16 = _dequant_fp8_block(weight_fp8, scale_inv, block_size)
+    # NoPE: pad kv_a rope portion (kv_lora_rank -> kv_lora_rank + qk_rope_head_dim).
+    if is_kva and kv_a_pad_size > 0:
+        pad = torch.zeros(
+            kv_a_pad_size,
+            weight_bf16.shape[1],
+            dtype=weight_bf16.dtype,
+            device=weight_bf16.device,
+        )
+        weight_bf16 = torch.cat([weight_bf16, pad], dim=0)
+
+    param = params_dict[target_w]
+    if shard_id is None:
+        param.weight_loader(param, weight_bf16)
+    else:
+        param.weight_loader(param, weight_bf16, shard_id)
+    loaded_params.add(target_w)
+    return True
+
+
+def host_embedding_if_requested(embed: VocabParallelEmbedding) -> None:
+    """Move the vocabulary table to pinned host RAM (VLLM_GLM53_EMBED_HOST).
+
+    A lookup reads one row per token, so the GPU reads the rows it needs
+    through a UVA view instead of keeping the table in device memory.
+    Checkpoint loading writes through the same view.
+    """
+    if not envs.VLLM_GLM53_EMBED_HOST:
+        return
+    from vllm.utils.platform_utils import is_uva_available
+    from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
+
+    if not is_uva_available():
+        raise RuntimeError("VLLM_GLM53_EMBED_HOST requires UVA and pinned memory")
+    weight = embed.weight
+    host = torch.empty(weight.shape, dtype=weight.dtype, device="cpu", pin_memory=True)
+    weight.data = get_accelerator_view_from_cpu_tensor(host)
+    weight._vllm_is_uva_offloaded = True
+
+
+def _vision_quant_config() -> QuantizationConfig | None:
+    """Online MXFP8 for the vision tower's linear layers, when requested."""
+    if not envs.VLLM_GLM53_VISION_MXFP8:
+        return None
+    from vllm.config.quantization import QuantizationConfigArgs
+    from vllm.model_executor.layers.quantization.online.base import (
+        OnlineQuantizationConfig,
+    )
+
+    return OnlineQuantizationConfig(QuantizationConfigArgs(linear="mxfp8"))
+
+
+def _try_load_mxfp8_bf16_attn_proj(
+    name,
+    tensor,
+    buf,
+    params_dict,
+    loaded_params,
+) -> bool:
+    """Dequantize MXFP8 selector weights whose computation requires FP32."""
+    suffix = ".indexer.weights_proj."
+    if suffix not in name:
+        return False
+
+    is_weight = name.endswith(".weight") and tensor.dtype == MXFP8_VALUE_DTYPE
+    is_scale = name.endswith(".weight_scale") and tensor.dtype == MXFP8_SCALE_DTYPE
+    if not is_weight and not is_scale:
+        return False
+
+    layer_prefix = name.rsplit(suffix, 1)[0]
+    target_w = f"{layer_prefix}.indexer.weights_proj.weight"
+    target_scale = f"{layer_prefix}.indexer.weights_proj.weight_scale"
+    if target_scale in params_dict:
+        return False
+
+    entry = buf.setdefault(layer_prefix, {}).setdefault("indexer_weights", {})
+    # Streaming loaders can recycle the source before the paired tensor arrives.
+    entry["weight" if is_weight else "scale"] = materialize_weight(tensor)
+    if "weight" not in entry or "scale" not in entry:
+        return True
+
+    weight = dequant_mxfp8_to_bf16(entry["weight"], entry["scale"])
+    buf[layer_prefix].pop("indexer_weights", None)
+    param = params_dict[target_w]
+    param.weight_loader(param, weight)
+    loaded_params.add(target_w)
+    return True

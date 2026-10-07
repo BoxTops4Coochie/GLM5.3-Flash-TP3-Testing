@@ -1,0 +1,13 @@
+{
+  "parent_image_id": "sha256:54af7a88d2f02c40a91265ce995a7970ad6b480dd3228ed65d88c1b52dba459d",
+  "toggle": "MOE_TP",
+  "default": 0,
+  "qualified_quick_mode": "default/MTP3/DCP1",
+  "physical_expert_width": 2112,
+  "sources": {
+    "src/vllm/model_executor/layers/fused_moe/routed_experts.py": "d400eba8207c6233c122ce39cd6ab3e183ff3e4eb46ee7161e78e5f8a1a21692",
+    "src/vllm/models/glm5next/nvidia/model.py": "9d7849c96cec5a186502ba10ea7455692a438e54f6c923562c6329323e255d1b",
+    "src/vllm/transformers_utils/configs/glm53_tp3.py": "0cc5270d18a85e564b1cee828b16b9a2a208abcf7b288f57d00e2c84d8d615f2",
+    "src/vllm/v1/worker/utils.py": "5afa3375d903c395c606c5d3d3fe09f23d66839b2e930aed478945a88f0654be"
+  }
+}

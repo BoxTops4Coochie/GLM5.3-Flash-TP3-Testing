@@ -1,0 +1,159 @@
+# Kraken TP3 release example, image azallaza/glm53-kraken-tp3:20261007
+# (our TP3 port rebased onto upstream karmic-kraken-beta-20261006-c8c8fe).
+# Defaults: CSF-QAD checkpoint / MTP3 / DCP1 / MOE_TP=1, W4A4 experts with
+# resident scales, KV 4,199,951 tokens (4.01x 1M), top-p 0.95.
+# CHECKPOINT=default serves the original NVFP4 checkpoint on the same image.
+# All source changes are built into the image; the launcher is also mounted.
+# GPU power is a host setting: tested 350W/GPU; never exceed 400W.
+services:
+  glm53-kraken-tp3:
+    image: "${GLM53_IMAGE:-azallaza/glm53-kraken-tp3:20261007}"
+    container_name: glm53-kraken-tp3
+    restart: "no"
+    # Room for LMCache/vLLM to shut down cleanly. A stale LMCache L1 arena left in
+    # /dev/shm is removed by the launcher at the next start (lock-protected).
+    stop_grace_period: 90s
+    ipc: host
+    shm_size: "64gb"
+    cpuset: "${CPUSET:-8-47}"
+    gpus: all
+    ports:
+      - "15015:8000"
+    volumes:
+      - ${HF_CACHE_DIR:?Set HF_CACHE_DIR to your populated Hugging Face cache}:/root/.cache/huggingface:ro
+      - runtime-cache:/cache
+      - ./serve-glm53-flash-tp3-kraken.py:/usr/local/bin/serve-glm53-flash-tp3-kraken.py:ro
+    environment:
+      # Set here, in .env, or before `docker compose up -d`.
+      # csf-qad = local-inference-lab/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD@fd660d51
+      #   (same QAD experts, compressed expert scales, MXFP8 attention/shared
+      #   experts; LIL License 1.0). Needs MODE=mtp and MOE_TP=1 (b12x experts).
+      # default = local-inference-lab/GLM-5.3-Flash-NVFP4@175ae8ce (original).
+      # uncensored = orcarouter NVFP4 checkpoint (experimental on this image).
+      CHECKPOINT: "${CHECKPOINT:-csf-qad}"
+      # csf-qad only. a4 = W4A4 experts (default, ~10% faster decode than a16,
+      # quality-qualified); a16 = upstream's W4A16.
+      CSF_ACTIVATIONS: "${CSF_ACTIVATIONS:-a4}"
+      # csf-qad only. 1 = expand expert scales once per layer (+3.7% C1, +2% C8,
+      # ~2.4 GiB/GPU); 0 = keep them compressed (per-call decode, more free memory).
+      CSF_RESIDENT_SCALES: "${CSF_RESIDENT_SCALES:-1}"
+      MODEL: "${MODEL:-}"
+      MODEL_REVISION: "${MODEL_REVISION:-}"
+      SERVED_MODEL_NAME: "${SERVED_MODEL_NAME:-GLM-5.3-Flash-TP3}"
+
+      # mtp = depth3; dflash2 (or dflash) = depth7; mtp0 = speculation off.
+      # Draft arguments are added only in DFlash mode.
+      MODE: "${MODE:-mtp}"
+      # 0 = baseline EP3; 1 = TP-sharded routed experts (704 channels/rank),
+      # +2.8-4% C1. MTP only: default checkpoint qualified at DCP1; DCP3 and the
+      # uncensored checkpoint (Marlin TP experts) experimental; DFlash/MTP0 need 0.
+      MOE_TP: "${MOE_TP:-1}"
+      # auto = LM-head BF16 release + shared PyNCCL + explicit KV budget, applied
+      # only for MTP3/MOE_TP=1/DCP1 with default slots/batch/graph/length budgets
+      # measured on this image: csf-qad 2215 blocks (4,199,951 KV, 4x1M stress),
+      # default 1700 blocks (3,222,912 KV). DCP3, uncensored and LMCACHE=l1 use
+      # automatic sizing here (csf-qad DCP3: 10,325,560 KV). 0 = off everywhere.
+      # TP-expert MoE backend (MOE_TP=1): empty = b12x (csf-qad, required) /
+      # flashinfer_cutlass (default) / marlin (uncensored).
+      MOE_TP_BACKEND: "${MOE_TP_BACKEND:-}"
+      KV_RECLAIM: "${KV_RECLAIM:-auto}"
+      # off = GPU prefix cache only; l1 = LMCache host-RAM tier (LMCACHE_L1_GB GiB,
+      # must fit the host's /dev/shm; ipc: host). Reloads evicted prefixes from RAM
+      # (100K prefix: 8.5 s -> 0.24 s); KV budget not re-measured on this image.
+      # The LMCache disk tier (L2) is not tested at TP3 and is rejected.
+      LMCACHE: "${LMCACHE:-off}"
+      LMCACHE_L1_GB: "${LMCACHE_L1_GB:-96}"
+      # Optional explicit KV bytes/GPU for the budgeted configurations (empty = tested budget).
+      KV_CACHE_MEMORY_BYTES: "${KV_CACHE_MEMORY_BYTES:-}"
+      # b12x tensor-core BF16 GEMV for decode BF16 linears <=8 rows (C1): ~+2.6-3%
+      # C1 steps/s, C8 unchanged, quality-qualified 2026-09-27. 0 = cuBLAS as before.
+      VLLM_B12X_BF16_GEMV: "${BF16_GEMV:-1}"
+      VLLM_USE_FASTOKENS: "${FASTOKENS:-1}"
+      DFLASH_MODEL: "${DFLASH_MODEL:-local-inference-lab/GLM-5.3-Flash-DFlash2}"
+      DFLASH_MODEL_REVISION: "${DFLASH_MODEL_REVISION:-}"
+
+      # DCP1 = measured speed baseline; DCP3 = shard KV across all3 GPUs.
+      # DCP3 is qualified; its rank-padding correction is baked into the image.
+      DCP: "${DCP:-1}"
+      # Native PCIe DCP gather/reduce + fused empty-shard mask; 1 enables, 0 disables.
+      # Screened default/MTP3/DCP3, C1: +2.6-3.0% steps/s, no meaningful KV loss.
+      # Other modes and long natural-output correctness not yet qualified for this option.
+      # Included in this image; larger batches retain existing collectives.
+      VLLM_TP3_PCIE_DCP: "${NATIVE_DCP:-1}"
+      MAX_NUM_BATCHED_TOKENS: "${MAX_NUM_BATCHED_TOKENS:-4096}"
+      # Empty chooses32 for MTP/off or64 for DFlash (covers C8 verification).
+      MAX_CUDAGRAPH_CAPTURE_SIZE: "${MAX_CUDAGRAPH_CAPTURE_SIZE:-}"
+      # Empty: finer MTP/off captures for default and csf-qad at DCP1, graph32, 8 slots.
+      # Other settings retain their ladder; explicit space-separated lists override.
+      CUDAGRAPH_CAPTURE_SIZES: "${CUDAGRAPH_CAPTURE_SIZES:-}"
+      MAX_NUM_SEQS: "${MAX_NUM_SEQS:-8}"
+      MAX_MODEL_LEN: "${MAX_MODEL_LEN:-1048576}"
+      GPU_MEMORY_UTILIZATION: "${GPU_MEMORY_UTILIZATION:-0.95}"
+      REASONING_EFFORT: "${REASONING_EFFORT:-max}"
+      CLEAR_THINKING: "${CLEAR_THINKING:-true}"
+
+      # 256KB keeps C8's 256 KiB all-reduces on the b12x one-shot instead of
+      # the NCCL ring: +3.0% C8 steps/s, neutral at C1 (measured 2026-09-23 on
+      # the FP8 stack). Empty restores the upstream 84KiB cutoff.
+      VLLM_PCIE_ONESHOT_ALLREDUCE_MAX_SIZE: "${VLLM_PCIE_ONESHOT_ALLREDUCE_MAX_SIZE-256KB}"
+
+      # KDA backends. The Kraken profile ships kda_prefill_backend=b12x, which
+      # `resolve_kda_prefill_backend` refuses to select under `auto` because it
+      # is not serving-qualified. It degrades the recurrent state built across
+      # very long prompts: on an 826K history it cost uncensored/DFlash2 one
+      # failure in four, and held uncensored/MTP3 to 38% of the default
+      # checkpoint's output length. flashkda -- what R34 served in all 429
+      # recorded receipts -- takes both arms to 4/4 at full length.
+      # Decode stays on b12x, so this remains a b12x build.
+      # See qualification-20260920/kda-prefill-backend/RESULTS.md.
+      # The image's profile still ships kda_prefill_backend=b12x and is not
+      # patched: /opt/lil/image-contract.json pins the profile hashes and the
+      # entrypoint refuses to start if they change. So the qualified backend is
+      # selected here. Decode stays b12x; only recurrent prefill moves.
+      ADDITIONAL_CONFIG: "${ADDITIONAL_CONFIG:-{\"glm53_kda_decode_backend\":\"b12x\",\"kda_prefill_backend\":\"flashkda\"}}"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      VLLM_NO_USAGE_STATS: "1"
+      # 1 asserts the resolved backend set matches the qualified one. The
+      # baked vllm/v1/worker/utils.py accepts either b12x or flashkda for
+      # prefill and requires b12x collectives and b12x KDA decode.
+      # Expert proof checks EP3 normally, or actual TP3 partitioning with MOE_TP=1.
+      GLM53_TP3_REQUIRE_RUNTIME_PROOF: "${GLM53_TP3_REQUIRE_RUNTIME_PROOF:-1}"
+
+      # MTP acceptance-length adaptation. Empty = disabled, the qualified
+      # configuration. A positive integer averages accepted draft lengths over
+      # that many verification steps and trims the speculative-token count,
+      # with DRAFT_TOKENS as the upper bound. Measured 0.0% at C1, where the
+      # controller never trims; under evaluation at C8.
+      MTP_ADAPTIVE_WINDOW: "${MTP_ADAPTIVE_WINDOW:-}"
+      # Speculative tokens per step. Empty = mode default (MODE=mtp 3, dflash2 7);
+      # 1-7 accepted. Qualified: MTP 3 and DFlash2 7. Any other MTP value turns
+      # off the KV reclaim budget (automatic KV sizing) and the measured graph
+      # ladder; above 3 the graph maximum grows to 8 x (tokens + 1).
+      DRAFT_TOKENS: "${DRAFT_TOKENS:-}"
+      # FP8 weight-only decode (Marlin W8A16) for the large BF16 projections:
+      # KDA in_proj/o_proj, DSA o_proj/q_b_proj, dense FFN, LM head, MTP draft.
+      # With csf-qad most of these are MXFP8 in the checkpoint already (b12x);
+      # only the dense FFN and LM head remain BF16 and use this path.
+      # +11.4% C1 / +8.1% C8 steps/s with PDL and the cutoff. 0 = BF16 as in
+      # 20260921. Sub-flags switch parts off individually.
+      VLLM_GLM53_FP8_DENSE: "${VLLM_GLM53_FP8_DENSE:-1}"
+      VLLM_GLM53_FP8_LM_HEAD: "${VLLM_GLM53_FP8_LM_HEAD:-1}"
+      VLLM_GLM53_FP8_FFN: "${VLLM_GLM53_FP8_FFN:-1}"
+      VLLM_GLM53_FP8_MTP: "${VLLM_GLM53_FP8_MTP:-1}"
+      # w8a8: prefill on CUTLASS FP8, BF16 copies dropped (+5.5-6.5% prefill,
+      # +6% KV). bf16: prefill keeps the BF16 weights (more memory, unchanged
+      # prefill numerics). Only read when VLLM_GLM53_FP8_DENSE=1.
+      VLLM_GLM53_FP8_PREFILL: "${VLLM_GLM53_FP8_PREFILL:-w8a8}"
+      # Half-L2 budgets retained from R34; re-tested with FP8 weights and kept.
+      VLLM_GLM53_L2_PREFETCH_BUDGET_A_MB: "10"
+      VLLM_GLM53_L2_PREFETCH_BUDGET_B_MB: "25"
+      VLLM_GLM53_L2_PREFETCH_BUDGET_C_MB: "7.5"
+      VLLM_GLM53_L2_PREFETCH_BUDGET_A_MLA_MB: "18"
+      VLLM_GLM53_L2_PREFETCH_PERSIST_MB: "${VLLM_GLM53_L2_PREFETCH_PERSIST_MB:-0}"
+      VLLM_GLM53_L2_PREFETCH_A_NEXT_MB: "${VLLM_GLM53_L2_PREFETCH_A_NEXT_MB:-0}"
+    entrypoint: ["/opt/venv/bin/python", "/usr/local/bin/serve-glm53-flash-tp3-kraken.py"]
+    command: []
+
+volumes:
+  runtime-cache:

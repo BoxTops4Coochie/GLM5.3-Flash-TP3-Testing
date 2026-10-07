@@ -1,0 +1,20 @@
+{
+  "date": "2026-09-23T22:13:45.576677+00:00",
+  "base_image": "glm53-kraken-tp3:20260923",
+  "base_image_id": "sha256:9b3b342159382972e94b07f56ccce8679bc7d43c58cb2aaa30dd84f1788719c2",
+  "feature": "Independent target-only EPLB and KDA no-copy; both default off",
+  "files": {
+    "src/vllm/v1/worker/gpu/eplb_utils.py": "2bfa722154fcfccae3c713160865781104c6d1a0173bb33ed046e70cedea6184",
+    "src/vllm/v1/worker/gpu/spec_decode/eagle/utils.py": "853bf46f899ae9835c9088ff0f4e017f77686ec20d4ef71665857461b0fe2326",
+    "src/vllm/models/glm5next/nvidia/model.py": "c4df05ae0db0da4183d5869c0677d7feea1b6285429679b78353c9a6d2ad6453",
+    "src/vllm/model_executor/layers/quantization/utils/marlin_utils_fp8.py": "f25f77eaa1673b2a47457369b3b3f0a9fc411a964bba44bfaffa413d34ca7002",
+    "src/vllm/model_executor/layers/mamba/gdn/kimi_gdn_linear_attn.py": "0f6f8012274d9e73d5ad277e8ddea0efe7349bea835d1b58eeef6acb70beceb0",
+    "src/vllm/distributed/eplb/async_worker.py": "6285929ba1ce641156df4358dfbf3a6291bda387c4cee1dc8320cc087dd464cc",
+    "src/vllm/distributed/eplb/eplb_state.py": "05dbc02a0d9f10f6744020c0138ea03a487b48a1e61957b378bfc3a781d5fee6"
+  },
+  "launcher_sha256": "f13f6823193b4c5e8ea7fbd38cbe38f405f32434b8ee2567df3617c0fc9da115",
+  "tested_enabled_mode": "default/MTP3/DCP1",
+  "kv_off": 3169983,
+  "kv_on": 2509492,
+  "kv_no_copy": 3168117
+}
