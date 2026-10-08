@@ -52,9 +52,10 @@ services:
       MOE_TP: "${MOE_TP:-1}"
       # auto = LM-head BF16 release + shared PyNCCL + explicit KV budget, applied
       # only for MTP3/MOE_TP=1/DCP1 with default slots/batch/graph/length budgets
-      # measured on this image: csf-qad and csf-qad-2 2215 blocks (4,199,951 KV;
-      # 4x1M text + 8x10 large-image stress), default 1700 blocks (3,222,912 KV).
-      # DCP3, uncensored and LMCACHE=l1 use automatic sizing. 0 = off everywhere.
+      # measured on this image: csf-qad* DCP1 2215 blocks (4,199,951 KV; 4x1M text
+      # + 8x10 large-image stress), csf-qad* DCP3 2145 blocks (10,485,760 KV, 10.0x),
+      # default DCP1 1700 blocks (3,222,912 KV). Other combinations (default DCP3,
+      # uncensored, LMCACHE=l1) use automatic sizing. 0 = off everywhere.
       # TP-expert MoE backend (MOE_TP=1): empty = b12x (csf-qad*, required) /
       # flashinfer_cutlass (default) / marlin (uncensored).
       MOE_TP_BACKEND: "${MOE_TP_BACKEND:-}"

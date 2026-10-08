@@ -5,6 +5,20 @@ q = Q.read_text() if Q.exists() else ''
 def res(name):
     m = re.search(rf'DONE {name} rc=\d+ \| exact (\d+) / wrong (\d+) / truncated (\d+)', q)
     return f'{m.group(1)} exact / {m.group(2)} wrong / {m.group(3)} truncated' if m else 'pending'
+import os
+dcp3 = R.parents[1] / 'rebase-89f1cee' / 'stress-text-dcp3-2145'
+def dcp3_text():
+    f = dcp3 / 'stress-results.json'
+    if not f.exists(): return 'running', '—', 'stress pending'
+    res = json.load(open(f)); kv = [json.loads(l) for l in open(dcp3 / 'stress-kv.log') if 'kv_cache' in l]
+    peak = {}
+    for line in open(dcp3 / 'stress-mem.csv'):
+        p = [x.strip() for x in line.split(',')]
+        if len(p) >= 3 and p[1].isdigit(): peak[int(p[1])] = max(peak.get(int(p[1]), 0), int(p[2]))
+    ok = sum(1 for x in res if x.get('ok')); pre = max(k['num_preemptions_total'] or 0 for k in kv)
+    return (f'{ok}/{len(res)} OK, {int(pre)} preemptions, peak KV {max(k["kv_cache_usage_perc"] or 0 for k in kv):.0%}',
+            f'{(97887 - max(peak.values())) / 1024:.2f} GB', 'image + 8x1M stress, 8/8' if ok == len(res) and pre == 0 else 'stress issue')
+DCP3_TEXT, DCP3_TEXT_FREE, DCP3_STATUS = dcp3_text()
 img = subprocess.check_output(['docker', 'inspect', 'glm53-kraken-tp3:20261008', '--format', '{{.Id}}'], text=True).strip()
 compose = (R / 'compose.yaml').read_text()
 readme = f'''# GLM-5.3 Flash Kraken TP3 — 20261008
@@ -39,6 +53,7 @@ Host settings: 350 W/GPU (never exceed 400 W), +6000 memory offset.
 | Setting | KV tokens | Decode steps/s @32K C1 / C8 | Prefill 32K | Status |
 | --- | ---: | --- | --- | --- |
 | **csf-qad-2 MTP3 DCP1** (default) | **4,199,951 (4.01x 1M)** | 107-108 / — (user run) | ~10.5K tok/s | quality + stress below |
+| **csf-qad-2 MTP3 DCP3** | **10,485,760 (10.00x 1M)** | 98.4 / 271.1 | 10,185 | {DCP3_STATUS} |
 | csf-qad MTP3 DCP1 (`fd660d51`) | 4,199,951 (4.01x) | 105.4 / 306.0 | — | regression-checked on this image |
 | csf-qad on 20261007, for reference | 4,199,951 | 105-108 / 307-315 | 10,825 | fully qualified |
 | csf-qad-2 **DFlash2** (`MODE=dflash2`) | 3,344,754 (auto) | 81.8 (accept 2.60) = 213 tok/s | — | 8/8 |
@@ -50,7 +65,7 @@ MTP3 (~270 tok/s C1 for csf-qad-2) remains faster than DFlash2 on every checkpoi
 docker compose up -d                                   # csf-qad-2 (dec48abd), MTP3/DCP1, 4.01x 1M
 CHECKPOINT=csf-qad docker compose up -d                # fd660d51 (BF16 vision)
 CSF_ACTIVATIONS=a16 docker compose up -d               # upstream's W4A16 experts (slower)
-DCP=3 docker compose up -d                             # DCP3, automatic KV (not re-run on this image)
+DCP=3 docker compose up -d                             # csf-qad-2 DCP3, 10.0x 1M (2145 blocks)
 CHECKPOINT=default docker compose up -d                # original NVFP4 (1700-block budget)
 ```
 
@@ -68,6 +83,12 @@ CHECKPOINT=default docker compose up -d                # original NVFP4 (1700-bl
 | --- | --- | ---: |
 | 8 concurrent x 10 photos 6000x4000 (79.6K prompt tokens each) | all OK | 2.0 GB |
 | 4 x ~891K prompts + 120K decode each (right after the image stress) | all OK, 0 preemptions, peak KV 90% | 1.44 GB (GPU 0) |
+| DCP3 (2145 blocks): 8 concurrent x 10 photos 6000x4000 | all OK | 2.44 GB |
+| DCP3 (2145 blocks): 8 x ~891K prompts + 120K decode each | {DCP3_TEXT} | {DCP3_TEXT_FREE} |
+
+DCP3 decode steps/s (cooled, 0/32K/128K): C1 99.8 / 98.4 / 96.4, C8 280.0 / 271.1 / 266.5;
+prefill 32K / 128K 10,185 / 9,786 tok/s (csf-qad DCP3 on 20261007: C1 101.6 / 99.7 / 97.6,
+C8 275.0 / 274.8 / 263.5).
 
 Vision test kit and results: `../../vision-test/`. Evidence: `../../rebase-89f1cee/RESULTS.md`,
 `../../qualification-20261008-csf2/`.
@@ -84,7 +105,7 @@ attribution notice above.
 
 ## Not re-run on this image
 
-Long-context retrieval/generation, DCP3, DFlash2 quality, uncensored checkpoint, LMCache L1
+Long-context retrieval/generation, DCP3 quality tests, DFlash2 quality, uncensored checkpoint, LMCache L1
 (qualified on 20261007 / 20260927 with the identical text weights).
 
 ## Files

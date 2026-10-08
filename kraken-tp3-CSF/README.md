@@ -2,7 +2,7 @@
 
 This model is based on [GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD](https://huggingface.co/local-inference-lab/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD) by Local Inference Lab, Inc., a non-profit organization, available at <https://huggingface.co/local-inference-lab/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD>. GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD is licensed under the Local Inference Lab License, Version 1.0.
 
-Image: **`azallaza/glm53-kraken-tp3:20261008`** (local `glm53-kraken-tp3:20261008`, `sha256:9b25ca9429c941641b9c053555e531f4d3b73eb503f71937858ba13144b05c1b`).
+Image: **`azallaza/glm53-kraken-tp3:20261008`** (local `glm53-kraken-tp3:20261008`, `sha256:44c2d27ec0269e4620895a3ce21f639ee93f9e4d9b935e896ed52a3a6900c486`).
 Our GLM-5.3-Flash TP3 port rebased onto upstream `ghcr.io/local-inference-lab/vllm:karmic-kraken-beta`
 (`sha256:629d097c…`, vLLM `89f1ceecd`), serving the newest CSF-QAD revision (`dec48abd`, quantized
 vision tower) as well as the previous one (`fd660d51`). Upstream cannot serve either at TP3.
@@ -30,6 +30,7 @@ Host settings: 350 W/GPU (never exceed 400 W), +6000 memory offset.
 | Setting | KV tokens | Decode steps/s @32K C1 / C8 | Prefill 32K | Status |
 | --- | ---: | --- | --- | --- |
 | **csf-qad-2 MTP3 DCP1** (default) | **4,199,951 (4.01x 1M)** | 107-108 / — (user run) | ~10.5K tok/s | quality + stress below |
+| **csf-qad-2 MTP3 DCP3** | **10,485,760 (10.00x 1M)** | 98.4 / 271.1 | 10,185 | image + 8x1M stress, 8/8 |
 | csf-qad MTP3 DCP1 (`fd660d51`) | 4,199,951 (4.01x) | 105.4 / 306.0 | — | regression-checked on this image |
 | csf-qad on 20261007, for reference | 4,199,951 | 105-108 / 307-315 | 10,825 | fully qualified |
 | csf-qad-2 **DFlash2** (`MODE=dflash2`) | 3,344,754 (auto) | 81.8 (accept 2.60) = 213 tok/s | — | 8/8 |
@@ -41,7 +42,7 @@ MTP3 (~270 tok/s C1 for csf-qad-2) remains faster than DFlash2 on every checkpoi
 docker compose up -d                                   # csf-qad-2 (dec48abd), MTP3/DCP1, 4.01x 1M
 CHECKPOINT=csf-qad docker compose up -d                # fd660d51 (BF16 vision)
 CSF_ACTIVATIONS=a16 docker compose up -d               # upstream's W4A16 experts (slower)
-DCP=3 docker compose up -d                             # DCP3, automatic KV (not re-run on this image)
+DCP=3 docker compose up -d                             # csf-qad-2 DCP3, 10.0x 1M (2145 blocks)
 CHECKPOINT=default docker compose up -d                # original NVFP4 (1700-block budget)
 ```
 
@@ -59,6 +60,12 @@ CHECKPOINT=default docker compose up -d                # original NVFP4 (1700-bl
 | --- | --- | ---: |
 | 8 concurrent x 10 photos 6000x4000 (79.6K prompt tokens each) | all OK | 2.0 GB |
 | 4 x ~891K prompts + 120K decode each (right after the image stress) | all OK, 0 preemptions, peak KV 90% | 1.44 GB (GPU 0) |
+| DCP3 (2145 blocks): 8 concurrent x 10 photos 6000x4000 | all OK | 2.44 GB |
+| DCP3 (2145 blocks): 8 x ~891K prompts + 120K decode each | 8/8 OK, 0 preemptions, peak KV 56% | 2.92 GB |
+
+DCP3 decode steps/s (cooled, 0/32K/128K): C1 99.8 / 98.4 / 96.4, C8 280.0 / 271.1 / 266.5;
+prefill 32K / 128K 10,185 / 9,786 tok/s (csf-qad DCP3 on 20261007: C1 101.6 / 99.7 / 97.6,
+C8 275.0 / 274.8 / 263.5).
 
 Vision test kit and results: `../../vision-test/`. Evidence: `../../rebase-89f1cee/RESULTS.md`,
 `../../qualification-20261008-csf2/`.
@@ -75,7 +82,7 @@ attribution notice above.
 
 ## Not re-run on this image
 
-Long-context retrieval/generation, DCP3, DFlash2 quality, uncensored checkpoint, LMCache L1
+Long-context retrieval/generation, DCP3 quality tests, DFlash2 quality, uncensored checkpoint, LMCache L1
 (qualified on 20261007 / 20260927 with the identical text weights).
 
 ## Files
@@ -159,9 +166,10 @@ services:
       MOE_TP: "${MOE_TP:-1}"
       # auto = LM-head BF16 release + shared PyNCCL + explicit KV budget, applied
       # only for MTP3/MOE_TP=1/DCP1 with default slots/batch/graph/length budgets
-      # measured on this image: csf-qad and csf-qad-2 2215 blocks (4,199,951 KV;
-      # 4x1M text + 8x10 large-image stress), default 1700 blocks (3,222,912 KV).
-      # DCP3, uncensored and LMCACHE=l1 use automatic sizing. 0 = off everywhere.
+      # measured on this image: csf-qad* DCP1 2215 blocks (4,199,951 KV; 4x1M text
+      # + 8x10 large-image stress), csf-qad* DCP3 2145 blocks (10,485,760 KV, 10.0x),
+      # default DCP1 1700 blocks (3,222,912 KV). Other combinations (default DCP3,
+      # uncensored, LMCACHE=l1) use automatic sizing. 0 = off everywhere.
       # TP-expert MoE backend (MOE_TP=1): empty = b12x (csf-qad*, required) /
       # flashinfer_cutlass (default) / marlin (uncensored).
       MOE_TP_BACKEND: "${MOE_TP_BACKEND:-}"

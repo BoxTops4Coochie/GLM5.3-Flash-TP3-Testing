@@ -28,7 +28,9 @@ KV_RECLAIM_BYTES_L1 = {}  # not re-measured on this base: automatic sizing
 # (4.01x 1M); 4 x ~891K prompts + 120K decode each, 0 preemptions, peak KV 89%,
 # min free 1.80 GB/GPU (rebase-20261006/stress-2215res, 2026-10-06). 2170 blocks
 # (3.92x) also passed with 2.42 GB free.
-KV_RECLAIM_BYTES_CSF = {'1': 2215 * 13888512}
+# DCP3 (2026-10-08, 20261008 image, csf-qad-2): 2145 blocks = 10.0x 1M; reclaim frees about
+# what the extra blocks use, so idle free memory stays near automatic sizing's ~4.2 GB.
+KV_RECLAIM_BYTES_CSF = {'1': 2215 * 13888512, '3': 2145 * 13888512}
 KV_RECLAIM_BYTES_UNCENSORED = {}  # not re-measured on this base: automatic sizing
 
 CHECKPOINTS = {
