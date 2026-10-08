@@ -480,10 +480,13 @@ class DFlashQwen3DecoderLayer(nn.Module):
             rope_parameters=config.rope_parameters,
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
+            # Kraken GLM-5.3 TP3 drafts (glm53_tp3_padding) are padded by our
+            # loaded-size loaders, which also handle stored MXFP8 drafts.
             pad_heads=config.num_attention_heads
             != getattr(
                 config, "original_num_attention_heads", config.num_attention_heads
-            ),
+            )
+            and not getattr(config, "glm53_tp3_padding", False),
         )
         intermediate_size = _dflash_padded_width(
             config.intermediate_size, get_tensor_model_parallel_world_size()

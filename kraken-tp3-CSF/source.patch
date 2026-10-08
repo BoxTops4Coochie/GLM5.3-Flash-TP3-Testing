@@ -1,6 +1,6 @@
 --- a/vllm/config/speculative.py
 +++ b/vllm/config/speculative.py
-@@ -1192,6 +1192,15 @@
+@@ -1195,6 +1195,15 @@
          # will be detected automatically if possible. If the speculative method
          # can not be detected, it will be considered as the "draft_model" by
          # default.
@@ -16,7 +16,7 @@
  
          # infer method from user args
          if self.method is None and SpeculativeConfig._is_custom_proposer_path(
-@@ -1733,6 +1742,7 @@
+@@ -1736,6 +1745,7 @@
                  "adaptive_speculative_tokens_initial must not exceed "
                  "num_speculative_tokens."
              )
@@ -24,7 +24,7 @@
  
          return self
  
-@@ -1904,6 +1914,81 @@
+@@ -1907,6 +1917,81 @@
          self.draft_model_config._model_info = model_info
          self.draft_model_config._architecture = arch
  
@@ -305,7 +305,7 @@
          # Only narrow if the loaded_weight is not a scalar (0-dim tensor)
          # and we're not loading the full weight
          if not load_full and loaded_weight.ndim > 0:
-@@ -515,6 +538,8 @@
+@@ -537,6 +560,8 @@
          loaded_weight: torch.Tensor,
          tp_rank: int,
      ):
@@ -1711,7 +1711,7 @@
          )
 --- a/vllm/model_executor/layers/quantization/modelopt.py
 +++ b/vllm/model_executor/layers/quantization/modelopt.py
-@@ -1991,6 +1991,7 @@
+@@ -2001,6 +2001,7 @@
              ModelWeightParameter,
              wl,
              input_dim=1,
@@ -1719,7 +1719,7 @@
              output_dim=0,
          )
          # Per-tensor global weight scale.
-@@ -2017,6 +2018,7 @@
+@@ -2027,6 +2028,7 @@
              wl,
              input_dim=1,
              output_dim=0,
@@ -1727,7 +1727,7 @@
              init=float("nan"),
          )
  
-@@ -2307,6 +2309,7 @@
+@@ -2317,6 +2319,7 @@
              ModelWeightParameter,
              scale_loader,
              input_dim=1,
@@ -1737,16 +1737,16 @@
          layer.weight_block_size = [1, MXFP8_BLOCK_SIZE]
 --- a/vllm/model_executor/layers/quantization/nvfp4_csf.py
 +++ b/vllm/model_executor/layers/quantization/nvfp4_csf.py
-@@ -205,11 +205,24 @@
-         device = layer.w13_weight.device
-         e, h, n = self.num_experts, self.hidden_size, self.local_intermediate
-         shapes = ((e, 2 * n, h // 16), (e, h, n // 16))
+@@ -263,11 +263,24 @@
+             (e, round_up(2 * n, 128), h // 16),
+             (e, h, round_up(n // 16, 4)),
+         )
 -        if self.owner.scale_scratch is None:
 +        import os
 +
-+        # Kraken experiment: expand this layer's scales once into its own
-+        # buffers and run it as plain NVFP4 (no per-call CSF decode). Costs the
-+        # expanded scales (~156 MB/layer at TP3); the compressed planes are freed.
++        # Kraken: expand this layer's scales once into its own buffers and run
++        # it as plain NVFP4 (no per-call CSF decode). Costs the expanded scales
++        # (~156 MB/layer at TP3); the compressed planes are freed.
 +        self.resident_scales = (
 +            not self.use_a16 and os.environ.get("VLLM_GLM53_CSF_RESIDENT_SCALES", "0") == "1"
 +        )
@@ -1764,7 +1764,7 @@
          if any(
              tuple(t.shape) != s or t.device != device for t, s in zip(scratch, shapes)
          ):
-@@ -256,6 +269,18 @@
+@@ -316,6 +329,18 @@
              ),
          )
          prepared = fused_moe.prepare_weights(plan=plan, weights=weights)
@@ -1783,7 +1783,7 @@
          quant_builder = (
              nvfp4_w4a16_moe_quant_config if self.use_a16 else nvfp4_moe_quant_config
          )
-@@ -288,7 +313,7 @@
+@@ -348,7 +373,7 @@
              if self.owner.scale_stream is None:
                  self.owner.scale_stream = torch.cuda.Stream(device)
          if not self.use_a16:
@@ -1838,188 +1838,9 @@
      reshaped_x = input.reshape(-1, input.shape[-1])
      out_shape = input.shape[:-1] + (size_n,)
  
---- a/vllm/model_executor/model_loader/nvfp4_csf_loader.py
-+++ b/vllm/model_executor/model_loader/nvfp4_csf_loader.py
-@@ -54,7 +54,10 @@
-     """Read rank-local up/gate/down tensors and unprepared compressed scales."""
-     contract = checkpoint_contract(str(Path(root).resolve()))
-     e, h, n, layers = FAMILIES[contract["family"]]
--    if (num_experts, hidden_size, intermediate_size) != (e, h, n):
-+    logical_intermediate_size = _logical_intermediate_size(
-+        contract["family"], n, intermediate_size, tp_size
-+    )
-+    if (num_experts, hidden_size, logical_intermediate_size) != (e, h, n):
-         raise ValueError("NVFP4-CSF expert geometry differs from the checkpoint family")
-     if layer_index not in layers:
-         raise ValueError("NVFP4-CSF layer is outside the compressed expert inventory")
-@@ -85,13 +88,54 @@
-             device=device,
-             w13_scale_scratch=w13_scale_scratch,
-             w2_scale_scratch=w2_scale_scratch,
-+            logical_intermediate_size=logical_intermediate_size,
-         )
- 
- 
--def _slice_scale_plane(fixed, exceptions, rows, columns, row_slice, column_slice):
--    """Copy aligned compressed extents and rebase exception positions."""
-+def _logical_intermediate_size(family, logical, intermediate_size, tp_size):
-+    """Checkpoint expert width for a (possibly Kraken TP3 MOE_TP-padded) layer.
-+
-+    Kraken TP3 shards the routed experts across TP instead of EP by padding the
-+    2048-channel expert width to 2112 (704 per rank, VLLM_GLM53_TP3_MOE_TP).
-+    The checkpoint keeps 2048; rank-local tails past it load as zeros.
-+    """
-+    import os
-+
-+    if intermediate_size == logical:
-+        return logical
-+    padded = int(os.environ.get("VLLM_GLM53_TP3_MOE_TP", "0") or 0)
-+    if (
-+        family == "glm53_nvfp4"
-+        and tp_size == 3
-+        and padded == intermediate_size
-+        and intermediate_size > logical
-+    ):
-+        return logical
-+    raise ValueError("NVFP4-CSF expert geometry differs from the checkpoint family")
-+
-+
-+def _slice_scale_plane(
-+    fixed,
-+    exceptions,
-+    rows,
-+    columns,
-+    row_slice,
-+    column_slice,
-+    out_rows=None,
-+    out_columns=None,
-+):
-+    """Copy aligned compressed extents and rebase exception positions.
-+
-+    out_rows / out_columns (Kraken TP3 MOE_TP) extend the slice with zero
-+    nibbles: padded rows get zero bases (scale 0) and padded columns keep the
-+    row base. Their FP4 weights are zero, so their scales never contribute.
-+    """
-     r0, r1 = row_slice
-     c0, c1 = column_slice
-+    out_rows = r1 - r0 if out_rows is None else out_rows
-+    out_columns = c1 - c0 if out_columns is None else out_columns
-+    if out_rows < r1 - r0 or out_columns < c1 - c0 or out_rows % 16 or out_columns % 2:
-+        raise ValueError("NVFP4-CSF padded extents must cover the slice in slabs/pairs")
-     if not (0 <= r0 < r1 <= rows and r0 % 16 == r1 % 16 == 0):
-         raise ValueError("NVFP4-CSF row slices require complete 16-row slabs")
-     if not (0 <= c0 < c1 <= columns and c0 % 2 == c1 % 2 == columns % 2 == 0):
-@@ -104,8 +148,16 @@
-         raise ValueError("NVFP4-CSF row bases must be in 0..240")
-     packed = stream[:, 16:].reshape(rows, columns // 2)
-     selected = packed[r0:r1, c0 // 2 : c1 // 2]
-+    if out_rows != r1 - r0 or out_columns != c1 - c0:
-+        padded = np.zeros((out_rows, out_columns // 2), dtype=np.uint8)
-+        padded[: r1 - r0, : (c1 - c0) // 2] = selected
-+        selected = padded
-+        selected_bases = np.zeros((out_rows // 16, 16), dtype=np.uint8)
-+        selected_bases[: (r1 - r0) // 16] = bases[r0 // 16 : r1 // 16]
-+    else:
-+        selected_bases = bases[r0 // 16 : r1 // 16]
-     result = np.concatenate(
--        (bases[r0 // 16 : r1 // 16], selected.reshape((r1 - r0) // 16, -1)), 1
-+        (selected_bases, selected.reshape(out_rows // 16, -1)), 1
-     )
-     words = exceptions.numpy().reshape(-1)
-     positions = words & np.uint32(0xFFFFFF)
-@@ -115,7 +167,7 @@
-         raise ValueError("NVFP4-CSF exception positions must be sorted and unique")
-     rr, cc = positions // columns, positions % columns
-     keep = (rr >= r0) & (rr < r1) & (cc >= c0) & (cc < c1)
--    local_positions = (rr[keep] - r0) * (c1 - c0) + cc[keep] - c0
-+    local_positions = (rr[keep] - r0) * out_columns + cc[keep] - c0
-     selected_words = (words[keep] & np.uint32(0xFF000000)) | local_positions
-     return result.copy(), selected_words.astype(np.uint32)
- 
-@@ -131,6 +183,7 @@
-     device,
-     w13_scale_scratch,
-     w2_scale_scratch,
-+    logical_intermediate_size=None,
- ):
-     """Slice and upload up/gate/down-ordered expert projections.
- 
-@@ -144,10 +197,19 @@
-         raise ValueError("NVFP4-CSF requires experts and 128-aligned hidden channels")
-     first, last = tp_extent(intermediate_size, tp_rank, tp_size, 64)
-     local = last - first
--    w13 = torch.empty(
-+    # Kraken TP3 MOE_TP: the physical width exceeds the checkpoint's; the
-+    # rank-local channels past it are zero weights (and zero/neutral scales).
-+    logical = intermediate_size if logical_intermediate_size is None else logical_intermediate_size
-+    real_last = min(last, logical)
-+    real = max(0, real_last - first)
-+    if real % 64:
-+        raise ValueError("NVFP4-CSF padded TP extents must keep 64-channel slabs")
-+    padded = real != local
-+    alloc = torch.zeros if padded else torch.empty
-+    w13 = alloc(
-         (num_experts, 2 * local, hidden_size // 2), dtype=torch.uint8, device="cpu"
-     )
--    w2 = torch.empty(
-+    w2 = alloc(
-         (num_experts, hidden_size, local // 2), dtype=torch.uint8, device="cpu"
-     )
-     # Model loaders may set BF16 as the default dtype. Calibration belongs to
-@@ -176,9 +238,9 @@
-         ):
-             view = projection.weight
-             expected = (
--                [intermediate_size, hidden_size // 2]
-+                [logical, hidden_size // 2]
-                 if matrix < 2
--                else [hidden_size, intermediate_size // 2]
-+                else [hidden_size, logical // 2]
-             )
-             if view.get_shape() != expected or view.get_dtype() != "U8":
-                 raise ValueError(
-@@ -190,17 +252,21 @@
-                 scalar(projection.input_scale, "input_scale"),
-             )
-             if matrix < 2:
--                w13[expert, matrix * local : (matrix + 1) * local].copy_(
--                    view[first:last, :]
--                )
--                rows, columns = intermediate_size, hidden_size // 16
--                row_slice, column_slice = (first, last), (0, columns)
-+                if real:
-+                    w13[expert, matrix * local : matrix * local + real].copy_(
-+                        view[first:real_last, :]
-+                    )
-+                rows, columns = logical, hidden_size // 16
-+                row_slice, column_slice = (first, real_last), (0, columns)
-+                out_rows, out_columns = local, columns
-                 global13.append(global_scale)
-                 input13.append(input_scale)
-             else:
--                w2[expert].copy_(view[:, first // 2 : last // 2])
--                rows, columns = hidden_size, intermediate_size // 16
--                row_slice, column_slice = (0, rows), (first // 16, last // 16)
-+                if real:
-+                    w2[expert, :, : real // 2].copy_(view[:, first // 2 : real_last // 2])
-+                rows, columns = hidden_size, logical // 16
-+                row_slice, column_slice = (0, rows), (first // 16, real_last // 16)
-+                out_rows, out_columns = rows, local // 16
-                 g2[expert], a2[expert] = global_scale, input_scale
-             fixed, exceptions = _slice_scale_plane(
-                 projection.fixed,
-@@ -209,6 +275,8 @@
-                 columns,
-                 row_slice,
-                 column_slice,
-+                out_rows=out_rows,
-+                out_columns=out_columns,
-             )
-             if matrix < 2:
-                 f13.append(fixed)
 --- a/vllm/model_executor/models/config.py
 +++ b/vllm/model_executor/models/config.py
-@@ -492,6 +492,16 @@
+@@ -593,6 +593,16 @@
          cls = Glm5NextForCausalLMConfig
          text_config: Any = model_config.hf_text_config
          tp_size = parallel_config.tensor_parallel_size
@@ -2172,7 +1993,22 @@
              num_heads=config.num_attention_heads,
              max_position=config.max_position_embeddings,
              num_kv_heads=config.num_key_value_heads,
-@@ -548,6 +605,7 @@
+@@ -423,10 +480,13 @@
+             rope_parameters=config.rope_parameters,
+             prefix=f"{prefix}.self_attn",
+             attn_type=attn_type,
++            # Kraken GLM-5.3 TP3 drafts (glm53_tp3_padding) are padded by our
++            # loaded-size loaders, which also handle stored MXFP8 drafts.
+             pad_heads=config.num_attention_heads
+             != getattr(
+                 config, "original_num_attention_heads", config.num_attention_heads
+-            ),
++            )
++            and not getattr(config, "glm53_tp3_padding", False),
+         )
+         intermediate_size = _dflash_padded_width(
+             config.intermediate_size, get_tensor_model_parallel_world_size()
+@@ -548,6 +608,7 @@
              self.config.vocab_size,
              self.config.hidden_size,
              prefix=maybe_prefix(prefix, "embed_tokens"),
@@ -2180,7 +2016,7 @@
          )
  
          # Masked query slots are fed to the draft as `mask_token_id`. Most DFlash
-@@ -1166,8 +1224,7 @@
+@@ -1166,8 +1227,7 @@
          nn.Module.__init__(self)
          self.draft_model_config = vllm_config.speculative_config.draft_model_config
          self.config = self.draft_model_config.hf_config
@@ -2190,7 +2026,7 @@
          target_layer_num = vllm_config.model_config.get_total_num_hidden_layers()
          self.model = self.model_cls(
              vllm_config=vllm_config,
-@@ -1180,6 +1237,7 @@
+@@ -1180,6 +1240,7 @@
              self.config.draft_vocab_size,
              self.config.hidden_size,
              prefix=maybe_prefix(prefix, "lm_head"),
@@ -2537,8 +2373,8 @@
 +            ),
              bias=True,
              quant_config=quant_config,
-             prefix=f"{prefix}.qkv_proj" if quant_config else f"{prefix}.qkv",
-@@ -168,6 +199,11 @@
+             # ModelOpt recipes name the checkpoint's fused projection qkv.
+@@ -173,6 +204,11 @@
              prefix=f"{prefix}.proj",
              bias=True,
              disable_tp=use_data_parallel,
@@ -2550,7 +2386,7 @@
          )
  
          self.attn = MMEncoderAttention(
-@@ -317,6 +353,10 @@
+@@ -322,6 +358,10 @@
          dim: int,
          num_heads: int,
          mlp_hidden_dim: int,
@@ -2561,7 +2397,7 @@
          swiglu_limit: float,
          norm_layer: partial[nn.Module] | None = None,
          quant_config: QuantizationConfig | None = None,
-@@ -330,13 +370,16 @@
+@@ -335,13 +375,16 @@
          self.attn = Glm5NextVisionAttention(
              embed_dim=dim,
              num_heads=num_heads,
@@ -2579,7 +2415,7 @@
              swiglu_limit=swiglu_limit,
              bias=True,
              quant_config=quant_config,
-@@ -387,13 +430,17 @@
+@@ -392,13 +435,17 @@
          d_model: int,
          context_dim: int,
          swiglu_limit: float,
@@ -2597,7 +2433,7 @@
          self.proj = ColumnParallelLinear(
              self.hidden_size,
              self.hidden_size,
-@@ -401,7 +448,7 @@
+@@ -406,7 +453,7 @@
              gather_output=True,
              quant_config=quant_config,
              prefix=f"{prefix}.proj",
@@ -2606,7 +2442,7 @@
          )
          self.post_projection_norm = nn.LayerNorm(self.hidden_size)
          self.gate_up_proj = MergedColumnParallelLinear(
-@@ -411,6 +458,11 @@
+@@ -416,6 +463,11 @@
              quant_config=quant_config,
              prefix=f"{prefix}.gate_up_proj",
              disable_tp=use_data_parallel,
@@ -2618,7 +2454,7 @@
          )
          self.down_proj = RowParallelLinear(
              context_dim,
-@@ -419,6 +471,11 @@
+@@ -424,6 +476,11 @@
              quant_config=quant_config,
              prefix=f"{prefix}.down_proj",
              disable_tp=use_data_parallel,
@@ -2630,7 +2466,7 @@
          )
          # GLM-5.3-Flash also clamps the merger SwiGLU.
          self.act_fn = SiluAndMulWithClamp(swiglu_limit=swiglu_limit)
-@@ -467,6 +524,25 @@
+@@ -472,6 +529,25 @@
          self.hidden_size = vision_config.hidden_size
          self.num_heads = vision_config.num_heads
  
@@ -2656,7 +2492,7 @@
          self.patch_size = vision_config.patch_size
          self.spatial_merge_size = vision_config.spatial_merge_size
          self.out_hidden_size = vision_config.out_hidden_size
-@@ -487,7 +563,7 @@
+@@ -492,7 +568,7 @@
          )
  
          norm_layer = partial(RMSNorm, eps=norm_eps)
@@ -2665,7 +2501,7 @@
          self.rotary_pos_emb = get_rope(
              head_size=head_dim,
              max_position=_VISION_ROPE_MAX_POSITION,
-@@ -499,7 +575,11 @@
+@@ -504,7 +580,11 @@
                  Glm5NextVisionBlock(
                      dim=self.hidden_size,
                      num_heads=self.num_heads,
@@ -2677,7 +2513,7 @@
                      swiglu_limit=swiglu_limit,
                      norm_layer=norm_layer,
                      quant_config=quant_config,
-@@ -512,6 +592,7 @@
+@@ -517,6 +597,7 @@
          self.merger = Glm5NextPatchMerger(
              d_model=vision_config.out_hidden_size,
              context_dim=vision_config.projection_intermediate_size,
@@ -2685,7 +2521,7 @@
              swiglu_limit=swiglu_limit,
              quant_config=quant_config,
              bias=False,
-@@ -650,7 +731,7 @@
+@@ -655,7 +736,7 @@
          metadata["cu_seqlens"] = MMEncoderAttention.maybe_recompute_cu_seqlens(
              self.attn_backend,
              cu_seqlens,
@@ -3889,7 +3725,7 @@
  class MLADCPManager:
      """Select and own layer-level collective implementations for MLA DCP."""
  
-@@ -1497,6 +1564,45 @@
+@@ -1503,6 +1570,45 @@
          self.padded_num_heads = padded_num_heads
          self._query_gather_fallback = query_gather_fallback
          self._output_reduce_scatter = output_reduce_scatter
@@ -3935,7 +3771,7 @@
  
          self.b12x_transport = None
          if use_b12x:
-@@ -1557,6 +1663,9 @@
+@@ -1563,6 +1669,9 @@
                  head_dim=output_head_dim,
                  is_base_e=is_lse_base_on_e,
              )
@@ -3945,7 +3781,7 @@
          self.query_gather = (
              None
              if use_pcp
-@@ -1702,7 +1811,43 @@
+@@ -1708,7 +1817,43 @@
              )
          return self._gather_query
  
@@ -4129,25 +3965,6 @@
  
      def maybe_register_model(
          self,
---- a/vllm/v1/worker/gpu_model_runner.py
-+++ b/vllm/v1/worker/gpu_model_runner.py
-@@ -232,6 +232,7 @@
-     EncoderTimingStats,
-     clear_layer_kv_caches,
-     is_residual_scattered_for_sp,
-+    log_glm53_tp3_runtime_proof,
-     raise_if_nan_logits,
- )
- from vllm.v1.worker.workspace import current_workspace_manager, lock_workspace
-@@ -5462,6 +5463,8 @@
-             format_gib(self.model_memory_usage),
-             time_after_load - time_before_load,
-         )
-+        log_glm53_tp3_runtime_proof(self.vllm_config, self.model)
-+
- 
-         mm_config = self.model_config.multimodal_config
-         self.is_multimodal_pruning_enabled = (
 --- a/vllm/v1/worker/gpu/model_runner.py
 +++ b/vllm/v1/worker/gpu/model_runner.py
 @@ -190,6 +190,7 @@
@@ -4167,6 +3984,25 @@
  
          # Initialize the components that require the model.
          self.model_state = init_model_state(
+--- a/vllm/v1/worker/gpu_model_runner.py
++++ b/vllm/v1/worker/gpu_model_runner.py
+@@ -232,6 +232,7 @@
+     EncoderTimingStats,
+     clear_layer_kv_caches,
+     is_residual_scattered_for_sp,
++    log_glm53_tp3_runtime_proof,
+     raise_if_nan_logits,
+ )
+ from vllm.v1.worker.workspace import current_workspace_manager, lock_workspace
+@@ -5462,6 +5463,8 @@
+             format_gib(self.model_memory_usage),
+             time_after_load - time_before_load,
+         )
++        log_glm53_tp3_runtime_proof(self.vllm_config, self.model)
++
+ 
+         mm_config = self.model_config.multimodal_config
+         self.is_multimodal_pruning_enabled = (
 --- a/vllm/v1/worker/gpu/spec_decode/eagle/utils.py
 +++ b/vllm/v1/worker/gpu/spec_decode/eagle/utils.py
 @@ -14,6 +14,11 @@
@@ -4282,7 +4118,7 @@
 +        "expert_parallel_size": {3},
 +        "kda_decode_backend": {"b12x"},
 +        "kda_prefill_backend": {"b12x", "flashkda"},
-+        "mm_encoder_tp_mode": {"weights"},
++        "mm_encoder_tp_mode": {"weights", "data"},  # data: replicated quantized vision (csf-qad-2)
 +    }
 +    if os.environ.get("VLLM_GLM53_TP3_MOE_TP") == "2112":
 +        # Verify actual expert partitioning; do not bypass the backend proof.

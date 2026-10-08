@@ -1,7 +1,6 @@
-# Kraken TP3 rebased onto upstream karmic-kraken-beta-20261006-c8c8feeaa8cc4a75
-# (vLLM 23f2a1830) + CHECKPOINT=csf-qad (FP4-CSF experts padded 2048 -> 2112
-# inside the CSF reader for MOE_TP). Release image 20261007.
-ARG BASE_IMAGE=ghcr.io/local-inference-lab/vllm:karmic-kraken-beta-20261006-c8c8feeaa8cc4a75
+# Kraken TP3 rebased onto upstream karmic-kraken-beta (vLLM 89f1ceecd, 2026-10-07/08)
+# + CSF-QAD (fd660d51 and dec48abd quantized-vision) at TP3. Release image 20261008.
+ARG BASE_IMAGE=ghcr.io/local-inference-lab/vllm@sha256:629d097ce4f3ac2ceea86bffb174fec94f5c7fe9bb0a6dbc70e9a05e30b9e54a
 FROM ${BASE_IMAGE}
 COPY src/ /opt/venv/lib/python3.12/site-packages/
 COPY serve-glm53-flash-tp3-kraken.py /usr/local/bin/serve-glm53-flash-tp3-kraken.py

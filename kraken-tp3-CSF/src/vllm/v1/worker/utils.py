@@ -118,7 +118,7 @@ def log_glm53_tp3_runtime_proof(vllm_config: VllmConfig, model: Any) -> None:
         "expert_parallel_size": {3},
         "kda_decode_backend": {"b12x"},
         "kda_prefill_backend": {"b12x", "flashkda"},
-        "mm_encoder_tp_mode": {"weights"},
+        "mm_encoder_tp_mode": {"weights", "data"},  # data: replicated quantized vision (csf-qad-2)
     }
     if os.environ.get("VLLM_GLM53_TP3_MOE_TP") == "2112":
         # Verify actual expert partitioning; do not bypass the backend proof.

@@ -189,7 +189,12 @@ class Glm5NextVisionAttention(nn.Module):
             ),
             bias=True,
             quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj" if quant_config else f"{prefix}.qkv",
+            # ModelOpt recipes name the checkpoint's fused projection qkv.
+            prefix=(
+                f"{prefix}.qkv_proj"
+                if quant_config and not hasattr(quant_config, "quantized_layers")
+                else f"{prefix}.qkv"
+            ),
             disable_tp=use_data_parallel,
         )
         self.proj = RowParallelLinear(

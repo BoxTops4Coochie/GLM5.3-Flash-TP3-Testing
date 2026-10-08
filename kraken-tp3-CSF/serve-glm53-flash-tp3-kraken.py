@@ -39,6 +39,10 @@ CHECKPOINTS = {
     # NVFP4 MTP experts. Needs a Kraken image with the NVFP4-CSF reader and
     # MOE_TP=1 (the experts pad 2048 -> 2112 inside the CSF reader). Experimental.
     'csf-qad': ('local-inference-lab/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD', 'fd660d51d1fc3caae26a4bf31b7451475bbb9bdc'),
+    # Same QAD decoder (byte-identical) + quantized vision tower (MXFP8 attention,
+    # NVFP4 MLP), standard ModelOpt layout with CSF-encoded expert scales. Vision
+    # runs in data mode (replicated) since its quantized widths do not pad at TP3.
+    'csf-qad-2': ('local-inference-lab/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD', 'dec48abd33efa73c3bb7c95b74eee10cad34f9be'),
 }
 
 
@@ -54,7 +58,8 @@ def build_args(env):
 
     checkpoint = value('CHECKPOINT', 'default')
     if checkpoint not in CHECKPOINTS:
-        raise ValueError('CHECKPOINT must be default, uncensored or csf-qad')
+        raise ValueError('CHECKPOINT must be default, uncensored, csf-qad or csf-qad-2')
+    csf = checkpoint.startswith('csf-qad')
     model, revision = CHECKPOINTS[checkpoint]
     for key, expected in [('MODEL', model), ('MODEL_REVISION', revision)]:
         if env.get(key) and env[key] != expected:
@@ -84,11 +89,13 @@ def build_args(env):
     # MOE_TP=1 is qualified at DCP1; DCP3 is an experimental combination.
     # MOE_TP=1 is qualified for default/MTP/DCP1; DCP3 and the uncensored checkpoint
     # (Marlin TP experts) are experimental.
-    if moe_tp == '1' and (mode != 'mtp' or dcp not in ('1', '3')):
-        raise ValueError('MOE_TP=1 is supported only with MODE=mtp and DCP=1 (DCP=3 experimental)')
-    if checkpoint == 'csf-qad' and (mode != 'mtp' or moe_tp != '1'):
-        raise ValueError('CHECKPOINT=csf-qad needs MODE=mtp and MOE_TP=1 (FP4-CSF experts run on B12X without EP)')
-    if checkpoint == 'csf-qad':
+    # csf-qad also allows DFlash2 (experimental): its experts need MOE_TP=1.
+    moe_tp_modes = ('mtp', 'dflash2') if csf else ('mtp',)
+    if moe_tp == '1' and (mode not in moe_tp_modes or dcp not in ('1', '3')):
+        raise ValueError('MOE_TP=1 is supported only with MODE=mtp (csf-qad: mtp or dflash2) and DCP=1 or 3')
+    if csf and (mode not in ('mtp', 'dflash2') or moe_tp != '1'):
+        raise ValueError('CHECKPOINT=csf-qad needs MODE=mtp or dflash2 and MOE_TP=1 (FP4-CSF experts run on B12X without EP)')
+    if csf:
         # CSF_ACTIVATIONS: a4 (default; W4A4 like the original checkpoint on
         # FlashInfer, ~10% faster decode) or a16 (upstream's W4A16, more exact).
         # CSF_RESIDENT_SCALES: 1 (default) expands expert scales once per layer
@@ -116,8 +123,8 @@ def build_args(env):
         sizes = [n for n in (1, 2, 4, 8, 16, 32, 40, 48, 64, 96, 128, 192, 256) if n < maximum]
         # Exact intermediate batches: measured at default/DCP1/graph32/8 slots.
         # Other checkpoints, DCP3, custom maxima and explicit ladders retain their policy.
-        # csf-qad: same ladder, C3 +2.1% (2026-10-06); C1/C8 sizes are unchanged.
-        if checkpoint in ('default', 'csf-qad') and dcp == '1' and maximum == 32 and positive('MAX_NUM_SEQS', 8) == 8:
+        # csf-qad*: the same measured ladder as the default checkpoint (C1/C8 sizes unchanged).
+        if (checkpoint == 'default' or csf) and dcp == '1' and maximum == 32 and positive('MAX_NUM_SEQS', 8) == 8:
             if mode == 'off':
                 sizes = [1, 2, 3, 4, 5, 6, 7, 8, 16]
             elif mode == 'mtp' and draft_tokens == 3:
@@ -156,15 +163,15 @@ def build_args(env):
             '--served-model-name', value('SERVED_MODEL_NAME', 'GLM-5.3-Flash-TP3'),
             '--default-chat-template-kwargs', json.dumps({'reasoning_effort': reasoning, 'clear_thinking': clear == 'true'}),
             '--override-generation-config', '{"temperature":1.0,"top_p":0.95}',
-            '--mm-encoder-tp-mode', 'weights']
+            '--mm-encoder-tp-mode', 'data' if checkpoint == 'csf-qad-2' else 'weights']
     if moe_tp == '1':
         args.remove('--enable-expert-parallel')
         # MOE_TP_BACKEND: TP-expert MoE kernels. Defaults: flashinfer_cutlass
         # (default checkpoint), marlin (uncensored). b12x is experimental.
-        backend = value('MOE_TP_BACKEND', {'uncensored': 'marlin', 'csf-qad': 'b12x'}.get(checkpoint, 'flashinfer_cutlass'))
+        backend = value('MOE_TP_BACKEND', 'marlin' if checkpoint == 'uncensored' else 'b12x' if csf else 'flashinfer_cutlass')
         if backend not in ('flashinfer_cutlass', 'marlin', 'b12x'):
             raise ValueError('MOE_TP_BACKEND must be flashinfer_cutlass, marlin or b12x')
-        if checkpoint == 'csf-qad' and backend != 'b12x':
+        if csf and backend != 'b12x':
             raise ValueError('CHECKPOINT=csf-qad decodes its compressed experts on b12x only')
         args[args.index('--moe-backend') + 1] = backend
     args += ['--cudagraph-capture-sizes', *map(str, sizes)]
@@ -202,6 +209,9 @@ def build_args(env):
     if checkpoint == 'csf-qad':
         # The CSF budget assumes W4A4 + resident scales; W4A16 or compressed
         # scales leave more room but fall back to the same (safe) budget.
+        budgets = {} if lmcache == 'l1' else KV_RECLAIM_BYTES_CSF
+    elif checkpoint == 'csf-qad-2':
+        # Same model memory as csf-qad (60.93 GiB/GPU with resident scales).
         budgets = {} if lmcache == 'l1' else KV_RECLAIM_BYTES_CSF
     elif checkpoint == 'uncensored':
         budgets = {} if lmcache == 'l1' else KV_RECLAIM_BYTES_UNCENSORED

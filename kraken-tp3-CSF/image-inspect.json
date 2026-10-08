@@ -1,17 +1,16 @@
 [
     {
-        "Id": "sha256:b024e106a5448970fda30331cf64a2a1c209225a14e534bbf54c3030cfeaf744",
+        "Id": "sha256:9b25ca9429c941641b9c053555e531f4d3b73eb503f71937858ba13144b05c1b",
         "RepoTags": [
-            "azallaza/glm53-kraken-tp3:20261007",
-            "glm53-kraken-tp3:20261007",
-            "glm53-kraken-tp3:rebase-20261006"
+            "azallaza/glm53-kraken-tp3:20261008",
+            "glm53-kraken-tp3:20261008"
         ],
         "RepoDigests": [
-            "azallaza/glm53-kraken-tp3@sha256:b024e106a5448970fda30331cf64a2a1c209225a14e534bbf54c3030cfeaf744",
-            "glm53-kraken-tp3@sha256:b024e106a5448970fda30331cf64a2a1c209225a14e534bbf54c3030cfeaf744"
+            "azallaza/glm53-kraken-tp3@sha256:9b25ca9429c941641b9c053555e531f4d3b73eb503f71937858ba13144b05c1b",
+            "glm53-kraken-tp3@sha256:9b25ca9429c941641b9c053555e531f4d3b73eb503f71937858ba13144b05c1b"
         ],
         "Comment": "buildkit.dockerfile.v0",
-        "Created": "2026-10-07T16:26:19.310285751-04:00",
+        "Created": "2026-10-07T19:48:12.885262011-04:00",
         "Config": {
             "ExposedPorts": {
                 "6006/tcp": {},
@@ -154,7 +153,7 @@
                 "com.nvidia.volumes.needed": "nvidia_driver",
                 "org.opencontainers.image.base.name": "nvcr.io/nvidia/pytorch@sha256:33ef5fc15e8937602d64022209cdb2777b32dadf742f41332023d946041b3c14",
                 "org.opencontainers.image.description": "Model-profile serving over a source-locked NVIDIA PyTorch foundation",
-                "org.opencontainers.image.revision": "a6e819d3f5decd69a8833b5a0b32175bec084035",
+                "org.opencontainers.image.revision": "85cdbc1b86a0b29d438561297245a352fd7f8dae",
                 "org.opencontainers.image.source": "https://github.com/local-inference-lab/blackwell-llm-docker",
                 "org.opencontainers.image.title": "LIL multi-model CUDA 13.4 runtime",
                 "org.opencontainers.image.version": "24.04"
@@ -167,7 +166,7 @@
         },
         "Architecture": "amd64",
         "Os": "linux",
-        "Size": 44143424700,
+        "Size": 44143757191,
         "RootFS": {
             "Type": "layers",
             "Layers": [
@@ -238,28 +237,28 @@
                 "sha256:99c18867259a65fc66949f823f79c441a499e1c6ed05b172a8a3e533d76a6161",
                 "sha256:3f67b7fcc9d6c1d57c551ad681549d9acf7cc55dd220c3c3867eb48b5285954e",
                 "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
-                "sha256:188d7e7f9e6e72ae60b9d029b4fd198a538a294b518b33733acf0de265d4f1c7",
-                "sha256:e1583ba8bc98e2589cca785bd0676deacd17c4701a26b071fac1d56ccb6e4504",
-                "sha256:9bf911a287008fbbcd15e277f781922595a6b45a96524860374624c88f5e9912",
-                "sha256:9fc5d8e8c015418d7011c11e4255ac979d1aea88a6d903d834c856694e3be5ff",
-                "sha256:5f0a1642bd1c4986cfdbcbd47845f2f07f6d9d7b2d88a4c824ea855605a49989",
-                "sha256:875aaa510838b59a8f24b7c8a92b123a4f55e3157e9b76854ec5019ecfa6fc57",
-                "sha256:8f16f1b88e0c2a10b0227a1e42f70e761bcc44bc324f47d833ee2235e222bbd8"
+                "sha256:1f07b390d4383d5fb00ed8539217ac4ff530295264e2d18dff5b059169a60b66",
+                "sha256:e79a491e3e4932aead45239c9ba944374262af5dedd1fcd5355980578982e9a5",
+                "sha256:c466bb38c5aea3ba350cb1213374fe485c7ecbbb92c1227a1f0d1f0c113943b4",
+                "sha256:093a7a8f0cc5a621f2a65560e5a851c294eff87c85b3809ba4c173d2cd086b83",
+                "sha256:36609380c64ea2f848046ad6b40c5bf8d210f6369c9e6686fae910014282f3ac",
+                "sha256:a9059b43a07b08ecdf9f8e787ece6bd48f98556d827a3b6ba00b2f370831fde7",
+                "sha256:c631d35533fe428ab1425d6b7c7291f99f99257da61b1e165e86644a3be3d35c"
             ]
         },
         "Metadata": {
-            "LastTagTime": "2026-10-07T20:26:21.395016422Z"
+            "LastTagTime": "2026-10-07T23:48:15.031435886Z"
         },
         "Descriptor": {
             "mediaType": "application/vnd.oci.image.index.v1+json",
-            "digest": "sha256:b024e106a5448970fda30331cf64a2a1c209225a14e534bbf54c3030cfeaf744",
+            "digest": "sha256:9b25ca9429c941641b9c053555e531f4d3b73eb503f71937858ba13144b05c1b",
             "size": 857
         },
         "Identity": {
             "Build": [
                 {
-                    "Ref": "c0nda43yomuldj1zlqbbl99s5",
-                    "CreatedAt": "2026-10-07T16:26:20.916441764-04:00"
+                    "Ref": "j6z0tq6c4450iu09qn6lvestj",
+                    "CreatedAt": "2026-10-07T19:48:14.570836044-04:00"
                 }
             ]
         }

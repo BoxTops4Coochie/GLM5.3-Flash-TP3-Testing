@@ -1,13 +1,13 @@
-# Kraken TP3 release example, image azallaza/glm53-kraken-tp3:20261007
-# (our TP3 port rebased onto upstream karmic-kraken-beta-20261006-c8c8fe).
-# Defaults: CSF-QAD checkpoint / MTP3 / DCP1 / MOE_TP=1, W4A4 experts with
-# resident scales, KV 4,199,951 tokens (4.01x 1M), top-p 0.95.
-# CHECKPOINT=default serves the original NVFP4 checkpoint on the same image.
+# Kraken TP3 release example, image azallaza/glm53-kraken-tp3:20261008
+# (our TP3 port rebased onto upstream karmic-kraken-beta, vLLM 89f1ceecd).
+# Defaults: CSF-QAD (dec48abd, quantized vision) / MTP3 / DCP1 / MOE_TP=1, W4A4
+# experts with resident scales, KV 4,199,951 tokens (4.01x 1M), top-p 0.95.
+# CHECKPOINT=csf-qad serves fd660d51 (BF16 vision); default = original NVFP4.
 # All source changes are built into the image; the launcher is also mounted.
 # GPU power is a host setting: tested 350W/GPU; never exceed 400W.
 services:
   glm53-kraken-tp3:
-    image: "${GLM53_IMAGE:-azallaza/glm53-kraken-tp3:20261007}"
+    image: "${GLM53_IMAGE:-azallaza/glm53-kraken-tp3:20261008}"
     container_name: glm53-kraken-tp3
     restart: "no"
     # Room for LMCache/vLLM to shut down cleanly. A stale LMCache L1 arena left in
@@ -25,16 +25,18 @@ services:
       - ./serve-glm53-flash-tp3-kraken.py:/usr/local/bin/serve-glm53-flash-tp3-kraken.py:ro
     environment:
       # Set here, in .env, or before `docker compose up -d`.
-      # csf-qad = local-inference-lab/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD@fd660d51
-      #   (same QAD experts, compressed expert scales, MXFP8 attention/shared
-      #   experts; LIL License 1.0). Needs MODE=mtp and MOE_TP=1 (b12x experts).
+      # csf-qad-2 = local-inference-lab/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD@dec48abd:
+      #   QAD experts with compressed scales, MXFP8 attention/shared experts,
+      #   quantized vision tower (MXFP8 attention, NVFP4 MLP; replicated per GPU).
+      # csf-qad = the same checkpoint at fd660d51 (identical decoder, BF16 vision
+      #   sharded across the GPUs). Both: LIL License 1.0; MODE=mtp and MOE_TP=1.
       # default = local-inference-lab/GLM-5.3-Flash-NVFP4@175ae8ce (original).
       # uncensored = orcarouter NVFP4 checkpoint (experimental on this image).
-      CHECKPOINT: "${CHECKPOINT:-csf-qad}"
-      # csf-qad only. a4 = W4A4 experts (default, ~10% faster decode than a16,
+      CHECKPOINT: "${CHECKPOINT:-csf-qad-2}"
+      # csf-qad/csf-qad-2 only. a4 = W4A4 experts (default, ~10% faster decode than a16,
       # quality-qualified); a16 = upstream's W4A16.
       CSF_ACTIVATIONS: "${CSF_ACTIVATIONS:-a4}"
-      # csf-qad only. 1 = expand expert scales once per layer (+3.7% C1, +2% C8,
+      # csf-qad/csf-qad-2 only. 1 = expand expert scales once per layer (+3.7% C1, +2% C8,
       # ~2.4 GiB/GPU); 0 = keep them compressed (per-call decode, more free memory).
       CSF_RESIDENT_SCALES: "${CSF_RESIDENT_SCALES:-1}"
       MODEL: "${MODEL:-}"
@@ -50,10 +52,10 @@ services:
       MOE_TP: "${MOE_TP:-1}"
       # auto = LM-head BF16 release + shared PyNCCL + explicit KV budget, applied
       # only for MTP3/MOE_TP=1/DCP1 with default slots/batch/graph/length budgets
-      # measured on this image: csf-qad 2215 blocks (4,199,951 KV, 4x1M stress),
-      # default 1700 blocks (3,222,912 KV). DCP3, uncensored and LMCACHE=l1 use
-      # automatic sizing here (csf-qad DCP3: 10,325,560 KV). 0 = off everywhere.
-      # TP-expert MoE backend (MOE_TP=1): empty = b12x (csf-qad, required) /
+      # measured on this image: csf-qad and csf-qad-2 2215 blocks (4,199,951 KV;
+      # 4x1M text + 8x10 large-image stress), default 1700 blocks (3,222,912 KV).
+      # DCP3, uncensored and LMCACHE=l1 use automatic sizing. 0 = off everywhere.
+      # TP-expert MoE backend (MOE_TP=1): empty = b12x (csf-qad*, required) /
       # flashinfer_cutlass (default) / marlin (uncensored).
       MOE_TP_BACKEND: "${MOE_TP_BACKEND:-}"
       KV_RECLAIM: "${KV_RECLAIM:-auto}"
@@ -83,7 +85,7 @@ services:
       MAX_NUM_BATCHED_TOKENS: "${MAX_NUM_BATCHED_TOKENS:-4096}"
       # Empty chooses32 for MTP/off or64 for DFlash (covers C8 verification).
       MAX_CUDAGRAPH_CAPTURE_SIZE: "${MAX_CUDAGRAPH_CAPTURE_SIZE:-}"
-      # Empty: finer MTP/off captures for default and csf-qad at DCP1, graph32, 8 slots.
+      # Empty: finer MTP/off captures for default and csf-qad* at DCP1, graph32, 8 slots.
       # Other settings retain their ladder; explicit space-separated lists override.
       CUDAGRAPH_CAPTURE_SIZES: "${CUDAGRAPH_CAPTURE_SIZES:-}"
       MAX_NUM_SEQS: "${MAX_NUM_SEQS:-8}"
@@ -133,7 +135,7 @@ services:
       DRAFT_TOKENS: "${DRAFT_TOKENS:-}"
       # FP8 weight-only decode (Marlin W8A16) for the large BF16 projections:
       # KDA in_proj/o_proj, DSA o_proj/q_b_proj, dense FFN, LM head, MTP draft.
-      # With csf-qad most of these are MXFP8 in the checkpoint already (b12x);
+      # With csf-qad* most of these are MXFP8 in the checkpoint already (b12x);
       # only the dense FFN and LM head remain BF16 and use this path.
       # +11.4% C1 / +8.1% C8 steps/s with PDL and the cutoff. 0 = BF16 as in
       # 20260921. Sub-flags switch parts off individually.
