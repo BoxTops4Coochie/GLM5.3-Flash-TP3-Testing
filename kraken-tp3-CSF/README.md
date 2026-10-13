@@ -11,11 +11,22 @@ vision tower) as well as the previous one (`fd660d51`). Upstream cannot serve ei
 docker pull azallaza/glm53-kraken-tp3:20261008
 ```
 
+**2026-10-13:** the launcher in this folder was updated. Use it in place of the image's copy
+(see [Update 2026-10-13](#update-2026-10-13-launcher-only-image-unchanged)).
+
 Previous images: `azallaza/glm53-kraken-tp3:20261007` (same feature set on upstream 20261006, CSF-QAD `fd660d51` only);
 20260927 (original NVFP4 checkpoint, ~1.5% faster C1 for that checkpoint).
 Host settings: 350 W/GPU (never exceed 400 W), +6000 memory offset.
 
 ## Update 2026-10-13 (launcher only, image unchanged)
+
+> **Pull the latest launcher.** The image on Docker Hub still contains the 2026-10-08 launcher. If you
+> downloaded this folder before 2026-10-13, or run the image without this folder's compose, replace your
+> `serve-glm53-flash-tp3-kraken.py` with the current one from this folder and mount it over the image's
+> copy, as `compose.yaml` does:
+> `-v ./serve-glm53-flash-tp3-kraken.py:/usr/local/bin/serve-glm53-flash-tp3-kraken.py:ro`.
+> Without it, `MAX_NUM_SEQS` above 8 runs without CUDA graphs past 8 streams (~22 tok/s per stream),
+> and 32 slots use automatic KV sizing. No image pull is needed.
 
 `serve-glm53-flash-tp3-kraken.py` in this folder replaces the copy built into the image (the compose
 mounts it). Source, weights and the default 8-slot configuration are unchanged: its command line is
