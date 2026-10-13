@@ -84,11 +84,13 @@ services:
       # Included in this image; larger batches retain existing collectives.
       VLLM_TP3_PCIE_DCP: "${NATIVE_DCP:-1}"
       MAX_NUM_BATCHED_TOKENS: "${MAX_NUM_BATCHED_TOKENS:-4096}"
-      # Empty chooses32 for MTP/off or64 for DFlash (covers C8 verification).
+      # Empty: 32 for MTP/off (MTP above 8 slots: MAX_NUM_SEQS x 4) or 64 for DFlash.
       MAX_CUDAGRAPH_CAPTURE_SIZE: "${MAX_CUDAGRAPH_CAPTURE_SIZE:-}"
       # Empty: finer MTP/off captures for default and csf-qad* at DCP1, graph32, 8 slots.
       # Other settings retain their ladder; explicit space-separated lists override.
       CUDAGRAPH_CAPTURE_SIZES: "${CUDAGRAPH_CAPTURE_SIZES:-}"
+      # 8 (default) or 32: csf-qad* MTP3 has measured KV budgets for both (32 slots:
+      # graph 128, DCP1 3.96x / DCP3 10.0x 1M). Other values use automatic KV sizing.
       MAX_NUM_SEQS: "${MAX_NUM_SEQS:-8}"
       MAX_MODEL_LEN: "${MAX_MODEL_LEN:-1048576}"
       GPU_MEMORY_UTILIZATION: "${GPU_MEMORY_UTILIZATION:-0.95}"

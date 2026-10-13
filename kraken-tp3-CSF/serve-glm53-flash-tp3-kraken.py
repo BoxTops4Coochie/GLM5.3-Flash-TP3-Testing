@@ -31,6 +31,11 @@ KV_RECLAIM_BYTES_L1 = {}  # not re-measured on this base: automatic sizing
 # DCP3 (2026-10-08, 20261008 image, csf-qad-2): 2145 blocks = 10.0x 1M; reclaim frees about
 # what the extra blocks use, so idle free memory stays near automatic sizing's ~4.2 GB.
 KV_RECLAIM_BYTES_CSF = {'1': 2215 * 13888512, '3': 2145 * 13888512}
+# csf-qad* with MAX_NUM_SEQS=32 (graph 128, MTP3), 2026-10-12, csf-qad-2, 350 W: text (3 or 9 x ~892K +
+# 29/23 x ~17.6K, 32 concurrent) and 32 x 10 photos at 6000x4000, 0 preemptions.
+# DCP1 2190 blocks = 4,152,888 tokens (3.96x 1M), min free 1.85 GB (2215 passed at 1.32 GB: too thin).
+# DCP3 2145 blocks = 10,485,760 tokens (10.0x 1M), min free 2.44 GB. Automatic: 3.74M / 9.81M.
+KV_RECLAIM_BYTES_CSF_32 = {'1': 2190 * 13888512, '3': 2145 * 13888512}
 KV_RECLAIM_BYTES_UNCENSORED = {}  # not re-measured on this base: automatic sizing
 
 CHECKPOINTS = {
@@ -116,9 +121,11 @@ def build_args(env):
     if reasoning not in ('low', 'high', 'max') or clear not in ('true', 'false'):
         raise ValueError('REASONING_EFFORT must be low/high/max; CLEAR_THINKING must be true/false')
     # Default graph maximum covers 8 slots x (draft tokens + 1) verify positions.
+    # MTP scales with MAX_NUM_SEQS: a step above the maximum runs without graphs
+    # (~22 tok/s per stream past 8 slots at graph32, reported by the zen recipe).
     default_maximum = 64 if mode == 'dflash2' else 32
-    if mode == 'mtp' and draft_tokens > 3:
-        default_maximum = positive('MAX_NUM_SEQS', 8) * (draft_tokens + 1)
+    if mode == 'mtp':
+        default_maximum = max(32, positive('MAX_NUM_SEQS', 8) * (draft_tokens + 1))
     maximum = positive('MAX_CUDAGRAPH_CAPTURE_SIZE', default_maximum)
     sizes = value('CUDAGRAPH_CAPTURE_SIZES', '')
     if not sizes:
@@ -134,6 +141,9 @@ def build_args(env):
         # Preserve the measured default ladder (DFlash graph64 excludes40/48).
         if maximum == 64:
             sizes = [1, 2, 4, 8, 16, 32]
+        # More than 8 MTP3 slots: keep the measured <=32 ladder, sparse above it.
+        if (checkpoint == 'default' or csf) and mode == 'mtp' and draft_tokens == 3 and maximum > 32:
+            sizes = [1, 2, 4, 8, 12, 16, 20, 24, 28, 32] + [n for n in (48, 64, 96, 128, 192, 256) if n < maximum]
         sizes.append(maximum)
     else:
         if not all(re.fullmatch(r'[1-9][0-9]*', s) for s in sizes.split()):
@@ -219,19 +229,24 @@ def build_args(env):
         budgets = {} if lmcache == 'l1' else KV_RECLAIM_BYTES_UNCENSORED
     else:
         budgets = KV_RECLAIM_BYTES_L1 if lmcache == 'l1' else KV_RECLAIM_BYTES_BY_DCP
-    tested = (mode == 'mtp' and draft_tokens == 3 and dcp in budgets and moe_tp == '1'
-              and positive('MAX_NUM_SEQS', 8) == 8 and positive('MAX_NUM_BATCHED_TOKENS', 4096) == 4096
-              and maximum == 32 and not env.get('CUDAGRAPH_CAPTURE_SIZES')
-              and positive('MAX_MODEL_LEN', 1048576) == 1048576
-              and value('GPU_MEMORY_UTILIZATION', '0.95') == '0.95')
+    # Budgets exist for 8 slots (graph 32) and, for csf-qad*, 32 slots (graph 128).
+    slots = positive('MAX_NUM_SEQS', 8)
+    if slots == 32:
+        budgets = KV_RECLAIM_BYTES_CSF_32 if csf and lmcache != 'l1' else {}
     kv_bytes = value('KV_CACHE_MEMORY_BYTES', '')
     if kv_bytes and not re.fullmatch(r'[1-9][0-9]*', kv_bytes):
         raise ValueError('KV_CACHE_MEMORY_BYTES must be a positive integer')
+    tested = (mode == 'mtp' and draft_tokens == 3 and moe_tp == '1'
+              and dcp in budgets
+              and (slots, maximum) in ((8, 32), (32, 128)) and positive('MAX_NUM_BATCHED_TOKENS', 4096) == 4096
+              and not env.get('CUDAGRAPH_CAPTURE_SIZES')
+              and positive('MAX_MODEL_LEN', 1048576) == 1048576
+              and value('GPU_MEMORY_UTILIZATION', '0.95') == '0.95')
     if reclaim == 'auto' and tested:
         args += ['--kv-cache-memory-bytes', kv_bytes or str(budgets[dcp])]
     elif kv_bytes:
         raise ValueError('KV_CACHE_MEMORY_BYTES is only accepted with KV_RECLAIM=auto in the tested '
-                         'default/MTP3/DCP1 or DCP3 with MOE_TP=1 configuration')
+                         'default/MTP3/DCP1 or DCP3 with MOE_TP=1 configuration (8 slots; csf-qad* also 32 slots)')
     env['_GLM53_KV_RECLAIM_ACTIVE'] = '1' if reclaim == 'auto' and tested else '0'
     return args
 

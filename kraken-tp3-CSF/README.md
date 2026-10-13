@@ -15,6 +15,30 @@ Previous images: `azallaza/glm53-kraken-tp3:20261007` (same feature set on upstr
 20260927 (original NVFP4 checkpoint, ~1.5% faster C1 for that checkpoint).
 Host settings: 350 W/GPU (never exceed 400 W), +6000 memory offset.
 
+## Update 2026-10-13 (launcher only, image unchanged)
+
+`serve-glm53-flash-tp3-kraken.py` in this folder replaces the copy built into the image (the compose
+mounts it). Source, weights and the default 8-slot configuration are unchanged: its command line is
+identical to the original launcher's.
+
+| Change | Effect |
+| --- | --- |
+| The MTP CUDA graph maximum now follows `MAX_NUM_SEQS` (slots x 4; was fixed at 32 rows = 8 MTP3 slots). Found by [shihanqu/RTX-Pro-6000-Recipes](https://github.com/shihanqu/RTX-Pro-6000-Recipes/tree/main/glm53-kraken-tp3-dcp3-zen). | Above 8 slots, steps no longer run without CUDA graphs. 32 slots at C12, 32K: 999 tok/s, against 160 tok/s with the old launcher |
+| Graph ladder above 32 rows for default/csf-qad* MTP3: the measured 1-32 ladder plus 48, 64, 96, 128 | C1 within ~1% of the 8-slot setup; C8 unchanged |
+| KV budgets for csf-qad* at `MAX_NUM_SEQS=32` | DCP1 2190 blocks = **4,152,888 (3.96x 1M)**; DCP3 2145 blocks = **10,485,760 (10.0x 1M)** (automatic sizing: 3.74M / 9.81M) |
+
+32 slots, csf-qad-2, 350 W, 32K context (llm_decode_bench, 30 s cells):
+
+| DCP1 | C1 | C8 | C12 | C16 | C32 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| steps/s | 106.2 | 306.6 | 374.7 | 436.5 | 615.0 |
+| aggregate tok/s | 263-273 | 802 | 999 | 1,155 | 1,633 |
+
+Stress at 32 slots with both budgets, DCP1 and DCP3: 32 concurrent text requests (3 or 9 x ~892K-token
+prompts plus short ones) and 32 requests x 10 photos at 6000x4000, all 32/32, 0 preemptions,
+min free memory 1.85 GB (DCP1) / 2.44 GB (DCP3). Other `MAX_NUM_SEQS` values get the scaled graph
+maximum with automatic KV sizing. The original checkpoint has no 32-slot budget (automatic sizing).
+
 ## What changed since 20261007
 
 | Change | Effect |
@@ -43,6 +67,7 @@ docker compose up -d                                   # csf-qad-2 (dec48abd), M
 CHECKPOINT=csf-qad docker compose up -d                # fd660d51 (BF16 vision)
 CSF_ACTIVATIONS=a16 docker compose up -d               # upstream's W4A16 experts (slower)
 DCP=3 docker compose up -d                             # csf-qad-2 DCP3, 10.0x 1M (2145 blocks)
+MAX_NUM_SEQS=32 docker compose up -d                   # 32 slots, graph 128, 3.96x 1M (DCP=3: 10.0x)
 CHECKPOINT=default docker compose up -d                # original NVFP4 (1700-block budget)
 ```
 
@@ -88,7 +113,8 @@ Long-context retrieval/generation, DCP3 quality tests, DFlash2 quality, uncensor
 ## Files
 
 - `Dockerfile`, `src/` (files changed vs upstream `89f1ceecd`), `lil/` (cache.py TP3 gate + contract
-  hash), `serve-glm53-flash-tp3-kraken.py`, marker JSONs, `compose.yaml` (below).
+  hash), `serve-glm53-flash-tp3-kraken.py` (updated 2026-10-13; mounted over the image's copy), marker JSONs,
+  `compose.yaml` (below).
 - `source.patch`: every source change versus upstream `89f1ceecd` (41 files, +2064/-386).
 - `image-inspect.json`, `build.log`.
 
@@ -102,6 +128,7 @@ Long-context retrieval/generation, DCP3 quality tests, DFlash2 quality, uncensor
 | `MODE` | `mtp` | `mtp`, `dflash2`, `mtp0` |
 | `DRAFT_TOKENS` | empty (= 3 MTP / 7 DFlash2) | `1`-`7`; only the defaults are qualified |
 | `DCP` | `1` | `1`, `3` |
+| `MAX_NUM_SEQS` | `8` | `8`, `32` (csf-qad* KV budgets); other values use automatic KV sizing |
 | `MOE_TP` | `1` | `1` (required for csf-qad*), `0` EP3 |
 | `MOE_TP_BACKEND` | empty | `b12x` (csf-qad*), `flashinfer_cutlass`, `marlin` |
 | `KV_RECLAIM` | `auto` | `auto`, `0` |
@@ -198,11 +225,13 @@ services:
       # Included in this image; larger batches retain existing collectives.
       VLLM_TP3_PCIE_DCP: "${NATIVE_DCP:-1}"
       MAX_NUM_BATCHED_TOKENS: "${MAX_NUM_BATCHED_TOKENS:-4096}"
-      # Empty chooses32 for MTP/off or64 for DFlash (covers C8 verification).
+      # Empty: 32 for MTP/off (MTP above 8 slots: MAX_NUM_SEQS x 4) or 64 for DFlash.
       MAX_CUDAGRAPH_CAPTURE_SIZE: "${MAX_CUDAGRAPH_CAPTURE_SIZE:-}"
       # Empty: finer MTP/off captures for default and csf-qad* at DCP1, graph32, 8 slots.
       # Other settings retain their ladder; explicit space-separated lists override.
       CUDAGRAPH_CAPTURE_SIZES: "${CUDAGRAPH_CAPTURE_SIZES:-}"
+      # 8 (default) or 32: csf-qad* MTP3 has measured KV budgets for both (32 slots:
+      # graph 128, DCP1 3.96x / DCP3 10.0x 1M). Other values use automatic KV sizing.
       MAX_NUM_SEQS: "${MAX_NUM_SEQS:-8}"
       MAX_MODEL_LEN: "${MAX_MODEL_LEN:-1048576}"
       GPU_MEMORY_UTILIZATION: "${GPU_MEMORY_UTILIZATION:-0.95}"
