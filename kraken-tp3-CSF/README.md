@@ -37,11 +37,13 @@ Host settings: 350 W/GPU (never exceed 400 W), +6000 memory offset.
 
 | | C1 | C8 | C16 | C20 | C28 | C32 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| decode steps/s | 112.9-114.6 | 306-317 | 454-466 | 485-489 | 577-591 | 611-633 |
-| aggregate tok/s | 283-314 | 807-831 | 1,193-1,222 | 1,287-1,300 | 1,551-1,588 | 1,642-1,696 |
-| 20261008 + 10-13 launcher, tok/s | 263-273 | 802 | 1,155-1,223 | 1,170 | 1,410-1,433 | 1,633-1,689 |
+| DCP1 decode steps/s | 112.9-114.6 | 306-317 | 454-466 | 485-489 | 577-591 | 611-633 |
+| DCP1 aggregate tok/s | 283-314 | 807-831 | 1,193-1,222 | 1,287-1,300 | 1,551-1,588 | 1,642-1,696 |
+| DCP3 decode steps/s | 106.6-107.9 | 290.1-303 | 432.1-440.5 | — | — | 567.4-578.6 |
+| DCP3 aggregate tok/s | 266-280 | 768-795 | 1,138-1,178 | — | — | 1,517-1,526 |
+| 20261008 + 10-13 launcher, DCP1 tok/s | 263-273 | 802 | 1,155-1,223 | 1,170 | 1,410-1,433 | 1,633-1,689 |
 
-C1/C8/C16/C32: user runs on this image. C20/C28: the graph-ladder A/B on the same code (GEMV overlay),
+DCP1 KV 4,152,888 (3.96x 1M), DCP3 KV 10,485,760 (10.0x 1M). C1/C8/C16/C32: user runs on this image. C20/C28: the graph-ladder A/B on the same code (GEMV overlay),
 llm_decode_bench 30 s cells; these are where the finer ladder helps (the 20261008 ladder padded them to 96/128 rows).
 
 ## Quality and stress (this image's code: GEMV + 32 slots + fine ladder + 1 MB)
