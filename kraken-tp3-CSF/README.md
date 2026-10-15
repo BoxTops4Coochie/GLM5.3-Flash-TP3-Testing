@@ -33,15 +33,16 @@ Host settings: 350 W/GPU (never exceed 400 W), +6000 memory offset.
 **Default slots 8 -> 32**: up to 32 concurrent streams with CUDA graphs. Costs ~1% C1 and 47K KV tokens at DCP1
 (4,199,951 -> 4,152,888); DCP3 stays 10,485,760 (10.0x 1M). `MAX_NUM_SEQS=8` restores the 20261008 sizing.
 
-## Measurements on this image (32 slots, 350 W, 32K, llm_decode_bench 30 s cells)
+## Measurements on this image (32 slots, 350 W, 32K context)
 
 | | C1 | C8 | C16 | C20 | C28 | C32 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| decode steps/s | 113.8 | 313.1 | — | — | — | 615.7 |
-| aggregate tok/s | 282 | 822 | 1,176-1,225 | 1,287-1,300 | 1,551-1,588 | 1,640-1,677 |
+| decode steps/s | 112.9-114.6 | 306-317 | 454-466 | 485-489 | 577-591 | 611-633 |
+| aggregate tok/s | 283-314 | 807-831 | 1,193-1,222 | 1,287-1,300 | 1,551-1,588 | 1,642-1,696 |
 | 20261008 + 10-13 launcher, tok/s | 263-273 | 802 | 1,155-1,223 | 1,170 | 1,410-1,433 | 1,633-1,689 |
 
-C16-C28 from the ladder A/B on the same configuration (GEMV overlay = this image's code).
+C1/C8/C16/C32: user runs on this image. C20/C28: the graph-ladder A/B on the same code (GEMV overlay),
+llm_decode_bench 30 s cells; these are where the finer ladder helps (the 20261008 ladder padded them to 96/128 rows).
 
 ## Quality and stress (this image's code: GEMV + 32 slots + fine ladder + 1 MB)
 
