@@ -1,16 +1,17 @@
 [
     {
-        "Id": "sha256:44c2d27ec0269e4620895a3ce21f639ee93f9e4d9b935e896ed52a3a6900c486",
+        "Id": "sha256:c62012f9a7f1ea5dbef978bfe3d6234a7d76f22e8532000936f08eda3e6ff78a",
         "RepoTags": [
-            "azallaza/glm53-kraken-tp3:20261008",
-            "glm53-kraken-tp3:20261008"
+            "azallaza/glm53-kraken-tp3:20261015",
+            "glm53-kraken-tp3:20261015",
+            "glm53-kraken-tp3:20261015-rc"
         ],
         "RepoDigests": [
-            "azallaza/glm53-kraken-tp3@sha256:44c2d27ec0269e4620895a3ce21f639ee93f9e4d9b935e896ed52a3a6900c486",
-            "glm53-kraken-tp3@sha256:44c2d27ec0269e4620895a3ce21f639ee93f9e4d9b935e896ed52a3a6900c486"
+            "azallaza/glm53-kraken-tp3@sha256:c62012f9a7f1ea5dbef978bfe3d6234a7d76f22e8532000936f08eda3e6ff78a",
+            "glm53-kraken-tp3@sha256:c62012f9a7f1ea5dbef978bfe3d6234a7d76f22e8532000936f08eda3e6ff78a"
         ],
         "Comment": "buildkit.dockerfile.v0",
-        "Created": "2026-10-07T22:18:23.839149229-04:00",
+        "Created": "2026-10-14T19:04:14.106149486-04:00",
         "Config": {
             "ExposedPorts": {
                 "6006/tcp": {},
@@ -121,7 +122,9 @@
                 "VLLM_GLM53_TP3_MOE_TP=0",
                 "VLLM_SCHEDULER_UNCAP_PREFILL_ONLY_STEPS=0",
                 "VLLM_TP3_PCIE_DCP=0",
-                "VLLM_USE_FASTOKENS=1"
+                "VLLM_USE_FASTOKENS=1",
+                "VLLM_GLM53_MXFP8_GEMV=1",
+                "VLLM_PCIE_ONESHOT_ALLREDUCE_MAX_SIZE=1MB"
             ],
             "Entrypoint": [
                 "/usr/local/bin/lil-entrypoint"
@@ -166,7 +169,7 @@
         },
         "Architecture": "amd64",
         "Os": "linux",
-        "Size": 44143757386,
+        "Size": 44144062133,
         "RootFS": {
             "Type": "layers",
             "Layers": [
@@ -243,22 +246,25 @@
                 "sha256:30d2285987753a0fcbdd3933afbbe7ca64ca1ebf7a7ae17157fed086005865e5",
                 "sha256:eeaae835c358ad27510c3b770cbe785a35fb53b9a184c178cc7f08a67793e17e",
                 "sha256:1103b34e322410afb86a5e1c6242b09f06f9f40a665cbebffef8b1c146ba7a1f",
-                "sha256:893c859019759d685b188e821c7479e38ec3070d0a050bf99f526cfa5a2b8132"
+                "sha256:893c859019759d685b188e821c7479e38ec3070d0a050bf99f526cfa5a2b8132",
+                "sha256:9cf9fe037f5172467ca3909bd4ca2229dd4afb68109289eb02c09c42e23bb4cf",
+                "sha256:bf566ab76927b237045cf3947e15e0aab28f6850040ba0ae5334ad97777d5a51",
+                "sha256:17eedc925e3fa55b11550f98d22c86eebb237646d538e9a1924a9306e4c11f3c"
             ]
         },
         "Metadata": {
-            "LastTagTime": "2026-10-08T02:18:25.907319457Z"
+            "LastTagTime": "2026-10-15T01:04:04.52554111Z"
         },
         "Descriptor": {
             "mediaType": "application/vnd.oci.image.index.v1+json",
-            "digest": "sha256:44c2d27ec0269e4620895a3ce21f639ee93f9e4d9b935e896ed52a3a6900c486",
+            "digest": "sha256:c62012f9a7f1ea5dbef978bfe3d6234a7d76f22e8532000936f08eda3e6ff78a",
             "size": 857
         },
         "Identity": {
             "Build": [
                 {
-                    "Ref": "jmjrzqw2tkodujyhnv465dbxk",
-                    "CreatedAt": "2026-10-07T22:18:25.467712191-04:00"
+                    "Ref": "wauoatqpmgf5x29v76cn5t687",
+                    "CreatedAt": "2026-10-14T19:04:14.250809296-04:00"
                 }
             ]
         }

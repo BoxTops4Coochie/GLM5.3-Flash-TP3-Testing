@@ -1,13 +1,14 @@
-# Kraken TP3 release example, image azallaza/glm53-kraken-tp3:20261008
-# (our TP3 port rebased onto upstream karmic-kraken-beta, vLLM 89f1ceecd).
+# Kraken TP3 release example, image azallaza/glm53-kraken-tp3:20261015
+# (20261008 + small-row MXFP8 GEMV + 32-slot budgets and finer graph ladder;
+# our TP3 port rebased onto upstream karmic-kraken-beta, vLLM 89f1ceecd).
 # Defaults: CSF-QAD (dec48abd, quantized vision) / MTP3 / DCP1 / MOE_TP=1, W4A4
-# experts with resident scales, KV 4,199,951 tokens (4.01x 1M), top-p 0.95.
+# experts with resident scales, 32 slots, KV 4,152,888 tokens (3.96x 1M), top-p 0.95.
 # CHECKPOINT=csf-qad serves fd660d51 (BF16 vision); default = original NVFP4.
 # All source changes are built into the image; the launcher is also mounted.
 # GPU power is a host setting: tested 350W/GPU; never exceed 400W.
 services:
   glm53-kraken-tp3:
-    image: "${GLM53_IMAGE:-azallaza/glm53-kraken-tp3:20261008}"
+    image: "${GLM53_IMAGE:-azallaza/glm53-kraken-tp3:20261015}"
     container_name: glm53-kraken-tp3
     restart: "no"
     # Room for LMCache/vLLM to shut down cleanly. A stale LMCache L1 arena left in
@@ -84,23 +85,32 @@ services:
       # Included in this image; larger batches retain existing collectives.
       VLLM_TP3_PCIE_DCP: "${NATIVE_DCP:-1}"
       MAX_NUM_BATCHED_TOKENS: "${MAX_NUM_BATCHED_TOKENS:-4096}"
-      # Empty: 32 for MTP/off (MTP above 8 slots: MAX_NUM_SEQS x 4) or 64 for DFlash.
+      # Empty: 32 for MTP/off (MTP above 8 slots: MAX_NUM_SEQS x (DRAFT_TOKENS + 1)) or 64 for DFlash.
       MAX_CUDAGRAPH_CAPTURE_SIZE: "${MAX_CUDAGRAPH_CAPTURE_SIZE:-}"
-      # Empty: finer MTP/off captures for default and csf-qad* at DCP1, graph32, 8 slots.
-      # Other settings retain their ladder; explicit space-separated lists override.
+      # Empty: finer MTP/off captures for default and csf-qad* at DCP1, graph32, 8 slots;
+      # above 8 MTP3 slots every 8 rows (2 streams) to the maximum (+10% C20, +11% C28 vs
+      # the 20261008 48/64/96/128 ladder). Other settings retain their ladder; explicit
+      # space-separated lists override (and turn off the KV budget).
       CUDAGRAPH_CAPTURE_SIZES: "${CUDAGRAPH_CAPTURE_SIZES:-}"
-      # 8 (default) or 32: csf-qad* MTP3 has measured KV budgets for both (32 slots:
-      # graph 128, DCP1 3.96x / DCP3 10.0x 1M). Other values use automatic KV sizing.
-      MAX_NUM_SEQS: "${MAX_NUM_SEQS:-8}"
+      # 32 (default) or 8: csf-qad* MTP3 has measured KV budgets for both. 32 slots:
+      # graph 128, DCP1 4,152,888 (3.96x 1M) / DCP3 10.0x; 8 slots: graph 32, DCP1
+      # 4,199,951 (4.01x) / DCP3 10.0x, ~1% faster C1, at most 8 concurrent streams.
+      # Other values use automatic KV sizing.
+      MAX_NUM_SEQS: "${MAX_NUM_SEQS:-32}"
       MAX_MODEL_LEN: "${MAX_MODEL_LEN:-1048576}"
       GPU_MEMORY_UTILIZATION: "${GPU_MEMORY_UTILIZATION:-0.95}"
       REASONING_EFFORT: "${REASONING_EFFORT:-max}"
       CLEAR_THINKING: "${CLEAR_THINKING:-true}"
 
-      # 256KB keeps C8's 256 KiB all-reduces on the b12x one-shot instead of
-      # the NCCL ring: +3.0% C8 steps/s, neutral at C1 (measured 2026-09-23 on
-      # the FP8 stack). Empty restores the upstream 84KiB cutoff.
-      VLLM_PCIE_ONESHOT_ALLREDUCE_MAX_SIZE: "${VLLM_PCIE_ONESHOT_ALLREDUCE_MAX_SIZE-256KB}"
+      # 1MB keeps decode all-reduces up to 32 slots (128 rows x 4096 BF16 = 1 MiB)
+      # on the b12x one-shot instead of the NCCL ring: C16 78.9 -> 40.7 us/call,
+      # C32 110 -> 79.4 us (~+1% steps/s); 256KB (20261008) covered C8 only.
+      # Prefill-size all-reduces stay on NCCL. Empty = upstream 84KiB.
+      VLLM_PCIE_ONESHOT_ALLREDUCE_MAX_SIZE: "${VLLM_PCIE_ONESHOT_ALLREDUCE_MAX_SIZE-1MB}"
+      # Small-row MXFP8 GEMV for decode steps of <= 8 rows (C1/C2 with MTP3, and
+      # the MTP draft up to 8 streams): reads the packed MXFP8 weights in place,
+      # +5.5% C1 steps/s, C8 neutral. 0 = the b12x dense GEMM for every row count.
+      VLLM_GLM53_MXFP8_GEMV: "${VLLM_GLM53_MXFP8_GEMV:-1}"
 
       # KDA backends. The Kraken profile ships kda_prefill_backend=b12x, which
       # `resolve_kda_prefill_backend` refuses to select under `auto` because it
@@ -128,13 +138,15 @@ services:
       # MTP acceptance-length adaptation. Empty = disabled, the qualified
       # configuration. A positive integer averages accepted draft lengths over
       # that many verification steps and trims the speculative-token count,
-      # with DRAFT_TOKENS as the upper bound. Measured 0.0% at C1, where the
-      # controller never trims; under evaluation at C8.
+      # with DRAFT_TOKENS as the upper bound. Measured 0.0% at C1. Not working on
+      # this image with csf-qad-2: window 32 at 32 slots crashed on the first request
+      # and then failed b12x preparation on restart (LM-head bf16_gemv m3). Leave empty.
       MTP_ADAPTIVE_WINDOW: "${MTP_ADAPTIVE_WINDOW:-}"
       # Speculative tokens per step. Empty = mode default (MODE=mtp 3, dflash2 7);
-      # 1-7 accepted. Qualified: MTP 3 and DFlash2 7. Any other MTP value turns
-      # off the KV reclaim budget (automatic KV sizing) and the measured graph
-      # ladder; above 3 the graph maximum grows to 8 x (tokens + 1).
+      # 1-7 accepted. Qualified: MTP 3 and DFlash2 7. Other MTP values get a graph
+      # ladder at whole stream counts (rows = streams x (tokens + 1)) and automatic
+      # KV sizing (no reclaim budget). Measured at MAX_NUM_SEQS=32: DRAFT_TOKENS=2
+      # tok/s +3.4% C8 / +2.5% C32 vs 3, but slower at C1. Adjust to your load.
       DRAFT_TOKENS: "${DRAFT_TOKENS:-}"
       # FP8 weight-only decode (Marlin W8A16) for the large BF16 projections:
       # KDA in_proj/o_proj, DSA o_proj/q_b_proj, dense FFN, LM head, MTP draft.

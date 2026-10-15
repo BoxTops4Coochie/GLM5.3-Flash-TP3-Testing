@@ -1,1 +1,39 @@
-sha256:44c2d27ec0269e4620895a3ce21f639ee93f9e4d9b935e896ed52a3a6900c486
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 799B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/azallaza/glm53-kraken-tp3:20261008
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [internal] load build context
+#4 transferring context: 50.81kB done
+#4 DONE 0.0s
+
+#5 [1/4] FROM docker.io/azallaza/glm53-kraken-tp3:20261008@sha256:44c2d27ec0269e4620895a3ce21f639ee93f9e4d9b935e896ed52a3a6900c486
+#5 resolve docker.io/azallaza/glm53-kraken-tp3:20261008@sha256:44c2d27ec0269e4620895a3ce21f639ee93f9e4d9b935e896ed52a3a6900c486 0.0s done
+#5 DONE 1.2s
+
+#6 [2/4] COPY src/ /opt/venv/lib/python3.12/site-packages/
+#6 DONE 0.0s
+
+#7 [3/4] COPY serve-glm53-flash-tp3-kraken.py /usr/local/bin/serve-glm53-flash-tp3-kraken.py
+#7 DONE 0.0s
+
+#8 [4/4] RUN chmod +x /usr/local/bin/serve-glm53-flash-tp3-kraken.py &&     /opt/venv/bin/python -m compileall -q /opt/venv/lib/python3.12/site-packages/vllm/model_executor/kernels/linear >/dev/null
+#8 DONE 0.3s
+
+#9 exporting to image
+#9 exporting layers 0.1s done
+#9 exporting manifest sha256:df6cc473ac82af2496bbf9671b23b96c10aca98f1dd7238d33172b6b9787fff8 done
+#9 exporting config sha256:dc49c29dbca4f52cdf45c6491ce5c9b121d8a24b0692da82d41fb5095f3ae4d2 done
+#9 exporting attestation manifest sha256:23559cf800514979bca7744269b1f8599ba0b87472d49b31518a240637a8a101 done
+#9 exporting manifest list sha256:c62012f9a7f1ea5dbef978bfe3d6234a7d76f22e8532000936f08eda3e6ff78a done
+#9 naming to docker.io/library/glm53-kraken-tp3:20261015-rc done
+#9 unpacking to docker.io/library/glm53-kraken-tp3:20261015-rc 0.0s done
+#9 DONE 0.2s

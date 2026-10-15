@@ -1,165 +1,111 @@
-# GLM-5.3 Flash Kraken TP3 — 20261008
+# GLM-5.3 Flash Kraken TP3 — 20261015
 
 This model is based on [GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD](https://huggingface.co/local-inference-lab/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD) by Local Inference Lab, Inc., a non-profit organization, available at <https://huggingface.co/local-inference-lab/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD>. GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD is licensed under the Local Inference Lab License, Version 1.0.
 
-Image: **`azallaza/glm53-kraken-tp3:20261008`** (local `glm53-kraken-tp3:20261008`, `sha256:44c2d27ec0269e4620895a3ce21f639ee93f9e4d9b935e896ed52a3a6900c486`).
-Our GLM-5.3-Flash TP3 port rebased onto upstream `ghcr.io/local-inference-lab/vllm:karmic-kraken-beta`
-(`sha256:629d097c…`, vLLM `89f1ceecd`), serving the newest CSF-QAD revision (`dec48abd`, quantized
-vision tower) as well as the previous one (`fd660d51`). Upstream cannot serve either at TP3.
+Image: **`azallaza/glm53-kraken-tp3:20261015`** (local `glm53-kraken-tp3:20261015`, `sha256:c62012f9a7f1ea5dbef978bfe3d6234a7d76f22e8532000936f08eda3e6ff78a`).
+Built on top of `azallaza/glm53-kraken-tp3:20261008` (`sha256:44c2d27ec026…`): every 20261008 layer is
+reused, so the pull is only the changed files. Same weights, checkpoints and modes as 20261008; the default is now **32 slots** (was 8)
+(see `../kraken-20261008/README.md` for the CSF-QAD details, DCP3, DFlash2 and the other checkpoints).
 
 ```bash
-docker pull azallaza/glm53-kraken-tp3:20261008
+docker pull azallaza/glm53-kraken-tp3:20261015
+HF_CACHE_DIR=/path/to/huggingface docker compose up -d                  # csf-qad-2, MTP3/DCP1, 32 slots, 3.96x 1M
+HF_CACHE_DIR=/path/to/huggingface DCP=3 docker compose up -d            # DCP3, 32 slots, 10.0x 1M
+HF_CACHE_DIR=/path/to/huggingface MAX_NUM_SEQS=8 docker compose up -d   # 8 slots (20261008 default), 4.01x 1M
 ```
 
-**2026-10-13:** the launcher in this folder was updated. Use it in place of the image's copy
-(see [Update 2026-10-13](#update-2026-10-13-launcher-only-image-unchanged)).
-
-Previous images: `azallaza/glm53-kraken-tp3:20261007` (same feature set on upstream 20261006, CSF-QAD `fd660d51` only);
-20260927 (original NVFP4 checkpoint, ~1.5% faster C1 for that checkpoint).
 Host settings: 350 W/GPU (never exceed 400 W), +6000 memory offset.
 
-## Update 2026-10-13 (launcher only, image unchanged)
+## What changed since 20261008
 
-> **Pull the latest launcher.** The image on Docker Hub still contains the 2026-10-08 launcher. If you
-> downloaded this folder before 2026-10-13, or run the image without this folder's compose, replace your
-> `serve-glm53-flash-tp3-kraken.py` with the current one from this folder and mount it over the image's
-> copy, as `compose.yaml` does:
-> `-v ./serve-glm53-flash-tp3-kraken.py:/usr/local/bin/serve-glm53-flash-tp3-kraken.py:ro`.
-> Without it, `MAX_NUM_SEQS` above 8 runs without CUDA graphs past 8 streams (~22 tok/s per stream),
-> and 32 slots use automatic KV sizing. No image pull is needed.
-
-`serve-glm53-flash-tp3-kraken.py` in this folder replaces the copy built into the image (the compose
-mounts it). Source, weights and the default 8-slot configuration are unchanged: its command line is
-identical to the original launcher's.
-
-| Change | Effect |
+| Change | Effect (csf-qad-2, 350 W, 32K context) |
 | --- | --- |
-| The MTP CUDA graph maximum now follows `MAX_NUM_SEQS` (slots x 4; was fixed at 32 rows = 8 MTP3 slots). Found by [shihanqu/RTX-Pro-6000-Recipes](https://github.com/shihanqu/RTX-Pro-6000-Recipes/tree/main/glm53-kraken-tp3-dcp3-zen). | Above 8 slots, steps no longer run without CUDA graphs. 32 slots at C12, 32K: 999 tok/s, against 160 tok/s with the old launcher |
-| Graph ladder above 32 rows for default/csf-qad* MTP3: the measured 1-32 ladder plus 48, 64, 96, 128 | C1 within ~1% of the 8-slot setup; C8 unchanged |
-| KV budgets for csf-qad* at `MAX_NUM_SEQS=32` | DCP1 2190 blocks = **4,152,888 (3.96x 1M)**; DCP3 2145 blocks = **10,485,760 (10.0x 1M)** (automatic sizing: 3.74M / 9.81M) |
+| **Small-row MXFP8 GEMV** for decode steps of <= 8 rows (C1/C2 with MTP3, and the MTP draft up to 8 streams). Reads the packed MXFP8 weights in place (exact E4M3 -> BF16 conversion, scale folded in), compiled at load. `VLLM_GLM53_MXFP8_GEMV=0` turns it off | **+5.5% C1** decode steps/s (113.6 vs 107.6); C8 neutral |
+| MTP CUDA graph maximum follows `MAX_NUM_SEQS` (slots x (draft + 1)); was fixed at 32 rows (the 2026-10-13 launcher fix, now built in). Found by [shihanqu/RTX-Pro-6000-Recipes](https://github.com/shihanqu/RTX-Pro-6000-Recipes/tree/main/glm53-kraken-tp3-dcp3-zen) | above 8 slots steps keep CUDA graphs (C12 160 -> 999 tok/s) |
+| **Finer graph ladder above 32 rows**: every 8 rows (2 MTP3 streams) up to 128, instead of 48/64/96/128 | **+10% C20, +11% C28** tok/s (no padding to the next graph); C16/C32 unchanged |
+| KV budgets for csf-qad* at `MAX_NUM_SEQS=32` | DCP1 **4,152,888 (3.96x 1M)**, DCP3 **10,485,760 (10.0x 1M)** |
+| One-shot all-reduce cutoff 256 KB -> **1 MB** (compose default and image ENV) | decode all-reduces up to 32 slots stay on the b12x one-shot: C16 78.9 -> 40.7 us/call, C32 110 -> 79.4 us (~+1%) |
+| `DRAFT_TOKENS` other than 3: graph ladder at whole stream counts | e.g. `DRAFT_TOKENS=2` at 32 slots: +3.4% C8 / +2.5% C32 tok/s, slower at C1. Not qualified; adjust to your load |
 
-32 slots, csf-qad-2, 350 W, 32K context (llm_decode_bench, 30 s cells):
+`source.patch`: the 4 files that differ from the 20261008 image (`glm53_mxfp8_gemv.py` new, `mxfp8/b12x.py`,
+`b12x_blockscaled.py`, the launcher). With `MAX_NUM_SEQS=8` the command line is the 20261008 one plus the GEMV.
 
-| DCP1 | C1 | C8 | C12 | C16 | C32 |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| steps/s | 106.2 | 306.6 | 374.7 | 436.5 | 615.0 |
-| aggregate tok/s | 263-273 | 802 | 999 | 1,155 | 1,633 |
+**Default slots 8 -> 32**: up to 32 concurrent streams with CUDA graphs. Costs ~1% C1 and 47K KV tokens at DCP1
+(4,199,951 -> 4,152,888); DCP3 stays 10,485,760 (10.0x 1M). `MAX_NUM_SEQS=8` restores the 20261008 sizing.
 
-Stress at 32 slots with both budgets, DCP1 and DCP3: 32 concurrent text requests (3 or 9 x ~892K-token
-prompts plus short ones) and 32 requests x 10 photos at 6000x4000, all 32/32, 0 preemptions,
-min free memory 1.85 GB (DCP1) / 2.44 GB (DCP3). Other `MAX_NUM_SEQS` values get the scaled graph
-maximum with automatic KV sizing. The original checkpoint has no 32-slot budget (automatic sizing).
+## Measurements on this image (32 slots, 350 W, 32K, llm_decode_bench 30 s cells)
 
-## What changed since 20261007
+| | C1 | C8 | C16 | C20 | C28 | C32 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| decode steps/s | 113.8 | 313.1 | — | — | — | 615.7 |
+| aggregate tok/s | 282 | 822 | 1,176-1,225 | 1,287-1,300 | 1,551-1,588 | 1,640-1,677 |
+| 20261008 + 10-13 launcher, tok/s | 263-273 | 802 | 1,155-1,223 | 1,170 | 1,410-1,433 | 1,633-1,689 |
 
-| Change | Effect |
-| --- | --- |
-| Rebased onto upstream vLLM `89f1ceecd` (3-way merge; conflicts only in the CSF expert path) | newer vLLM/b12x/LMCache |
-| Upstream's CSF loader now pads TP experts generically (added for GLM-5.3 744B TP6); it serves our MOE_TP 2048 -> 2112 (704/rank) unchanged | our own CSF padding patch dropped |
-| **`CHECKPOINT=csf-qad-2`** = CSF-QAD `dec48abd`: identical QAD decoder, vision tower stored quantized (MXFP8 attention, NVFP4 MLP/merger) in a standard ModelOpt layout | new default |
-| Vision tower in data mode for csf-qad-2 (replicated per GPU; its quantized widths do not pad at TP3); runtime proof accepts data mode | same memory as the sharded BF16 tower |
-| DFlash2 at TP3 fixed (GLM-5.3 TP3 drafts use our loaded-size padding instead of upstream's BF16-only path); csf-qad* also allow MODE=dflash2 | DFlash2 works again (MTP3 remains faster) |
+C16-C28 from the ladder A/B on the same configuration (GEMV overlay = this image's code).
 
-## Modes and measurements (350 W)
+## Quality and stress (this image's code: GEMV + 32 slots + fine ladder + 1 MB)
 
-| Setting | KV tokens | Decode steps/s @32K C1 / C8 | Prefill 32K | Status |
-| --- | ---: | --- | --- | --- |
-| **csf-qad-2 MTP3 DCP1** (default) | **4,199,951 (4.01x 1M)** | 107-108 / — (user run) | ~10.5K tok/s | quality + stress below |
-| **csf-qad-2 MTP3 DCP3** | **10,485,760 (10.00x 1M)** | 98.4 / 271.1 | 10,185 | image + 8x1M stress, 8/8 |
-| csf-qad MTP3 DCP1 (`fd660d51`) | 4,199,951 (4.01x) | 105.4 / 306.0 | — | regression-checked on this image |
-| csf-qad on 20261007, for reference | 4,199,951 | 105-108 / 307-315 | 10,825 | fully qualified |
-| csf-qad-2 **DFlash2** (`MODE=dflash2`) | 3,344,754 (auto) | 81.8 (accept 2.60) = 213 tok/s | — | 8/8 |
-| original NVFP4 **DFlash2** (`CHECKPOINT=default MODE=dflash2 MOE_TP=0`) | 3,278,412 (auto) | 84.1 (accept 2.45) = 206 tok/s | — | 8/8 (20260927: 205.6 tok/s) |
-
-MTP3 (~270 tok/s C1 for csf-qad-2) remains faster than DFlash2 on every checkpoint.
-
-```bash
-docker compose up -d                                   # csf-qad-2 (dec48abd), MTP3/DCP1, 4.01x 1M
-CHECKPOINT=csf-qad docker compose up -d                # fd660d51 (BF16 vision)
-CSF_ACTIVATIONS=a16 docker compose up -d               # upstream's W4A16 experts (slower)
-DCP=3 docker compose up -d                             # csf-qad-2 DCP3, 10.0x 1M (2145 blocks)
-MAX_NUM_SEQS=32 docker compose up -d                   # 32 slots, graph 128, 3.96x 1M (DCP=3: 10.0x)
-CHECKPOINT=default docker compose up -d                # original NVFP4 (1700-block budget)
-```
-
-## Quality and stress on this image (csf-qad-2)
-
-| Test | csf-qad (`fd660d51`) on 20261007 | **csf-qad-2 on 20261008** |
+| Test | 20261008 | **20261015** |
 | --- | --- | --- |
-| lavd, 30 runs C8 | 30 exact | **30 exact / 0 wrong / 0 truncated** |
-| hotel-lights, 30 runs C8 (seed 103) | 28 exact / 2 wrong (58/60 over two batches) | **28 exact / 1 wrong / 1 truncated** |
-| Vision basic (OCR, text, counting, colors, chart), T=0/T=1 | 120/120 (BF16 vision) | **120/120** |
-| Vision hard (small OCR, dense count, chart values, shades) | 117/120 | **117/120** |
+| lavd, 30 runs C8 | 30 exact | **30 exact** |
+| lavd, 30 runs C2 (target model on the GEMV) | — | **30 exact** |
+| hotel-lights, 30 runs C8 (seed 103) | 28 exact / 1 wrong / 1 truncated | **27 exact / 3 wrong** |
+| hotel-lights, 30 runs C2 (target model on the GEMV) | — | **28 exact / 2 wrong** |
+| Retrieval 128K / 900K | pass / pass (20261007) | **pass / pass** |
+| Long generation at 826K, seeds 201-204 | 4/4 clean, worst 8-gram repeat 0.0044 (20261007) | **4/4 clean, worst 0.0017** |
 | Arithmetic | 8/8 | 8/8 |
 
-| Stress (2215 blocks) | Result | Min free |
+hotel-lights has ranged 27-30 exact across earlier qualified configurations; at C8 the GEMV only serves the
+MTP draft, which cannot change the output distribution under standard rejection sampling.
+
+| Stress, 32 slots, fine ladder (DCP1 2190 blocks unless noted) | Result | Min free |
 | --- | --- | ---: |
-| 8 concurrent x 10 photos 6000x4000 (79.6K prompt tokens each) | all OK | 2.0 GB |
-| 4 x ~891K prompts + 120K decode each (right after the image stress) | all OK, 0 preemptions, peak KV 90% | 1.44 GB (GPU 0) |
-| DCP3 (2145 blocks): 8 concurrent x 10 photos 6000x4000 | all OK | 2.44 GB |
-| DCP3 (2145 blocks): 8 x ~891K prompts + 120K decode each | 8/8 OK, 0 preemptions, peak KV 56% | 2.92 GB |
+| 32 concurrent x 10 photos 6000x4000 | 32/32 OK, 0 preemptions | 1.69 GB |
+| 3 x ~890K + 29 x ~14K prompts, 24K/16K decode | 32/32 OK, 0 preemptions, peak KV 74% | 1.69 GB |
+| DCP3 2145 blocks (10,485,760 KV): 32 concurrent x 10 photos 6000x4000 | 32/32 OK, 0 preemptions | 2.24 GB |
+| DCP3: 9 x ~890K + 23 x ~14K prompts (9.18M prompt tokens) | 32/32 OK, 0 preemptions | 2.24 GB |
 
-DCP3 decode steps/s (cooled, 0/32K/128K): C1 99.8 / 98.4 / 96.4, C8 280.0 / 271.1 / 266.5;
-prefill 32K / 128K 10,185 / 9,786 tok/s (csf-qad DCP3 on 20261007: C1 101.6 / 99.7 / 97.6,
-C8 275.0 / 274.8 / 263.5).
+The 8-slot budgets (DCP1 2215 blocks / DCP3 2145) and their stress results are unchanged from 20261008.
 
-Vision test kit and results: `../../vision-test/`. Evidence: `../../rebase-89f1cee/RESULTS.md`,
-`../../qualification-20261008-csf2/`.
+## Known issues
 
-## CSF-QAD checkpoint
-
-Both revisions hold the same QAD-distilled routed experts as the original NVFP4 checkpoint, with
-their FP8 block scales losslessly compressed (CSF) and MXFP8 attention/shared experts. `dec48abd`
-also stores the vision tower quantized and uses the standard ModelOpt layout. Compressed experts
-run only on the b12x MoE backend, so `csf-qad*` require `MOE_TP=1`; W4A4 experts
-(`CSF_ACTIVATIONS=a4`) and resident expanded scales (`CSF_RESIDENT_SCALES=1`) are the defaults.
-License: LIL License 1.0 — no reuploads; any README of a project that runs it must begin with the
-attribution notice above.
+- `MTP_ADAPTIVE_WINDOW` does not work with csf-qad-2 on this image (crashes on the first request, then fails
+  b12x preparation on restart). Leave it empty (default).
 
 ## Not re-run on this image
 
-Long-context retrieval/generation, DCP3 quality tests, DFlash2 quality, uncensored checkpoint, LMCache L1
-(qualified on 20261007 / 20260927 with the identical text weights).
+DCP3 quality, DFlash2, the default/uncensored checkpoints, vision tests, LMCache L1 (unchanged code paths;
+results in the 20261008 README). The GEMV also serves those configurations at <= 8 rows.
 
 ## Files
 
-- `Dockerfile`, `src/` (files changed vs upstream `89f1ceecd`), `lil/` (cache.py TP3 gate + contract
-  hash), `serve-glm53-flash-tp3-kraken.py` (updated 2026-10-13; mounted over the image's copy), marker JSONs,
-  `compose.yaml` (below).
-- `source.patch`: every source change versus upstream `89f1ceecd` (41 files, +2064/-386).
-- `image-inspect.json`, `build.log`.
+- `Dockerfile` (FROM 20261008), `src/` (the 3 changed vLLM files), `serve-glm53-flash-tp3-kraken.py`
+  (built in and mounted by the compose), `compose.yaml` (below), `source.patch`, `image-inspect.json`,
+  `build.log`, `bench/` (C1/C8/C32 on the built image).
 
 ## Variables
 
+Same as 20261008, plus:
+
 | Variable | Default | Values |
 | --- | --- | --- |
-| `CHECKPOINT` | `csf-qad-2` | `csf-qad-2`, `csf-qad`, `default`, `uncensored` (experimental) |
-| `CSF_ACTIVATIONS` | `a4` | `a4`, `a16` (csf-qad* only) |
-| `CSF_RESIDENT_SCALES` | `1` | `1`, `0` (csf-qad* only) |
-| `MODE` | `mtp` | `mtp`, `dflash2`, `mtp0` |
+| `VLLM_GLM53_MXFP8_GEMV` | `1` | `1`, `0` (b12x dense GEMM for every row count) |
+| `MAX_NUM_SEQS` | `32` (was `8`) | `32` (graph 128), `8` (graph 32, ~1% faster C1, +47K KV): csf-qad* KV budgets for both; other values use automatic KV sizing |
 | `DRAFT_TOKENS` | empty (= 3 MTP / 7 DFlash2) | `1`-`7`; only the defaults are qualified |
-| `DCP` | `1` | `1`, `3` |
-| `MAX_NUM_SEQS` | `8` | `8`, `32` (csf-qad* KV budgets); other values use automatic KV sizing |
-| `MOE_TP` | `1` | `1` (required for csf-qad*), `0` EP3 |
-| `MOE_TP_BACKEND` | empty | `b12x` (csf-qad*), `flashinfer_cutlass`, `marlin` |
-| `KV_RECLAIM` | `auto` | `auto`, `0` |
-| `KV_CACHE_MEMORY_BYTES` | empty | explicit bytes/GPU for the budgeted configurations |
-| `LMCACHE` / `LMCACHE_L1_GB` | `off` / `96` | `off`, `l1` / GiB of host RAM |
-| `BF16_GEMV` | `1` | `1`, `0` |
-| `FASTOKENS` | `1` | `1`, `0` |
-| `NATIVE_DCP` | `1` | native PCIe DCP collectives at DCP3 (`0` = off) |
+| `VLLM_PCIE_ONESHOT_ALLREDUCE_MAX_SIZE` | `1MB` | size; empty = upstream 84 KiB |
 
 ```yaml
-# Kraken TP3 release example, image azallaza/glm53-kraken-tp3:20261008
-# (our TP3 port rebased onto upstream karmic-kraken-beta, vLLM 89f1ceecd).
+# Kraken TP3 release example, image azallaza/glm53-kraken-tp3:20261015
+# (20261008 + small-row MXFP8 GEMV + 32-slot budgets and finer graph ladder;
+# our TP3 port rebased onto upstream karmic-kraken-beta, vLLM 89f1ceecd).
 # Defaults: CSF-QAD (dec48abd, quantized vision) / MTP3 / DCP1 / MOE_TP=1, W4A4
-# experts with resident scales, KV 4,199,951 tokens (4.01x 1M), top-p 0.95.
+# experts with resident scales, 32 slots, KV 4,152,888 tokens (3.96x 1M), top-p 0.95.
 # CHECKPOINT=csf-qad serves fd660d51 (BF16 vision); default = original NVFP4.
 # All source changes are built into the image; the launcher is also mounted.
 # GPU power is a host setting: tested 350W/GPU; never exceed 400W.
 services:
   glm53-kraken-tp3:
-    image: "${GLM53_IMAGE:-azallaza/glm53-kraken-tp3:20261008}"
+    image: "${GLM53_IMAGE:-azallaza/glm53-kraken-tp3:20261015}"
     container_name: glm53-kraken-tp3
     restart: "no"
     # Room for LMCache/vLLM to shut down cleanly. A stale LMCache L1 arena left in
@@ -236,23 +182,32 @@ services:
       # Included in this image; larger batches retain existing collectives.
       VLLM_TP3_PCIE_DCP: "${NATIVE_DCP:-1}"
       MAX_NUM_BATCHED_TOKENS: "${MAX_NUM_BATCHED_TOKENS:-4096}"
-      # Empty: 32 for MTP/off (MTP above 8 slots: MAX_NUM_SEQS x 4) or 64 for DFlash.
+      # Empty: 32 for MTP/off (MTP above 8 slots: MAX_NUM_SEQS x (DRAFT_TOKENS + 1)) or 64 for DFlash.
       MAX_CUDAGRAPH_CAPTURE_SIZE: "${MAX_CUDAGRAPH_CAPTURE_SIZE:-}"
-      # Empty: finer MTP/off captures for default and csf-qad* at DCP1, graph32, 8 slots.
-      # Other settings retain their ladder; explicit space-separated lists override.
+      # Empty: finer MTP/off captures for default and csf-qad* at DCP1, graph32, 8 slots;
+      # above 8 MTP3 slots every 8 rows (2 streams) to the maximum (+10% C20, +11% C28 vs
+      # the 20261008 48/64/96/128 ladder). Other settings retain their ladder; explicit
+      # space-separated lists override (and turn off the KV budget).
       CUDAGRAPH_CAPTURE_SIZES: "${CUDAGRAPH_CAPTURE_SIZES:-}"
-      # 8 (default) or 32: csf-qad* MTP3 has measured KV budgets for both (32 slots:
-      # graph 128, DCP1 3.96x / DCP3 10.0x 1M). Other values use automatic KV sizing.
-      MAX_NUM_SEQS: "${MAX_NUM_SEQS:-8}"
+      # 32 (default) or 8: csf-qad* MTP3 has measured KV budgets for both. 32 slots:
+      # graph 128, DCP1 4,152,888 (3.96x 1M) / DCP3 10.0x; 8 slots: graph 32, DCP1
+      # 4,199,951 (4.01x) / DCP3 10.0x, ~1% faster C1, at most 8 concurrent streams.
+      # Other values use automatic KV sizing.
+      MAX_NUM_SEQS: "${MAX_NUM_SEQS:-32}"
       MAX_MODEL_LEN: "${MAX_MODEL_LEN:-1048576}"
       GPU_MEMORY_UTILIZATION: "${GPU_MEMORY_UTILIZATION:-0.95}"
       REASONING_EFFORT: "${REASONING_EFFORT:-max}"
       CLEAR_THINKING: "${CLEAR_THINKING:-true}"
 
-      # 256KB keeps C8's 256 KiB all-reduces on the b12x one-shot instead of
-      # the NCCL ring: +3.0% C8 steps/s, neutral at C1 (measured 2026-09-23 on
-      # the FP8 stack). Empty restores the upstream 84KiB cutoff.
-      VLLM_PCIE_ONESHOT_ALLREDUCE_MAX_SIZE: "${VLLM_PCIE_ONESHOT_ALLREDUCE_MAX_SIZE-256KB}"
+      # 1MB keeps decode all-reduces up to 32 slots (128 rows x 4096 BF16 = 1 MiB)
+      # on the b12x one-shot instead of the NCCL ring: C16 78.9 -> 40.7 us/call,
+      # C32 110 -> 79.4 us (~+1% steps/s); 256KB (20261008) covered C8 only.
+      # Prefill-size all-reduces stay on NCCL. Empty = upstream 84KiB.
+      VLLM_PCIE_ONESHOT_ALLREDUCE_MAX_SIZE: "${VLLM_PCIE_ONESHOT_ALLREDUCE_MAX_SIZE-1MB}"
+      # Small-row MXFP8 GEMV for decode steps of <= 8 rows (C1/C2 with MTP3, and
+      # the MTP draft up to 8 streams): reads the packed MXFP8 weights in place,
+      # +5.5% C1 steps/s, C8 neutral. 0 = the b12x dense GEMM for every row count.
+      VLLM_GLM53_MXFP8_GEMV: "${VLLM_GLM53_MXFP8_GEMV:-1}"
 
       # KDA backends. The Kraken profile ships kda_prefill_backend=b12x, which
       # `resolve_kda_prefill_backend` refuses to select under `auto` because it
@@ -280,13 +235,15 @@ services:
       # MTP acceptance-length adaptation. Empty = disabled, the qualified
       # configuration. A positive integer averages accepted draft lengths over
       # that many verification steps and trims the speculative-token count,
-      # with DRAFT_TOKENS as the upper bound. Measured 0.0% at C1, where the
-      # controller never trims; under evaluation at C8.
+      # with DRAFT_TOKENS as the upper bound. Measured 0.0% at C1. Not working on
+      # this image with csf-qad-2: window 32 at 32 slots crashed on the first request
+      # and then failed b12x preparation on restart (LM-head bf16_gemv m3). Leave empty.
       MTP_ADAPTIVE_WINDOW: "${MTP_ADAPTIVE_WINDOW:-}"
       # Speculative tokens per step. Empty = mode default (MODE=mtp 3, dflash2 7);
-      # 1-7 accepted. Qualified: MTP 3 and DFlash2 7. Any other MTP value turns
-      # off the KV reclaim budget (automatic KV sizing) and the measured graph
-      # ladder; above 3 the graph maximum grows to 8 x (tokens + 1).
+      # 1-7 accepted. Qualified: MTP 3 and DFlash2 7. Other MTP values get a graph
+      # ladder at whole stream counts (rows = streams x (tokens + 1)) and automatic
+      # KV sizing (no reclaim budget). Measured at MAX_NUM_SEQS=32: DRAFT_TOKENS=2
+      # tok/s +3.4% C8 / +2.5% C32 vs 3, but slower at C1. Adjust to your load.
       DRAFT_TOKENS: "${DRAFT_TOKENS:-}"
       # FP8 weight-only decode (Marlin W8A16) for the large BF16 projections:
       # KDA in_proj/o_proj, DSA o_proj/q_b_proj, dense FFN, LM head, MTP draft.

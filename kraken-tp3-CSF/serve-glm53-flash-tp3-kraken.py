@@ -141,9 +141,18 @@ def build_args(env):
         # Preserve the measured default ladder (DFlash graph64 excludes40/48).
         if maximum == 64:
             sizes = [1, 2, 4, 8, 16, 32]
-        # More than 8 MTP3 slots: keep the measured <=32 ladder, sparse above it.
+        # More than 8 MTP3 slots: keep the measured <=32 ladder, then every 2 streams (8 rows)
+        # up to 128. The old sparse 48/64/96/128 padded C20 to 96 rows and C28 to 128:
+        # +10% C20 / +11% C28 tok/s, C16/C32 unchanged (2026-10-14, c8plus-config-20261014).
         if (checkpoint == 'default' or csf) and mode == 'mtp' and draft_tokens == 3 and maximum > 32:
-            sizes = [1, 2, 4, 8, 12, 16, 20, 24, 28, 32] + [n for n in (48, 64, 96, 128, 192, 256) if n < maximum]
+            sizes = [1, 2, 4, 8, 12, 16, 20, 24, 28, 32] + [n for n in (*range(40, 129, 8), 160, 192, 224, 256) if n < maximum]
+        # Other MTP depths: capture whole stream counts (rows = streams x (draft + 1)) so a
+        # batch is not padded to the next MTP3-shaped size (e.g. DRAFT_TOKENS=2 at C8 = 24 rows,
+        # not 32). Same density as the MTP3 ladder (every 2 streams up to 32).
+        if (checkpoint == 'default' or csf) and mode == 'mtp' and draft_tokens != 3:
+            rows = draft_tokens + 1
+            streams = (1, 2, 3, 4, 5, 6, 7, 8, *range(10, 33, 2), 40, 48, 56, 64)
+            sizes = sorted({1, 2} | {rows * n for n in streams if rows * n < maximum})
         sizes.append(maximum)
     else:
         if not all(re.fullmatch(r'[1-9][0-9]*', s) for s in sizes.split()):
