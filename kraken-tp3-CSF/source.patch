@@ -410,3 +410,18 @@ diff -ruN a/vllm/model_executor/kernels/linear/mxfp8/glm53_mxfp8_gemv.py b/vllm/
 +        run_compiled(raws[tiles_for(rows)], (*pointers, Int32(rows), cuda_stream_from_int_or_current(stream)))
 +
 +    return run
+--- a/b12x/attention/_shared/mla/kernel.py
++++ b/b12x/attention/_shared/mla/kernel.py
+@@ -280,6 +280,12 @@
+         if gap < best_gap - 1e-6 or (gap < best_gap + 1e-6 and cpb > chunks_per_block):
+             best_gap = gap
+             chunks_per_block = cpb
++    if best_gap >= 2.0:
++        # GLM-5.3 TP3 DCP3: no split count fits CEIL_WAVES_MAX (rows x h_blocks already
++        # exceeds 3 waves with one split, e.g. 128 rows x 72 heads). The search would
++        # leave cpb=1 = MAXIMAL split (33 partials + a 33-way merge on a full GPU);
++        # one split is the least work when the grid is already wave-saturated.
++        return 1
+     # OUR num_splits == FlashInfer's num_splits_eff = ceil(num_splits / cpb*),
+     # where FlashInfer's num_splits == num_chunks (maximal split).
+     return (num_chunks + chunks_per_block - 1) // chunks_per_block

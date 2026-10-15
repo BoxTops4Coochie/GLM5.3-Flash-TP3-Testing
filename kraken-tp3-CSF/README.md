@@ -2,8 +2,9 @@
 
 This model is based on [GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD](https://huggingface.co/local-inference-lab/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD) by Local Inference Lab, Inc., a non-profit organization, available at <https://huggingface.co/local-inference-lab/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD>. GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD is licensed under the Local Inference Lab License, Version 1.0.
 
-Image: **`azallaza/glm53-kraken-tp3:20261015`** (local `glm53-kraken-tp3:20261015`, `sha256:c62012f9a7f1ea5dbef978bfe3d6234a7d76f22e8532000936f08eda3e6ff78a`).
-Built on top of `azallaza/glm53-kraken-tp3:20261008` (`sha256:44c2d27ec026…`): every 20261008 layer is
+Image: **`azallaza/glm53-kraken-tp3:20261015`** (local `glm53-kraken-tp3:20261015`, `sha256:358c9b64ffaf7c7d45e9447e385b7b79858165c9d90797d4acd4b90425655c24`).
+**Rebuilt 2026-10-15 with the DCP3 sparse-MLA split fix** (same tag; pull again if you pulled the first build,
+`sha256:c62012f9a7f1…`). Built on top of `azallaza/glm53-kraken-tp3:20261008` (`sha256:44c2d27ec026…`): every 20261008 layer is
 reused, so the pull is only the changed files. Same weights, checkpoints and modes as 20261008; the default is now **32 slots** (was 8)
 (see `../kraken-20261008/README.md` for the CSF-QAD details, DCP3, DFlash2 and the other checkpoints).
 
@@ -25,10 +26,11 @@ Host settings: 350 W/GPU (never exceed 400 W), +6000 memory offset.
 | **Finer graph ladder above 32 rows**: every 8 rows (2 MTP3 streams) up to 128, instead of 48/64/96/128 | **+10% C20, +11% C28** tok/s (no padding to the next graph); C16/C32 unchanged |
 | KV budgets for csf-qad* at `MAX_NUM_SEQS=32` | DCP1 **4,152,888 (3.96x 1M)**, DCP3 **10,485,760 (10.0x 1M)** |
 | One-shot all-reduce cutoff 256 KB -> **1 MB** (compose default and image ENV) | decode all-reduces up to 32 slots stay on the b12x one-shot: C16 78.9 -> 40.7 us/call, C32 110 -> 79.4 us (~+1%) |
+| **DCP3 sparse-MLA split fix** (b12x `_wave_balanced_num_splits`): when even one split exceeds 3 waves (DCP3 at >= ~63 rows: 72 heads per rank), use 1 split instead of falling back to the maximum (33 splits + a 33-way merge). Exact math; DCP1 never reaches this case | **DCP3 C32 +7.5%** steps/s in the A/B (548-550 -> 588-592; user runs 595-611); C1-C16 unchanged |
 | `DRAFT_TOKENS` other than 3: graph ladder at whole stream counts | e.g. `DRAFT_TOKENS=2` at 32 slots: +3.4% C8 / +2.5% C32 tok/s, slower at C1. Not qualified; adjust to your load |
 
-`source.patch`: the 4 files that differ from the 20261008 image (`glm53_mxfp8_gemv.py` new, `mxfp8/b12x.py`,
-`b12x_blockscaled.py`, the launcher). With `MAX_NUM_SEQS=8` the command line is the 20261008 one plus the GEMV.
+`source.patch`: the 5 files that differ from the 20261008 image (`glm53_mxfp8_gemv.py` new, `mxfp8/b12x.py`,
+`b12x_blockscaled.py`, b12x `attention/_shared/mla/kernel.py`, the launcher). With `MAX_NUM_SEQS=8` the command line is the 20261008 one plus the GEMV.
 
 **Default slots 8 -> 32**: up to 32 concurrent streams with CUDA graphs. Costs ~1% C1 and 47K KV tokens at DCP1
 (4,199,951 -> 4,152,888); DCP3 stays 10,485,760 (10.0x 1M). `MAX_NUM_SEQS=8` restores the 20261008 sizing.
@@ -39,11 +41,12 @@ Host settings: 350 W/GPU (never exceed 400 W), +6000 memory offset.
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | DCP1 decode steps/s | 112.9-114.6 | 306-317 | 454-466 | 485-489 | 577-591 | 611-633 |
 | DCP1 aggregate tok/s | 283-314 | 807-831 | 1,193-1,222 | 1,287-1,300 | 1,551-1,588 | 1,642-1,696 |
-| DCP3 decode steps/s | 106.6-107.9 | 290.1-303 | 432.1-440.5 | — | — | 567.4-578.6 |
-| DCP3 aggregate tok/s | 266-280 | 768-795 | 1,138-1,178 | — | — | 1,517-1,526 |
+| DCP3 decode steps/s | 106.6-107.9 | 290.1-303 | 432.1-440.5 | — | — | 595-611.3 |
+| DCP3 aggregate tok/s | 266-280 | 768-795 | 1,138-1,178 | — | — | 1,588-1,639 |
 | 20261008 + 10-13 launcher, DCP1 tok/s | 263-273 | 802 | 1,155-1,223 | 1,170 | 1,410-1,433 | 1,633-1,689 |
 
-DCP1 KV 4,152,888 (3.96x 1M), DCP3 KV 10,485,760 (10.0x 1M). C1/C8/C16/C32: user runs on this image. C20/C28: the graph-ladder A/B on the same code (GEMV overlay),
+DCP1 KV 4,152,888 (3.96x 1M), DCP3 KV 10,485,760 (10.0x 1M). C1/C8/C16/C32: user runs on this image (DCP3 C32
+on the rebuilt image with the split fix; first build: 567.4-578.6 steps/s, 1,517-1,526 tok/s). C20/C28: the graph-ladder A/B on the same code (GEMV overlay),
 llm_decode_bench 30 s cells; these are where the finer ladder helps (the 20261008 ladder padded them to 96/128 rows).
 
 ## Quality and stress (this image's code: GEMV + 32 slots + fine ladder + 1 MB)
@@ -56,6 +59,8 @@ llm_decode_bench 30 s cells; these are where the finer ladder helps (the 2026100
 | hotel-lights, 30 runs C2 (target model on the GEMV) | — | **28 exact / 2 wrong** |
 | Retrieval 128K / 900K | pass / pass (20261007) | **pass / pass** |
 | Long generation at 826K, seeds 201-204 | 4/4 clean, worst 8-gram repeat 0.0044 (20261007) | **4/4 clean, worst 0.0017** |
+| DCP3 + split fix: lavd, 30 runs at once (~120 rows, fixed path) | — | **30 exact** |
+| DCP3 + split fix: hotel-lights, 30 runs at once | — | **28 exact / 2 wrong** |
 | Arithmetic | 8/8 | 8/8 |
 
 hotel-lights has ranged 27-30 exact across earlier qualified configurations; at C8 the GEMV only serves the
@@ -82,7 +87,7 @@ results in the 20261008 README). The GEMV also serves those configurations at <=
 
 ## Files
 
-- `Dockerfile` (FROM 20261008), `src/` (the 3 changed vLLM files), `serve-glm53-flash-tp3-kraken.py`
+- `Dockerfile` (FROM 20261008), `src/` (the 3 changed vLLM files + the b12x MLA kernel planner), `serve-glm53-flash-tp3-kraken.py`
   (built in and mounted by the compose), `compose.yaml` (below), `source.patch`, `image-inspect.json`,
   `build.log`, `bench/` (C1/C8/C32 on the built image).
 
