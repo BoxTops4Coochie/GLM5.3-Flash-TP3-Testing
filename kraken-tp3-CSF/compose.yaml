@@ -97,6 +97,11 @@ services:
       # 4,199,951 (4.01x) / DCP3 10.0x, ~1% faster C1, at most 8 concurrent streams.
       # Other values use automatic KV sizing.
       MAX_NUM_SEQS: "${MAX_NUM_SEQS:-32}"
+      # Parallel prefills (vLLM max_parallel_prefills): auto = up to 4 prefills share each
+      # step round-robin; a lone prefill keeps the full budget. 1 = legacy (one long
+      # prefill blocks new requests: a short request waited 42.8 s behind a 420K prompt,
+      # ~1.2 s with auto; solo prefill/decode/KV unchanged, 2026-10-16).
+      MAX_PARALLEL_PREFILLS: "${MAX_PARALLEL_PREFILLS:-auto}"
       MAX_MODEL_LEN: "${MAX_MODEL_LEN:-1048576}"
       GPU_MEMORY_UTILIZATION: "${GPU_MEMORY_UTILIZATION:-0.95}"
       REASONING_EFFORT: "${REASONING_EFFORT:-max}"

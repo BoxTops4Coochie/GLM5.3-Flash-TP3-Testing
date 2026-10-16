@@ -8,6 +8,11 @@ Image: **`azallaza/glm53-kraken-tp3:20261015`** (local `glm53-kraken-tp3:2026101
 reused, so the pull is only the changed files. Same weights, checkpoints and modes as 20261008; the default is now **32 slots** (was 8)
 (see `../kraken-20261008/README.md` for the CSF-QAD details, DCP3, DFlash2 and the other checkpoints).
 
+**Update 2026-10-16 (compose only, image unchanged):** `compose.yaml` now sets `MAX_PARALLEL_PREFILLS=auto`, so a
+short request no longer waits behind another user's long prefill (42.8 s -> ~1.2 s behind a 420K-token prompt).
+If you downloaded this folder earlier, pull the new `compose.yaml` (or add `MAX_PARALLEL_PREFILLS: "auto"`); no image pull needed.
+See [Update 2026-10-16](#update-2026-10-16-compose-only-image-unchanged).
+
 ```bash
 docker pull azallaza/glm53-kraken-tp3:20261015
 HF_CACHE_DIR=/path/to/huggingface docker compose up -d                  # csf-qad-2, MTP3/DCP1, 32 slots, 3.96x 1M
@@ -16,6 +21,16 @@ HF_CACHE_DIR=/path/to/huggingface MAX_NUM_SEQS=8 docker compose up -d   # 8 slot
 ```
 
 Host settings: 350 W/GPU (never exceed 400 W), +6000 memory offset.
+
+## Update 2026-10-16 (compose only, image unchanged)
+
+| Change | Effect (DCP1, 32 slots) |
+| --- | --- |
+| `MAX_PARALLEL_PREFILLS=auto` (vLLM `max_parallel_prefills`, read by the image's entrypoint): up to 4 prefills share each step round-robin; a lone prefill keeps the full token budget. Default before: 1 (legacy), where one long prefill took every step | short (~135-token) request arriving 3 s into a 420K-token prefill: TTFT **42,783 ms -> 1,104-1,410 ms**; the long prompt 45.7 -> 46.6 s |
+
+No change elsewhere: solo prefill 32K / 128K 10,562 / 10,009 tok/s (before 10,608-10,718 / 10,057-10,164), decode C1 / C8 / C32
+111.9 / 317.5 / 615.8 steps/s, KV 4,152,888, arithmetic 8/8. Scheduling only, no numerical change. `MAX_PARALLEL_PREFILLS=1`
+restores the previous behaviour.
 
 ## What changed since 20261008
 
@@ -101,6 +116,7 @@ Same as 20261008, plus:
 | `MAX_NUM_SEQS` | `32` (was `8`) | `32` (graph 128), `8` (graph 32, ~1% faster C1, +47K KV): csf-qad* KV budgets for both; other values use automatic KV sizing |
 | `DRAFT_TOKENS` | empty (= 3 MTP / 7 DFlash2) | `1`-`7`; only the defaults are qualified |
 | `VLLM_PCIE_ONESHOT_ALLREDUCE_MAX_SIZE` | `1MB` | size; empty = upstream 84 KiB |
+| `MAX_PARALLEL_PREFILLS` | `auto` (since 2026-10-16) | `auto` (up to 4 prefills share a step), `1` (legacy: one prefill at a time), or a number |
 
 ```yaml
 # Kraken TP3 release example, image azallaza/glm53-kraken-tp3:20261015
@@ -202,6 +218,11 @@ services:
       # 4,199,951 (4.01x) / DCP3 10.0x, ~1% faster C1, at most 8 concurrent streams.
       # Other values use automatic KV sizing.
       MAX_NUM_SEQS: "${MAX_NUM_SEQS:-32}"
+      # Parallel prefills (vLLM max_parallel_prefills): auto = up to 4 prefills share each
+      # step round-robin; a lone prefill keeps the full budget. 1 = legacy (one long
+      # prefill blocks new requests: a short request waited 42.8 s behind a 420K prompt,
+      # ~1.2 s with auto; solo prefill/decode/KV unchanged, 2026-10-16).
+      MAX_PARALLEL_PREFILLS: "${MAX_PARALLEL_PREFILLS:-auto}"
       MAX_MODEL_LEN: "${MAX_MODEL_LEN:-1048576}"
       GPU_MEMORY_UTILIZATION: "${GPU_MEMORY_UTILIZATION:-0.95}"
       REASONING_EFFORT: "${REASONING_EFFORT:-max}"
