@@ -1,0 +1,74 @@
+╭──────────────────────────── NVIDIA P2P Override ─────────────────────────────╮
+│ Effective: yes                                                               │
+│ Configured file: yes (/etc/modprobe.d/nvidia-p2p-override.conf)              │
+│ Runtime: ForceP2P=0x11; RMForceP2PType=1; RMPcieP2PType=2;                   │
+│ GrdmaPciTopoCheckOverride=1; EnableResizableBar=1; DmaRemapPeerMmio=1        │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─────────────────────────────── Configuration ────────────────────────────────╮
+│ LAVD Context Consistency Test                                                │
+│ Model: DeepSeek-V4.1-Flash @ localhost:15015                                 │
+│ Prompt: profile:lavd-test                                                    │
+│ Concurrency: 4                                                               │
+│ Measured runs: 30 | Max tokens: 100000                                       │
+│ Scoring: EXACT / NEAR / FAIL numeric pair                                    │
+│ Sampling: temperature 1, top_p 0.95, seed 103 + run index, reasoning_effort  │
+│ max | Watchdog: stall 600s, wall-clock off                                   │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+╭────────────────────────────── Completion Stats ──────────────────────────────╮
+│ LAVD Context Consistency Test                                                │
+│ Arithmetic is intentionally simple; the test checks whether the model keeps  │
+│ a long structured context consistent, finds human data-entry errors, applies │
+│ the repair rule, and returns the final ticket count and hours. Built-in      │
+│ profile run at fixed concurrency C=4.                                        │
+╰──────────────────────────────────────────────────────────────────────────────╯
+Profile                               
+╭────────────────┬───────────────────╮
+│ field          │ value             │
+├────────────────┼───────────────────┤
+│ profile        │ lavd-test         │
+│ prompt         │ profile:lavd-test │
+│ prompt chars   │ 48,302            │
+│ requested runs │ 30                │
+│ concurrency    │ 4                 │
+│ max tokens     │ 100000            │
+│ scoring        │ ledger_lavd       │
+│ expected       │ 72, 46            │
+│ prompt sha256  │ 5c83674d5f0fd2a7  │
+│ dataset sha256 │ 612f8041bbca048c  │
+╰────────────────┴───────────────────╯
+╭───────────────────────── Whole-run GPU Power ──────────────────────────╮
+│ avg 1,045 W | max 1,080 W | limit 1,050 W | over 17m 49s | 468 samples │
+╰────────────────────────────────────────────────────────────────────────╯
+Concurrency Results                                                             
+╭───┬────────┬────────────┬──────┬─────────┬──────────┬──────────┬─────────┬───╮
+│ … │ done/… │      score │ sta… │ output… │ output … │ aggrega… │ avg re… │ … │
+├───┼────────┼────────────┼──────┼─────────┼──────────┼──────────┼─────────┼───┤
+│ 4 │  30/30 │ EXACT 30 … │ ★★★… │  20,502 │   24,744 │    149.2 │   138.5 │ … │
+╰───┴────────┴────────────┴──────┴─────────┴──────────┴──────────┴─────────┴───╯
+Selected C=4                                      
+╭────────────────────────────┬───────────────────╮
+│ metric                     │             value │
+├────────────────────────────┼───────────────────┤
+│ completed                  │             30/30 │
+│ score                      │ EXACT 30 / FAIL 0 │
+│ stars                      │     ★★★★★★★★★★ 👍 │
+│ pass rate                  │    100.0% (30/30) │
+│ hit max_tokens             │                 0 │
+│ completion tokens avg      │            20,588 │
+│ completion tokens p50      │            20,502 │
+│ completion tokens p90      │            24,744 │
+│ completion tokens p99      │            26,300 │
+│ elapsed avg                │            138.5s │
+│ TTFT avg                   │             0.51s │
+│ aggregate gen tok/s        │             149.2 │
+│ mean per-request gen tok/s │             149.8 │
+╰────────────────────────────┴───────────────────╯
+Interpretation: EXACT means the parsed ticket/hour totals are exactly 72, 46.0. 
+NEAR means both count and hours are within the configured tolerance; FAIL means 
+the answer was unparseable or outside tolerance. The 10-slot quality bar is a 
+rounded distribution: ★=EXACT, ☆=NEAR, ✕=FAIL.
+
+Results saved to 
+/home/aabduh/ds41-tp3/release/ds41-kraken-tp3-20261019/qualification/lavd-c4.jso
+n

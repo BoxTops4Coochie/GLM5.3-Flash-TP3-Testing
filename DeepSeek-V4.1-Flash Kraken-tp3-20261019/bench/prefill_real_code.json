@@ -1,0 +1,20 @@
+[
+ {
+  "chars": 400000,
+  "prompt_tokens": 105085,
+  "ttft_s": 9.92,
+  "tok_s": 10594
+ },
+ {
+  "chars": 1000000,
+  "prompt_tokens": 258951,
+  "ttft_s": 26.08,
+  "tok_s": 9928
+ },
+ {
+  "chars": 400000,
+  "prompt_tokens": 101926,
+  "ttft_s": 9.19,
+  "tok_s": 11086
+ }
+]

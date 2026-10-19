@@ -1,0 +1,55 @@
+#!/bin/bash
+# Container entrypoint for DeepSeek-V4.1-Flash-1017 TP3.
+#
+# Starts the lil launcher, then arms expert promotion once the server is healthy:
+# the parked expert layers (DS41_OFFLOAD_FROM..TO) move their most-routed experts
+# to GPU memory on the first forward pass after /cache/deferred-banks.arm exists.
+# Promotion must not run during startup (it would take memory that startup still
+# needs), so the arm file is removed first and created only after /health is up.
+# A short warm-up request then triggers the promotion before real traffic arrives.
+set -uo pipefail
+
+PORT="${PORT:-15015}"
+ARM="${B12X_DEFERRED_BANK_ARM_FILE:-/cache/deferred-banks.arm}"
+rm -f "$ARM"
+
+/usr/local/bin/lil-entrypoint \
+  --profile=ds41-flash \
+  --hardware=rtx-pro-6000-pcie \
+  --settings="${DS41_LAUNCH_SETTINGS:-/etc/ds41/launch.yaml}" \
+  --port="$PORT" \
+  --scheduling-policy=priority \
+  -- \
+  --kv-cache-memory-bytes="${KV_CACHE_MEMORY_BYTES:-2415919104}" \
+  --cpu-offload-gb="${CPU_OFFLOAD_GB:-8}" \
+  --cpu-offload-params experts vision aligner \
+  "$@" &
+server=$!
+trap 'kill -TERM "$server" 2>/dev/null' TERM INT
+
+python3 - "$PORT" "$ARM" <<'PY' &
+import json, os, sys, time, urllib.request
+port, arm = sys.argv[1], sys.argv[2]
+base = f"http://127.0.0.1:{port}"
+while True:
+    try:
+        urllib.request.urlopen(base + "/health", timeout=5)
+        break
+    except Exception:
+        time.sleep(5)
+open(arm, "w").close()
+# The first forward pass after arming promotes the experts; a prompt longer than
+# the CUDA-graph sizes (24 tokens) makes it a non-graph pass.
+body = json.dumps({
+    "model": os.environ.get("SERVED_MODEL_NAME", "DeepSeek-V4.1-Flash"),
+    "messages": [{"role": "user", "content": "Write two sentences about the ocean "
+                  "and explain in some detail why tides happen twice a day."}],
+    "max_tokens": 16,
+    "chat_template_kwargs": {"thinking": False},
+}).encode()
+req = urllib.request.Request(base + "/v1/chat/completions", body, {"Content-Type": "application/json"})
+urllib.request.urlopen(req, timeout=1800).read()
+print("ds41-serve: expert promotion armed and warmed", flush=True)
+PY
+
+wait "$server"

@@ -1,0 +1,4 @@
+requests ok 4 / 4
+prompt tokens 1827825 secs 502
+peak KV % 74.0 max running 4.0 max waiting 0 preemptions 0
+min free MiB {0: 590, 1: 590, 2: 590}

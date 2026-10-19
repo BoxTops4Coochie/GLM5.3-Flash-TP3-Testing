@@ -1,0 +1,422 @@
+[
+ {
+  "id": "ocr-00",
+  "kind": "ocr",
+  "file": "ocr-00.png",
+  "question": "What exact code is shown in the image? Reply with only the code.",
+  "answer": "JNDL-XX4W"
+ },
+ {
+  "id": "ocr-01",
+  "kind": "ocr",
+  "file": "ocr-01.png",
+  "question": "What exact code is shown in the image? Reply with only the code.",
+  "answer": "TAYH-6EVG"
+ },
+ {
+  "id": "ocr-02",
+  "kind": "ocr",
+  "file": "ocr-02.png",
+  "question": "What exact code is shown in the image? Reply with only the code.",
+  "answer": "XTJA-WMK6"
+ },
+ {
+  "id": "ocr-03",
+  "kind": "ocr",
+  "file": "ocr-03.png",
+  "question": "What exact code is shown in the image? Reply with only the code.",
+  "answer": "C6DC-ACUA"
+ },
+ {
+  "id": "ocr-04",
+  "kind": "ocr",
+  "file": "ocr-04.png",
+  "question": "What exact code is shown in the image? Reply with only the code.",
+  "answer": "MYCC-6RHU"
+ },
+ {
+  "id": "ocr-05",
+  "kind": "ocr",
+  "file": "ocr-05.png",
+  "question": "What exact code is shown in the image? Reply with only the code.",
+  "answer": "JVVP-YFDU"
+ },
+ {
+  "id": "ocr-06",
+  "kind": "ocr",
+  "file": "ocr-06.png",
+  "question": "What exact code is shown in the image? Reply with only the code.",
+  "answer": "KNRX-C9QN"
+ },
+ {
+  "id": "ocr-07",
+  "kind": "ocr",
+  "file": "ocr-07.png",
+  "question": "What exact code is shown in the image? Reply with only the code.",
+  "answer": "HLPQ-DVQ9"
+ },
+ {
+  "id": "ocr-08",
+  "kind": "ocr",
+  "file": "ocr-08.png",
+  "question": "What exact code is shown in the image? Reply with only the code.",
+  "answer": "VDTC-XEHK"
+ },
+ {
+  "id": "ocr-09",
+  "kind": "ocr",
+  "file": "ocr-09.png",
+  "question": "What exact code is shown in the image? Reply with only the code.",
+  "answer": "CFEC-67F7"
+ },
+ {
+  "id": "ocr-10",
+  "kind": "ocr",
+  "file": "ocr-10.png",
+  "question": "What exact code is shown in the image? Reply with only the code.",
+  "answer": "PNUU-79AL"
+ },
+ {
+  "id": "ocr-11",
+  "kind": "ocr",
+  "file": "ocr-11.png",
+  "question": "What exact code is shown in the image? Reply with only the code.",
+  "answer": "6GVK-JDEP"
+ },
+ {
+  "id": "lines-00",
+  "kind": "lines",
+  "file": "lines-00.png",
+  "question": "Read line number 3 (counting from the top, starting at 1). Reply with only the words of that line.",
+  "answer": "harbor quartz meadow glacier"
+ },
+ {
+  "id": "lines-01",
+  "kind": "lines",
+  "file": "lines-01.png",
+  "question": "Read line number 1 (counting from the top, starting at 1). Reply with only the words of that line.",
+  "answer": "willow glacier lantern falcon"
+ },
+ {
+  "id": "lines-02",
+  "kind": "lines",
+  "file": "lines-02.png",
+  "question": "Read line number 3 (counting from the top, starting at 1). Reply with only the words of that line.",
+  "answer": "meadow river meadow violet"
+ },
+ {
+  "id": "lines-03",
+  "kind": "lines",
+  "file": "lines-03.png",
+  "question": "Read line number 4 (counting from the top, starting at 1). Reply with only the words of that line.",
+  "answer": "ember violet meadow willow"
+ },
+ {
+  "id": "lines-04",
+  "kind": "lines",
+  "file": "lines-04.png",
+  "question": "Read line number 2 (counting from the top, starting at 1). Reply with only the words of that line.",
+  "answer": "stone orbit violet lantern"
+ },
+ {
+  "id": "lines-05",
+  "kind": "lines",
+  "file": "lines-05.png",
+  "question": "Read line number 3 (counting from the top, starting at 1). Reply with only the words of that line.",
+  "answer": "meadow orbit summit stone"
+ },
+ {
+  "id": "lines-06",
+  "kind": "lines",
+  "file": "lines-06.png",
+  "question": "Read line number 1 (counting from the top, starting at 1). Reply with only the words of that line.",
+  "answer": "willow maple ember willow"
+ },
+ {
+  "id": "lines-07",
+  "kind": "lines",
+  "file": "lines-07.png",
+  "question": "Read line number 1 (counting from the top, starting at 1). Reply with only the words of that line.",
+  "answer": "willow ember glacier glacier"
+ },
+ {
+  "id": "lines-08",
+  "kind": "lines",
+  "file": "lines-08.png",
+  "question": "Read line number 1 (counting from the top, starting at 1). Reply with only the words of that line.",
+  "answer": "summit copper willow violet"
+ },
+ {
+  "id": "lines-09",
+  "kind": "lines",
+  "file": "lines-09.png",
+  "question": "Read line number 4 (counting from the top, starting at 1). Reply with only the words of that line.",
+  "answer": "falcon willow stone river"
+ },
+ {
+  "id": "lines-10",
+  "kind": "lines",
+  "file": "lines-10.png",
+  "question": "Read line number 4 (counting from the top, starting at 1). Reply with only the words of that line.",
+  "answer": "copper maple falcon candle"
+ },
+ {
+  "id": "lines-11",
+  "kind": "lines",
+  "file": "lines-11.png",
+  "question": "Read line number 1 (counting from the top, starting at 1). Reply with only the words of that line.",
+  "answer": "orbit falcon quartz ember"
+ },
+ {
+  "id": "count-00",
+  "kind": "count",
+  "file": "count-00.png",
+  "question": "How many circles are in the image? Reply with only the number.",
+  "answer": "8"
+ },
+ {
+  "id": "count-01",
+  "kind": "count",
+  "file": "count-01.png",
+  "question": "How many circles are in the image? Reply with only the number.",
+  "answer": "3"
+ },
+ {
+  "id": "count-02",
+  "kind": "count",
+  "file": "count-02.png",
+  "question": "How many circles are in the image? Reply with only the number.",
+  "answer": "7"
+ },
+ {
+  "id": "count-03",
+  "kind": "count",
+  "file": "count-03.png",
+  "question": "How many circles are in the image? Reply with only the number.",
+  "answer": "8"
+ },
+ {
+  "id": "count-04",
+  "kind": "count",
+  "file": "count-04.png",
+  "question": "How many circles are in the image? Reply with only the number.",
+  "answer": "10"
+ },
+ {
+  "id": "count-05",
+  "kind": "count",
+  "file": "count-05.png",
+  "question": "How many circles are in the image? Reply with only the number.",
+  "answer": "10"
+ },
+ {
+  "id": "count-06",
+  "kind": "count",
+  "file": "count-06.png",
+  "question": "How many circles are in the image? Reply with only the number.",
+  "answer": "11"
+ },
+ {
+  "id": "count-07",
+  "kind": "count",
+  "file": "count-07.png",
+  "question": "How many circles are in the image? Reply with only the number.",
+  "answer": "7"
+ },
+ {
+  "id": "count-08",
+  "kind": "count",
+  "file": "count-08.png",
+  "question": "How many circles are in the image? Reply with only the number.",
+  "answer": "5"
+ },
+ {
+  "id": "count-09",
+  "kind": "count",
+  "file": "count-09.png",
+  "question": "How many circles are in the image? Reply with only the number.",
+  "answer": "10"
+ },
+ {
+  "id": "count-10",
+  "kind": "count",
+  "file": "count-10.png",
+  "question": "How many circles are in the image? Reply with only the number.",
+  "answer": "5"
+ },
+ {
+  "id": "count-11",
+  "kind": "count",
+  "file": "count-11.png",
+  "question": "How many circles are in the image? Reply with only the number.",
+  "answer": "10"
+ },
+ {
+  "id": "grid-00",
+  "kind": "grid",
+  "file": "grid-00.png",
+  "question": "The image is a 3x3 grid of colored squares. What color is the square in row 3, column 1 (rows from the top, columns from the left, both starting at 1)? Reply with one color word.",
+  "answer": "green"
+ },
+ {
+  "id": "grid-01",
+  "kind": "grid",
+  "file": "grid-01.png",
+  "question": "The image is a 3x3 grid of colored squares. What color is the square in row 2, column 2 (rows from the top, columns from the left, both starting at 1)? Reply with one color word.",
+  "answer": "pink"
+ },
+ {
+  "id": "grid-02",
+  "kind": "grid",
+  "file": "grid-02.png",
+  "question": "The image is a 3x3 grid of colored squares. What color is the square in row 1, column 2 (rows from the top, columns from the left, both starting at 1)? Reply with one color word.",
+  "answer": "blue"
+ },
+ {
+  "id": "grid-03",
+  "kind": "grid",
+  "file": "grid-03.png",
+  "question": "The image is a 3x3 grid of colored squares. What color is the square in row 1, column 1 (rows from the top, columns from the left, both starting at 1)? Reply with one color word.",
+  "answer": "blue"
+ },
+ {
+  "id": "grid-04",
+  "kind": "grid",
+  "file": "grid-04.png",
+  "question": "The image is a 3x3 grid of colored squares. What color is the square in row 3, column 2 (rows from the top, columns from the left, both starting at 1)? Reply with one color word.",
+  "answer": "green"
+ },
+ {
+  "id": "grid-05",
+  "kind": "grid",
+  "file": "grid-05.png",
+  "question": "The image is a 3x3 grid of colored squares. What color is the square in row 1, column 1 (rows from the top, columns from the left, both starting at 1)? Reply with one color word.",
+  "answer": "green"
+ },
+ {
+  "id": "grid-06",
+  "kind": "grid",
+  "file": "grid-06.png",
+  "question": "The image is a 3x3 grid of colored squares. What color is the square in row 2, column 2 (rows from the top, columns from the left, both starting at 1)? Reply with one color word.",
+  "answer": "brown"
+ },
+ {
+  "id": "grid-07",
+  "kind": "grid",
+  "file": "grid-07.png",
+  "question": "The image is a 3x3 grid of colored squares. What color is the square in row 3, column 2 (rows from the top, columns from the left, both starting at 1)? Reply with one color word.",
+  "answer": "yellow"
+ },
+ {
+  "id": "grid-08",
+  "kind": "grid",
+  "file": "grid-08.png",
+  "question": "The image is a 3x3 grid of colored squares. What color is the square in row 2, column 1 (rows from the top, columns from the left, both starting at 1)? Reply with one color word.",
+  "answer": "purple"
+ },
+ {
+  "id": "grid-09",
+  "kind": "grid",
+  "file": "grid-09.png",
+  "question": "The image is a 3x3 grid of colored squares. What color is the square in row 1, column 3 (rows from the top, columns from the left, both starting at 1)? Reply with one color word.",
+  "answer": "orange"
+ },
+ {
+  "id": "grid-10",
+  "kind": "grid",
+  "file": "grid-10.png",
+  "question": "The image is a 3x3 grid of colored squares. What color is the square in row 3, column 2 (rows from the top, columns from the left, both starting at 1)? Reply with one color word.",
+  "answer": "pink"
+ },
+ {
+  "id": "grid-11",
+  "kind": "grid",
+  "file": "grid-11.png",
+  "question": "The image is a 3x3 grid of colored squares. What color is the square in row 2, column 2 (rows from the top, columns from the left, both starting at 1)? Reply with one color word.",
+  "answer": "brown"
+ },
+ {
+  "id": "chart-00",
+  "kind": "chart",
+  "file": "chart-00.png",
+  "question": "Which bar (letter) is the tallest? Reply with only the letter.",
+  "answer": "C"
+ },
+ {
+  "id": "chart-01",
+  "kind": "chart",
+  "file": "chart-01.png",
+  "question": "Which bar (letter) is the tallest? Reply with only the letter.",
+  "answer": "B"
+ },
+ {
+  "id": "chart-02",
+  "kind": "chart",
+  "file": "chart-02.png",
+  "question": "Which bar (letter) is the tallest? Reply with only the letter.",
+  "answer": "A"
+ },
+ {
+  "id": "chart-03",
+  "kind": "chart",
+  "file": "chart-03.png",
+  "question": "Which bar (letter) is the tallest? Reply with only the letter.",
+  "answer": "A"
+ },
+ {
+  "id": "chart-04",
+  "kind": "chart",
+  "file": "chart-04.png",
+  "question": "Which bar (letter) is the tallest? Reply with only the letter.",
+  "answer": "C"
+ },
+ {
+  "id": "chart-05",
+  "kind": "chart",
+  "file": "chart-05.png",
+  "question": "Which bar (letter) is the tallest? Reply with only the letter.",
+  "answer": "A"
+ },
+ {
+  "id": "chart-06",
+  "kind": "chart",
+  "file": "chart-06.png",
+  "question": "Which bar (letter) is the tallest? Reply with only the letter.",
+  "answer": "A"
+ },
+ {
+  "id": "chart-07",
+  "kind": "chart",
+  "file": "chart-07.png",
+  "question": "Which bar (letter) is the tallest? Reply with only the letter.",
+  "answer": "C"
+ },
+ {
+  "id": "chart-08",
+  "kind": "chart",
+  "file": "chart-08.png",
+  "question": "Which bar (letter) is the tallest? Reply with only the letter.",
+  "answer": "B"
+ },
+ {
+  "id": "chart-09",
+  "kind": "chart",
+  "file": "chart-09.png",
+  "question": "Which bar (letter) is the tallest? Reply with only the letter.",
+  "answer": "E"
+ },
+ {
+  "id": "chart-10",
+  "kind": "chart",
+  "file": "chart-10.png",
+  "question": "Which bar (letter) is the tallest? Reply with only the letter.",
+  "answer": "A"
+ },
+ {
+  "id": "chart-11",
+  "kind": "chart",
+  "file": "chart-11.png",
+  "question": "Which bar (letter) is the tallest? Reply with only the letter.",
+  "answer": "D"
+ }
+]

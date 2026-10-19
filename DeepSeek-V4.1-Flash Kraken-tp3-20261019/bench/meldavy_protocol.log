@@ -1,0 +1,6 @@
+filler_10k             prompt  10021 tok | prefill 11,176-11,439 tok/s | decode 207.1-278.1 tok/s
+filler_32k             prompt  32003 tok | prefill 14,371-14,444 tok/s | decode 149.4-274.6 tok/s
+python_module_tests    prompt     45 tok | prefill 190-198 tok/s | decode 245.5-258.5 tok/s
+rust_parser            prompt     45 tok | prefill 194-197 tok/s | decode 292.9-298.6 tok/s
+tcp_explainer          prompt     42 tok | prefill 171-188 tok/s | decode 227.4-228.8 tok/s
+refactor               prompt    105 tok | prefill 452-480 tok/s | decode 234.0-241.5 tok/s

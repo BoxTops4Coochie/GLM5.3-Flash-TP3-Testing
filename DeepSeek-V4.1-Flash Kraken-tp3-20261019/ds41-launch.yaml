@@ -1,0 +1,27 @@
+# lil launcher settings for DeepSeek-V4.1-Flash-1017 at TP3 (3x RTX PRO 6000).
+# Baked into the image as /etc/ds41/launch.yaml; mount a copy over it to change.
+# Native vLLM flags (KV bytes, CPU offload) are passed after `--` by ds41-serve.
+options:
+  served-model-name: DeepSeek-V4.1-Flash
+  tensor-parallel-size: 3
+  # GPU prefix cache only. The LMCache host tier would need ~48 GiB of host RAM
+  # that the layer-1 Engram table and the parked expert layers already use.
+  cache-mode: vram
+  max-model-len: 1048576
+  max-num-seqs: 4
+  # 4096-token prefill chunks; needs the 1 GiB promotion reserve (2048 needs 512 MiB).
+  max-num-batched-tokens: 4096
+  max-cudagraph-capture-size: 24
+  # KV is a fixed byte budget (--kv-cache-memory-bytes), so this only bounds startup.
+  gpu-memory-utilization: 0.93
+  max-parallel-prefills: 1
+  prefill-policy: round-robin
+  # DSpark speculative decoding with 5 drafts, every draft verified.
+  mode: dspark
+  draft-tokens: 5
+  adaptive-verification: false
+  # Engram: layer 1's table in pinned host RAM (DS41_ENGRAM_RAM_LAYERS=1), layer 14's
+  # read from the checkpoint with its scales resident in host RAM and a host row cache.
+  engram-table-memory: disk
+  engram-disk-resident-scales: true
+  jit-monitor-mode: warn

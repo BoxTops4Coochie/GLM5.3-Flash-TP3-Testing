@@ -1,0 +1,422 @@
+[
+ {
+  "id": "smallocr-00",
+  "kind": "smallocr",
+  "file": "smallocr-00.png",
+  "question": "What exact code is shown in the image? Reply with only the code.",
+  "answer": "LCRJ-FKD4-HL93"
+ },
+ {
+  "id": "smallocr-01",
+  "kind": "smallocr",
+  "file": "smallocr-01.png",
+  "question": "What exact code is shown in the image? Reply with only the code.",
+  "answer": "W6RA-PNJJ-LRCH"
+ },
+ {
+  "id": "smallocr-02",
+  "kind": "smallocr",
+  "file": "smallocr-02.png",
+  "question": "What exact code is shown in the image? Reply with only the code.",
+  "answer": "PTRR-CA9N-D7TD"
+ },
+ {
+  "id": "smallocr-03",
+  "kind": "smallocr",
+  "file": "smallocr-03.png",
+  "question": "What exact code is shown in the image? Reply with only the code.",
+  "answer": "DMFN-CD6E-39LH"
+ },
+ {
+  "id": "smallocr-04",
+  "kind": "smallocr",
+  "file": "smallocr-04.png",
+  "question": "What exact code is shown in the image? Reply with only the code.",
+  "answer": "GDK9-AH7E-AUQ9"
+ },
+ {
+  "id": "smallocr-05",
+  "kind": "smallocr",
+  "file": "smallocr-05.png",
+  "question": "What exact code is shown in the image? Reply with only the code.",
+  "answer": "DQ9E-CQF6-G4MQ"
+ },
+ {
+  "id": "smallocr-06",
+  "kind": "smallocr",
+  "file": "smallocr-06.png",
+  "question": "What exact code is shown in the image? Reply with only the code.",
+  "answer": "LNEW-7NCJ-677Y"
+ },
+ {
+  "id": "smallocr-07",
+  "kind": "smallocr",
+  "file": "smallocr-07.png",
+  "question": "What exact code is shown in the image? Reply with only the code.",
+  "answer": "6FAJ-3VEK-ARK6"
+ },
+ {
+  "id": "smallocr-08",
+  "kind": "smallocr",
+  "file": "smallocr-08.png",
+  "question": "What exact code is shown in the image? Reply with only the code.",
+  "answer": "EVLL-XC6L-CUDC"
+ },
+ {
+  "id": "smallocr-09",
+  "kind": "smallocr",
+  "file": "smallocr-09.png",
+  "question": "What exact code is shown in the image? Reply with only the code.",
+  "answer": "DQTH-7N4F-KHF9"
+ },
+ {
+  "id": "smallocr-10",
+  "kind": "smallocr",
+  "file": "smallocr-10.png",
+  "question": "What exact code is shown in the image? Reply with only the code.",
+  "answer": "HL36-U6C4-F3HY"
+ },
+ {
+  "id": "smallocr-11",
+  "kind": "smallocr",
+  "file": "smallocr-11.png",
+  "question": "What exact code is shown in the image? Reply with only the code.",
+  "answer": "NJL3-3FCK-YLGC"
+ },
+ {
+  "id": "densecount-00",
+  "kind": "densecount",
+  "file": "densecount-00.png",
+  "question": "How many circles are in the image? Reply with only the number.",
+  "answer": "20"
+ },
+ {
+  "id": "densecount-01",
+  "kind": "densecount",
+  "file": "densecount-01.png",
+  "question": "How many circles are in the image? Reply with only the number.",
+  "answer": "19"
+ },
+ {
+  "id": "densecount-02",
+  "kind": "densecount",
+  "file": "densecount-02.png",
+  "question": "How many circles are in the image? Reply with only the number.",
+  "answer": "25"
+ },
+ {
+  "id": "densecount-03",
+  "kind": "densecount",
+  "file": "densecount-03.png",
+  "question": "How many circles are in the image? Reply with only the number.",
+  "answer": "24"
+ },
+ {
+  "id": "densecount-04",
+  "kind": "densecount",
+  "file": "densecount-04.png",
+  "question": "How many circles are in the image? Reply with only the number.",
+  "answer": "19"
+ },
+ {
+  "id": "densecount-05",
+  "kind": "densecount",
+  "file": "densecount-05.png",
+  "question": "How many circles are in the image? Reply with only the number.",
+  "answer": "17"
+ },
+ {
+  "id": "densecount-06",
+  "kind": "densecount",
+  "file": "densecount-06.png",
+  "question": "How many circles are in the image? Reply with only the number.",
+  "answer": "17"
+ },
+ {
+  "id": "densecount-07",
+  "kind": "densecount",
+  "file": "densecount-07.png",
+  "question": "How many circles are in the image? Reply with only the number.",
+  "answer": "27"
+ },
+ {
+  "id": "densecount-08",
+  "kind": "densecount",
+  "file": "densecount-08.png",
+  "question": "How many circles are in the image? Reply with only the number.",
+  "answer": "23"
+ },
+ {
+  "id": "densecount-09",
+  "kind": "densecount",
+  "file": "densecount-09.png",
+  "question": "How many circles are in the image? Reply with only the number.",
+  "answer": "20"
+ },
+ {
+  "id": "densecount-10",
+  "kind": "densecount",
+  "file": "densecount-10.png",
+  "question": "How many circles are in the image? Reply with only the number.",
+  "answer": "15"
+ },
+ {
+  "id": "densecount-11",
+  "kind": "densecount",
+  "file": "densecount-11.png",
+  "question": "How many circles are in the image? Reply with only the number.",
+  "answer": "19"
+ },
+ {
+  "id": "chartvalue-00",
+  "kind": "chartvalue",
+  "file": "chartvalue-00.png",
+  "question": "Using the y-axis gridlines, what is the value of bar D? Reply with only the integer.",
+  "answer": "7"
+ },
+ {
+  "id": "chartvalue-01",
+  "kind": "chartvalue",
+  "file": "chartvalue-01.png",
+  "question": "Using the y-axis gridlines, what is the value of bar D? Reply with only the integer.",
+  "answer": "14"
+ },
+ {
+  "id": "chartvalue-02",
+  "kind": "chartvalue",
+  "file": "chartvalue-02.png",
+  "question": "Using the y-axis gridlines, what is the value of bar A? Reply with only the integer.",
+  "answer": "2"
+ },
+ {
+  "id": "chartvalue-03",
+  "kind": "chartvalue",
+  "file": "chartvalue-03.png",
+  "question": "Using the y-axis gridlines, what is the value of bar A? Reply with only the integer.",
+  "answer": "3"
+ },
+ {
+  "id": "chartvalue-04",
+  "kind": "chartvalue",
+  "file": "chartvalue-04.png",
+  "question": "Using the y-axis gridlines, what is the value of bar A? Reply with only the integer.",
+  "answer": "7"
+ },
+ {
+  "id": "chartvalue-05",
+  "kind": "chartvalue",
+  "file": "chartvalue-05.png",
+  "question": "Using the y-axis gridlines, what is the value of bar C? Reply with only the integer.",
+  "answer": "6"
+ },
+ {
+  "id": "chartvalue-06",
+  "kind": "chartvalue",
+  "file": "chartvalue-06.png",
+  "question": "Using the y-axis gridlines, what is the value of bar A? Reply with only the integer.",
+  "answer": "8"
+ },
+ {
+  "id": "chartvalue-07",
+  "kind": "chartvalue",
+  "file": "chartvalue-07.png",
+  "question": "Using the y-axis gridlines, what is the value of bar C? Reply with only the integer.",
+  "answer": "16"
+ },
+ {
+  "id": "chartvalue-08",
+  "kind": "chartvalue",
+  "file": "chartvalue-08.png",
+  "question": "Using the y-axis gridlines, what is the value of bar B? Reply with only the integer.",
+  "answer": "12"
+ },
+ {
+  "id": "chartvalue-09",
+  "kind": "chartvalue",
+  "file": "chartvalue-09.png",
+  "question": "Using the y-axis gridlines, what is the value of bar B? Reply with only the integer.",
+  "answer": "9"
+ },
+ {
+  "id": "chartvalue-10",
+  "kind": "chartvalue",
+  "file": "chartvalue-10.png",
+  "question": "Using the y-axis gridlines, what is the value of bar D? Reply with only the integer.",
+  "answer": "3"
+ },
+ {
+  "id": "chartvalue-11",
+  "kind": "chartvalue",
+  "file": "chartvalue-11.png",
+  "question": "Using the y-axis gridlines, what is the value of bar A? Reply with only the integer.",
+  "answer": "4"
+ },
+ {
+  "id": "shade-00",
+  "kind": "shade",
+  "file": "shade-00.png",
+  "question": "The image is a grid of 3 rows and 4 columns of colored squares. What color is the square in row 1, column 1 (rows from the top, columns from the left, starting at 1)? Answer with exactly one of: blue, cyan, gold, green, lime, magenta, maroon, navy, olive, purple, red, teal.",
+  "answer": "cyan"
+ },
+ {
+  "id": "shade-01",
+  "kind": "shade",
+  "file": "shade-01.png",
+  "question": "The image is a grid of 3 rows and 4 columns of colored squares. What color is the square in row 1, column 4 (rows from the top, columns from the left, starting at 1)? Answer with exactly one of: blue, cyan, gold, green, lime, magenta, maroon, navy, olive, purple, red, teal.",
+  "answer": "green"
+ },
+ {
+  "id": "shade-02",
+  "kind": "shade",
+  "file": "shade-02.png",
+  "question": "The image is a grid of 3 rows and 4 columns of colored squares. What color is the square in row 1, column 4 (rows from the top, columns from the left, starting at 1)? Answer with exactly one of: blue, cyan, gold, green, lime, magenta, maroon, navy, olive, purple, red, teal.",
+  "answer": "blue"
+ },
+ {
+  "id": "shade-03",
+  "kind": "shade",
+  "file": "shade-03.png",
+  "question": "The image is a grid of 3 rows and 4 columns of colored squares. What color is the square in row 1, column 3 (rows from the top, columns from the left, starting at 1)? Answer with exactly one of: blue, cyan, gold, green, lime, magenta, maroon, navy, olive, purple, red, teal.",
+  "answer": "cyan"
+ },
+ {
+  "id": "shade-04",
+  "kind": "shade",
+  "file": "shade-04.png",
+  "question": "The image is a grid of 3 rows and 4 columns of colored squares. What color is the square in row 2, column 2 (rows from the top, columns from the left, starting at 1)? Answer with exactly one of: blue, cyan, gold, green, lime, magenta, maroon, navy, olive, purple, red, teal.",
+  "answer": "olive"
+ },
+ {
+  "id": "shade-05",
+  "kind": "shade",
+  "file": "shade-05.png",
+  "question": "The image is a grid of 3 rows and 4 columns of colored squares. What color is the square in row 3, column 3 (rows from the top, columns from the left, starting at 1)? Answer with exactly one of: blue, cyan, gold, green, lime, magenta, maroon, navy, olive, purple, red, teal.",
+  "answer": "blue"
+ },
+ {
+  "id": "shade-06",
+  "kind": "shade",
+  "file": "shade-06.png",
+  "question": "The image is a grid of 3 rows and 4 columns of colored squares. What color is the square in row 1, column 1 (rows from the top, columns from the left, starting at 1)? Answer with exactly one of: blue, cyan, gold, green, lime, magenta, maroon, navy, olive, purple, red, teal.",
+  "answer": "green"
+ },
+ {
+  "id": "shade-07",
+  "kind": "shade",
+  "file": "shade-07.png",
+  "question": "The image is a grid of 3 rows and 4 columns of colored squares. What color is the square in row 1, column 2 (rows from the top, columns from the left, starting at 1)? Answer with exactly one of: blue, cyan, gold, green, lime, magenta, maroon, navy, olive, purple, red, teal.",
+  "answer": "blue"
+ },
+ {
+  "id": "shade-08",
+  "kind": "shade",
+  "file": "shade-08.png",
+  "question": "The image is a grid of 3 rows and 4 columns of colored squares. What color is the square in row 3, column 4 (rows from the top, columns from the left, starting at 1)? Answer with exactly one of: blue, cyan, gold, green, lime, magenta, maroon, navy, olive, purple, red, teal.",
+  "answer": "purple"
+ },
+ {
+  "id": "shade-09",
+  "kind": "shade",
+  "file": "shade-09.png",
+  "question": "The image is a grid of 3 rows and 4 columns of colored squares. What color is the square in row 3, column 4 (rows from the top, columns from the left, starting at 1)? Answer with exactly one of: blue, cyan, gold, green, lime, magenta, maroon, navy, olive, purple, red, teal.",
+  "answer": "maroon"
+ },
+ {
+  "id": "shade-10",
+  "kind": "shade",
+  "file": "shade-10.png",
+  "question": "The image is a grid of 3 rows and 4 columns of colored squares. What color is the square in row 3, column 2 (rows from the top, columns from the left, starting at 1)? Answer with exactly one of: blue, cyan, gold, green, lime, magenta, maroon, navy, olive, purple, red, teal.",
+  "answer": "maroon"
+ },
+ {
+  "id": "shade-11",
+  "kind": "shade",
+  "file": "shade-11.png",
+  "question": "The image is a grid of 3 rows and 4 columns of colored squares. What color is the square in row 1, column 3 (rows from the top, columns from the left, starting at 1)? Answer with exactly one of: blue, cyan, gold, green, lime, magenta, maroon, navy, olive, purple, red, teal.",
+  "answer": "blue"
+ },
+ {
+  "id": "denselines-00",
+  "kind": "denselines",
+  "file": "denselines-00.png",
+  "question": "Read line number 1 (counting from the top, starting at 1). Reply with only the words of that line.",
+  "answer": "willow maple orbit glacier candle"
+ },
+ {
+  "id": "denselines-01",
+  "kind": "denselines",
+  "file": "denselines-01.png",
+  "question": "Read line number 5 (counting from the top, starting at 1). Reply with only the words of that line.",
+  "answer": "river copper violet maple summit"
+ },
+ {
+  "id": "denselines-02",
+  "kind": "denselines",
+  "file": "denselines-02.png",
+  "question": "Read line number 2 (counting from the top, starting at 1). Reply with only the words of that line.",
+  "answer": "river quartz stone meadow glacier"
+ },
+ {
+  "id": "denselines-03",
+  "kind": "denselines",
+  "file": "denselines-03.png",
+  "question": "Read line number 9 (counting from the top, starting at 1). Reply with only the words of that line.",
+  "answer": "stone ember willow candle willow"
+ },
+ {
+  "id": "denselines-04",
+  "kind": "denselines",
+  "file": "denselines-04.png",
+  "question": "Read line number 8 (counting from the top, starting at 1). Reply with only the words of that line.",
+  "answer": "willow violet glacier candle copper"
+ },
+ {
+  "id": "denselines-05",
+  "kind": "denselines",
+  "file": "denselines-05.png",
+  "question": "Read line number 7 (counting from the top, starting at 1). Reply with only the words of that line.",
+  "answer": "meadow lantern falcon summit orbit"
+ },
+ {
+  "id": "denselines-06",
+  "kind": "denselines",
+  "file": "denselines-06.png",
+  "question": "Read line number 3 (counting from the top, starting at 1). Reply with only the words of that line.",
+  "answer": "ember stone glacier orbit candle"
+ },
+ {
+  "id": "denselines-07",
+  "kind": "denselines",
+  "file": "denselines-07.png",
+  "question": "Read line number 3 (counting from the top, starting at 1). Reply with only the words of that line.",
+  "answer": "glacier summit orbit glacier meadow"
+ },
+ {
+  "id": "denselines-08",
+  "kind": "denselines",
+  "file": "denselines-08.png",
+  "question": "Read line number 2 (counting from the top, starting at 1). Reply with only the words of that line.",
+  "answer": "stone stone river ember river"
+ },
+ {
+  "id": "denselines-09",
+  "kind": "denselines",
+  "file": "denselines-09.png",
+  "question": "Read line number 6 (counting from the top, starting at 1). Reply with only the words of that line.",
+  "answer": "orbit falcon stone candle river"
+ },
+ {
+  "id": "denselines-10",
+  "kind": "denselines",
+  "file": "denselines-10.png",
+  "question": "Read line number 2 (counting from the top, starting at 1). Reply with only the words of that line.",
+  "answer": "candle lantern copper willow ember"
+ },
+ {
+  "id": "denselines-11",
+  "kind": "denselines",
+  "file": "denselines-11.png",
+  "question": "Read line number 5 (counting from the top, starting at 1). Reply with only the words of that line.",
+  "answer": "quartz river violet stone orbit"
+ }
+]

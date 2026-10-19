@@ -1,0 +1,98 @@
+{
+ "filler_10k": [
+  {
+   "prompt_tokens": 10021,
+   "completion_tokens": 512,
+   "ttft_s": 0.897,
+   "prefill_tok_s": 11176,
+   "decode_tok_s": 278.1
+  },
+  {
+   "prompt_tokens": 10005,
+   "completion_tokens": 512,
+   "ttft_s": 0.875,
+   "prefill_tok_s": 11439,
+   "decode_tok_s": 207.1
+  }
+ ],
+ "filler_32k": [
+  {
+   "prompt_tokens": 32003,
+   "completion_tokens": 512,
+   "ttft_s": 2.227,
+   "prefill_tok_s": 14371,
+   "decode_tok_s": 149.4
+  },
+  {
+   "prompt_tokens": 32008,
+   "completion_tokens": 512,
+   "ttft_s": 2.216,
+   "prefill_tok_s": 14444,
+   "decode_tok_s": 274.6
+  }
+ ],
+ "python_module_tests": [
+  {
+   "prompt_tokens": 45,
+   "completion_tokens": 600,
+   "ttft_s": 0.237,
+   "prefill_tok_s": 190,
+   "decode_tok_s": 258.5
+  },
+  {
+   "prompt_tokens": 45,
+   "completion_tokens": 600,
+   "ttft_s": 0.228,
+   "prefill_tok_s": 198,
+   "decode_tok_s": 245.5
+  }
+ ],
+ "rust_parser": [
+  {
+   "prompt_tokens": 45,
+   "completion_tokens": 600,
+   "ttft_s": 0.232,
+   "prefill_tok_s": 194,
+   "decode_tok_s": 292.9
+  },
+  {
+   "prompt_tokens": 45,
+   "completion_tokens": 600,
+   "ttft_s": 0.228,
+   "prefill_tok_s": 197,
+   "decode_tok_s": 298.6
+  }
+ ],
+ "tcp_explainer": [
+  {
+   "prompt_tokens": 42,
+   "completion_tokens": 600,
+   "ttft_s": 0.246,
+   "prefill_tok_s": 171,
+   "decode_tok_s": 228.8
+  },
+  {
+   "prompt_tokens": 42,
+   "completion_tokens": 600,
+   "ttft_s": 0.223,
+   "prefill_tok_s": 188,
+   "decode_tok_s": 227.4
+  }
+ ],
+ "refactor": [
+  {
+   "prompt_tokens": 105,
+   "completion_tokens": 600,
+   "ttft_s": 0.232,
+   "prefill_tok_s": 452,
+   "decode_tok_s": 241.5
+  },
+  {
+   "prompt_tokens": 105,
+   "completion_tokens": 600,
+   "ttft_s": 0.219,
+   "prefill_tok_s": 480,
+   "decode_tok_s": 234.0
+  }
+ ]
+}

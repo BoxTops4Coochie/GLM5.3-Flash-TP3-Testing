@@ -1,0 +1,59 @@
+# DeepSeek-V4.1-Flash-1017 TP3 release, image azallaza/ds41-kraken-tp3:20261019
+# (karmic-kraken-beta-20261016.2 + FlashInfer main 5b065abe b12x + the TP3 port in src/).
+# Defaults: original deepseek-ai weights (MXFP4 experts, lossless), DSpark 5 drafts with
+# every draft verified, 1M context, 4096-token prefill chunks, KV 2,185,581 tokens
+# (2.08x 1M), expert layers 20-25 parked in host RAM with their hottest experts promoted
+# to GPU after startup, Engram layer 1 in host RAM and layer 14 read from the checkpoint.
+# Needs 3x 96 GB GPUs and ~256 GB host RAM (~150 GB used). Tested at 350 W/GPU.
+services:
+  ds41-kraken-tp3:
+    image: "${DS41_IMAGE:-azallaza/ds41-kraken-tp3:20261019}"
+    container_name: ds41-kraken-tp3
+    restart: "no"
+    stop_grace_period: 90s
+    ipc: host
+    # io_uring (disk Engram reads) needs seccomp unconfined; pinned host memory needs memlock.
+    security_opt: [seccomp=unconfined]
+    ulimits:
+      memlock: -1
+      nofile: 1048576
+      stack: 67108864
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU0:-0}", "${GPU1:-1}", "${GPU2:-2}"]
+              capabilities: [gpu]
+    ports:
+      - "${HOST_PORT:-15015}:15015"
+    volumes:
+      # Populated Hugging Face cache with deepseek-ai/DeepSeek-V4.1-Flash-1017 @ 1bae0e10.
+      # Engram layer 14 is read from these files during serving: keep them on an NVMe drive.
+      - ${HF_CACHE_DIR:?Set HF_CACHE_DIR to your populated Hugging Face cache}:/root/.cache/huggingface:ro
+      # b12x compile/tuning caches and the promotion arm file; a fresh volume makes the
+      # first start ~10 minutes longer while kernels compile.
+      - runtime-cache:/cache
+    environment:
+      MODEL: "${MODEL:-deepseek-ai/DeepSeek-V4.1-Flash-1017}"
+      # Fixed KV pool per GPU. 2.25 GiB = 2,185,581 tokens at 4096-token chunks.
+      KV_CACHE_MEMORY_BYTES: "${KV_CACHE_MEMORY_BYTES:-2415919104}"
+      # Expert layers (ordinals FROM..TO) kept in host RAM at startup; after the server is
+      # healthy, their most-routed experts move to GPU memory until RESERVE bytes remain free.
+      # 20-25 measured best (20-22: -5% decode, -10% at 4 users; 20-29: no further gain).
+      DS41_OFFLOAD_FROM_ORDINAL: "${DS41_OFFLOAD_FROM:-20}"
+      DS41_OFFLOAD_TO_ORDINAL: "${DS41_OFFLOAD_TO:-25}"
+      # GPU memory left free after promotion: prefill scratch for 4096-token chunks.
+      # 768 MiB runs out of memory on a 31K-token prompt.
+      B12X_DEFERRED_BANK_RESERVE_BYTES: "${RESERVE_BYTES:-1073741824}"
+      # Engram layers whose tables live in pinned host RAM (31.5 GiB per GPU worker each).
+      # Both tables (1,14) do not fit next to the parked expert layers on 256 GB.
+      DS41_ENGRAM_RAM_LAYERS: "${ENGRAM_RAM_LAYERS:-1}"
+      # Host RAM row cache for the disk Engram table, in rows (256 B each): 8388608 = 2 GiB
+      # per GPU worker. 0 = read every row from the checkpoint.
+      DS41_ENGRAM_ROW_CACHE_ROWS: "${ENGRAM_ROW_CACHE_ROWS:-8388608}"
+      # Mount a different lil launcher settings file here to change context, drafts or chunking.
+      DS41_LAUNCH_SETTINGS: "${DS41_LAUNCH_SETTINGS:-/etc/ds41/launch.yaml}"
+      HF_HUB_OFFLINE: "1"
+volumes:
+  runtime-cache:

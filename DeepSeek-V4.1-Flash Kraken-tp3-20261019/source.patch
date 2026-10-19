@@ -1,0 +1,3437 @@
+--- a/vllm/model_executor/layers/fused_moe/b12x.py
++++ b/vllm/model_executor/layers/fused_moe/b12x.py
+@@ -4,7 +4,9 @@
+ 
+ import functools
+ import inspect
++import os
+ import weakref
++import threading
+ from collections.abc import Sequence
+ from dataclasses import dataclass
+ from functools import partial
+@@ -44,6 +46,21 @@
+     reuse_packed_weight_storage,
+     set_b12x_preparation_provider,
+ )
++from vllm.model_executor.layers.fused_moe.expert_residency import (
++    BANK_BUDGET_ENV,
++    BANK_ENABLE_ENV,
++    BANK_HISTOGRAM_ENV,
++    BANK_SLOTS,
++    BankModeRejected,
++    DeferredWeightBanks,
++    ExpertRouteMonitor,
++    _slot_stride_bytes,
++    bank_receipt,
++    build_expert_banks,
++    parse_histogram_env,
++    select_hot_experts,
++)
++
+ 
+ logger = init_logger(__name__)
+ 
+@@ -64,6 +81,78 @@
+ }
+ 
+ 
++def _install_codec_aware_tuning():
++    """When B12X_SCALE_CODEC=1, pin every component's tuning to its heuristic
++    default.  After weights, compact scale planes, and full expert promotion
++    land, only ~1.5 GiB of headroom remains per rank, which is not enough to
++    hold even a single measured trial's scratch for the attention components.
++    The pin goes through configure()'s override slot, so each obligation
++    settles through the same pinned path the heuristic mode uses and never
++    enumerates candidates."""
++    if (
++        os.environ.get("B12X_SCALE_CODEC", "0") != "1"
++        and os.environ.get("DS41_B12X_CSF", "0") != "1"
++    ):
++        return
++    # Online CSF (DS41_B12X_CSF=1) needs the pin too: each TP rank compresses
++    # different expert scales, so measured MoE tuning keys differ per rank and
++    # the startup coordinator rejects them as incompatible boundaries.
++    # B12X_CODEC_PIN_TUNING=0 keeps measured tuning with the codec; the pin
++    # exists only for placements without startup headroom for tuning trials.
++    if os.environ.get("B12X_CODEC_PIN_TUNING", "1") == "0":
++        return
++    from b12x.preparation import PreparationSession, TuningContract
++
++    _stock_configure = TuningContract.configure
++    # Comma-separated component-ID prefixes to pin, or "all". MoE must stay
++    # pinned: its measured candidates include layouts the compact scales reject.
++    pinned = os.environ.get("B12X_CODEC_PIN_COMPONENTS", "all")
++    prefixes = None if pinned == "all" else tuple(p for p in pinned.split(",") if p)
++
++    def _codec_configure(self, query, *, device, override=None, search=True):
++        if override is None and (
++            prefixes is None or self.component_id.startswith(prefixes)
++        ):
++            override = self.default_config(query, device)
++        return _stock_configure(
++            self, query, device=device, override=override, search=search
++        )
++
++    TuningContract.configure = _codec_configure
++
++    # Narrow the measured race: every resident trial carries its own scratch,
++    # and after the weights, compact scale planes, and full expert promotion
++    # land together, roughly 1.6 GiB of headroom remains per rank. Keep only
++    # a champion plus one challenger resident and cap concurrent scratch so
++    # the race fits that headroom.
++    _stock_init = PreparationSession.__init__
++
++    def _narrow_init(self, *args, **kwargs):
++        kwargs.setdefault("race_batch", 2)
++        kwargs.setdefault("race_budget", 128 * 1024 * 1024)
++        _stock_init(self, *args, **kwargs)
++
++    PreparationSession.__init__ = _narrow_init
++
++
++_install_codec_aware_tuning()
++
++def promote_pending_inplace() -> None:
++    """Run in-place promotion now for every armed, still-pending VMM layer."""
++    for backend in list(_PENDING_INPLACE_LAYERS):
++        backend._promote_inplace()
++
++
++# Deferred banks not yet promoted. With B12X_DEFERRED_BANK_EVEN_SPLIT=1 each
++# promotion takes an equal share of the remaining budget instead of the first
++# layer filling up and starving the later ones; with route-ordered promotion
++# that keeps each layer's most-routed experts resident.
++_PENDING_DEFERRED_BANKS: "weakref.WeakSet[DeferredWeightBanks]" = weakref.WeakSet()
++# Bank-free in-place mode (B12X_DEFERRED_INPLACE=1, B12X_DEFERRED_WEIGHT_BANKS=0):
++# VMM-backed expert layers awaiting promotion of their canonical regions.
++_PENDING_INPLACE_LAYERS: "weakref.WeakSet[Any]" = weakref.WeakSet()
++
++
+ def _require_b12x_fused_moe() -> Any:
+     fused_moe = get_b12x_fused_moe()
+     assert fused_moe is not None
+@@ -280,6 +369,42 @@
+     return "mxfp8_e8m0_k32" in {fmt.value for fmt in PackedSourceFormat}
+ 
+ 
++
++def _online_csf_enabled(source_format: str, quant_mode: str) -> bool:
++    """DS41_B12X_CSF=1 compresses native MXFP4 expert scales while preparing."""
++    return (
++        os.environ.get("DS41_B12X_CSF", "0") == "1"
++        and source_format == "fp4_e8m0_k32"
++        and quant_mode in ("w4a8_mx", "w4a16")
++    )
++
++
++_CSF_SCALE_SCRATCH: dict[torch.device, tuple[torch.Tensor, torch.Tensor]] = {}
++
++
++def _shared_csf_scale_scratch(
++    w1_scale: torch.Tensor, w2_scale: torch.Tensor
++) -> tuple[torch.Tensor, torch.Tensor]:
++    """Return this device's CSF expansion buffers, sized by the first layer.
++
++    The first prepared layer is a full target layer, the largest MoE on the
++    device; a later, larger layer would need buffers its predecessors do not
++    reference, so it is rejected instead of silently reallocating.
++    """
++    device = w1_scale.device
++    need = (w1_scale.numel() * w1_scale.element_size(),
++            w2_scale.numel() * w2_scale.element_size())
++    scratch = _CSF_SCALE_SCRATCH.get(device)
++    if scratch is None:
++        scratch = tuple(
++            torch.empty(n, dtype=torch.uint8, device=device) for n in need
++        )
++        _CSF_SCALE_SCRATCH[device] = scratch
++        logger.info("b12x online CSF scale scratch: %d + %d bytes on %s", *need, device)
++    if any(n > s.numel() for n, s in zip(need, scratch)):
++        raise ValueError("b12x online CSF: a later MoE layer outgrows the shared scratch")
++    return scratch
++
+ class B12xExperts(mk.FusedMoEExpertsModular):
+     """Packed MoE experts backed by the b12x SM12x planned API."""
+ 
+@@ -380,6 +505,9 @@
+         self._plan_key: tuple | None = None
+         self._plan_activation: MoEActivation | None = None
+         self._plan_route_on_input: bool | None = None
++        self._deferred_bank_lock = threading.Lock()
++        self._deferred_bank_promoted = False
++        self._route_monitor: ExpertRouteMonitor | None = None
+ 
+     def _unit_scale(self, device: torch.device, num_experts: int) -> torch.Tensor:
+         scale = self._unit_scales.get(device)
+@@ -525,7 +653,13 @@
+             "w4a8_nvfp4": fused_moe.ActivationMode.A8,
+             "nvfp4": fused_moe.ActivationMode.A4,
+         }[quant_mode]
++        online_csf = _online_csf_enabled(self._source_format, quant_mode)
+         weight_plan = fused_moe.plan_weights(
++            constraints=(
++                fused_moe.WeightPlanConstraints(scale_compression="csf")
++                if online_csf
++                else None
++            ),
+             source=fused_moe.PackedSource(
+                 format=fused_moe.PackedSourceFormat(self._source_format),
+                 w13_layout=fused_moe.W13Layout(self._w13_layout),
+@@ -545,8 +679,16 @@
+                 intermediate_size=intermediate_size,
+             ),
+         )
++        # Lossless per-row scale compression (FlashInfer b12x
++        # scale_compression="csf"): the prepared experts keep compressed scales
++        # and expand them into scratch shared by every layer on this device;
++        # layers run serially on one stream.
++        scale_scratch = (
++            _shared_csf_scale_scratch(w1_scale, w2_scale) if online_csf else None
++        )
+         return fused_moe.prepare_weights(
+             plan=weight_plan,
++            scale_scratch=scale_scratch,
+             weights=fused_moe.PackedWeights(
+                 w13=w1,
+                 w2=w2,
+@@ -603,6 +745,110 @@
+         layer._b12x_prepared_experts = prepared
+         return prepared
+ 
++    def _attach_expert_banks(self, layer: torch.nn.Module, prepared: Any) -> None:
++        """Publish pointer banks when the placement opts in via env."""
++
++        budget = os.environ.get(BANK_BUDGET_ENV)
++        deferred = os.environ.get("B12X_DEFERRED_WEIGHT_BANKS", "0") == "1"
++        if not deferred and os.environ.get("B12X_DEFERRED_INPLACE", "0") == "1":
++            from vllm.model_executor.offloader.vmm_shim import vmm_owner_for_tensor
++
++            impl = getattr(prepared, "_impl", prepared)
++            payload = impl.representation_for("w4a8_mx")
++            owners = (
++                vmm_owner_for_tensor(payload.w13_rp),
++                vmm_owner_for_tensor(payload.w2_rp),
++            )
++            if all(owner is not None for owner in owners):
++                self._inplace_owners = owners
++                _PENDING_INPLACE_LAYERS.add(self)
++            return
++        if deferred:
++            if os.environ.get("B12X_SCALE_CODEC", "0") != "1":
++                raise BankModeRejected("deferred weight banks require B12X_SCALE_CODEC=1")
++            if budget is not None and os.environ.get(BANK_ENABLE_ENV, "1") != "0":
++                raise BankModeRejected(
++                    "deferred weight banks replace startup expert banks"
++                )
++            impl = getattr(prepared, "_impl", prepared)
++            payload = impl.representation_for("w4a8_mx")
++            from vllm.model_executor.offloader.vmm_shim import vmm_owner_for_tensor
++
++            owners = (
++                vmm_owner_for_tensor(payload.w13_rp),
++                vmm_owner_for_tensor(payload.w2_rp),
++            )
++            if any(owner is None for owner in owners):
++                return
++            mapping = {
++                "w13_bank": payload.w13_rp,
++                "down_bank": payload.w2_rp,
++                "sfbw13_bank": payload.w13_sfb,
++                "sfbdown_bank": payload.w2_sfb,
++            }
++            banks = DeferredWeightBanks(
++                mapping,
++                num_experts=int(impl.num_experts),
++                device=impl.w1_fp4.device,
++                owners=owners,
++            )
++            _PENDING_DEFERRED_BANKS.add(banks)
++            from b12x.moe.fused_moe._impl import attach_expert_banks as _attach_banks
++
++            _attach_banks(impl, banks)
++            logger.warning(
++                "b12x deferred weight banks layer=%s %s",
++                getattr(layer, "_b12x_layer_index", "?"),
++                banks.receipt(),
++            )
++            return
++        if budget is None or os.environ.get(BANK_ENABLE_ENV, "1") == "0":
++            return
++        if os.environ.get("B12X_SCALE_CODEC", "0") == "1":
++            raise BankModeRejected(
++                "B12X_SCALE_CODEC and startup expert pointer banks are mutually exclusive"
++            )
++        impl = getattr(prepared, "_impl", prepared)
++        payload = impl.representation_for("w4a8_mx")
++        if bool(getattr(payload, "n64_repack", False)):
++            raise BankModeRejected(
++                "expert banks support the N128 repacked w4a8_mx path only; "
++                "the N64 repack variant must keep legacy arithmetic"
++            )
++        mapping = {
++            "w13_bank": payload.w13_rp,
++            "down_bank": payload.w2_rp,
++            "sfbw13_bank": payload.w13_sfb,
++            "sfbdown_bank": payload.w2_sfb,
++        }
++        num_experts = int(impl.num_experts)
++        strides = [
++            _slot_stride_bytes(mapping[name], num_experts) for name in BANK_SLOTS
++        ]
++        histogram = parse_histogram_env(
++            os.environ.get(BANK_HISTOGRAM_ENV), num_experts=num_experts
++        )
++        hot_ids = select_hot_experts(
++            histogram,
++            num_experts=num_experts,
++            expert_bytes=sum(strides),
++            budget_bytes=int(budget),
++        )
++        banks = build_expert_banks(
++            mapping,
++            num_experts=num_experts,
++            hot_ids=hot_ids,
++            device=impl.w1_fp4.device,
++        )
++        from b12x.moe.fused_moe._impl import attach_expert_banks as _attach_banks
++        _attach_banks(impl, banks)
++        logger.info(
++            "b12x expert banks layer=%s %s",
++            getattr(layer, "_b12x_layer_index", "?"),
++            bank_receipt(banks, expert_bytes=sum(strides)),
++        )
++
++
+     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+         if self._source_format == "exl3":
+             raise RuntimeError("EXL3 weights require install_prepared_experts")
+@@ -620,10 +866,38 @@
+             params_dtype=self.moe_config.in_dtype,
+         )
+         prepared = self._reuse_prepared_storage(layer, prepared)
++        if os.environ.get("B12X_SCALE_CODEC", "0") == "1":
++            payload = prepared._impl.representation_for("w4a8_mx")
++            logger.warning(
++                "b12x scale codec layer=%s w13_dtype=%s w2_dtype=%s "
++                "encoded_bytes=%d",
++                getattr(layer, "_b12x_layer_index", "?"),
++                payload.w13_sfb.dtype,
++                payload.w2_sfb.dtype,
++                payload.w13_sfb.nbytes + payload.w2_sfb.nbytes,
++            )
+         if prepared.plan._impl.discards_source_parameters:
+             self._release_source_parameters(layer)
++        self._attach_expert_banks(layer, prepared)
+         if not getattr(layer, "b12x_preparation_suppressed", False):
+             set_b12x_preparation_provider(layer, self)
++        if os.environ.get("B12X_EXPERT_ROUTES_ALL", "0") == "1":
++            banks = getattr(getattr(prepared, "_impl", prepared), "banks", None)
++            if not isinstance(banks, DeferredWeightBanks):
++                import re
++
++                layer_name = getattr(layer, "layer_name", "")
++                match = re.search(r"layers\.(\d+)", layer_name)
++                if match is None:
++                    raise ValueError(
++                        "all-layer route monitor cannot parse layer id from "
++                        f"{layer_name!r}"
++                    )
++                self._route_monitor = ExpertRouteMonitor(
++                    layer_ordinal=int(match.group(1)),
++                    num_experts=int(prepared.num_experts),
++                    device=prepared.device,
++                )
+         _register_b12x_moe_output_collective(
+             layer, hidden_size=int(prepared.hidden_size)
+         )
+@@ -806,6 +1080,124 @@
+             and not moe_parallel_config.enable_eplb
+         )
+ 
++    def _promote_inplace(self) -> None:
++        """Remap this layer's VMM expert regions to device memory once armed.
++
++        Regions are promoted whole (w13, then w2) at their canonical VA, so
++        captured graphs and every kernel path read device memory afterwards.
++        """
++        owners = getattr(self, "_inplace_owners", None)
++        if owners is None or self._deferred_bank_promoted:
++            return
++        arm_file = os.environ.get("B12X_DEFERRED_BANK_ARM_FILE", "")
++        if not arm_file or not os.path.exists(arm_file):
++            return
++        if torch.cuda.is_current_stream_capturing():
++            return
++        with self._deferred_bank_lock:
++            if self._deferred_bank_promoted:
++                return
++            reserve = int(
++                os.environ.get("B12X_DEFERRED_BANK_RESERVE_BYTES", str(1 << 30))
++            )
++            torch.cuda.empty_cache()
++            free_bytes, _ = torch.cuda.mem_get_info()
++            budget = max(0, int(free_bytes) - reserve)
++            chunked = all(getattr(o, "num_chunks", 0) for o in owners)
++            if chunked:
++                # Equal share per pending layer; each layer's chunks hold its
++                # most-routed experts first (hot-first relabeling at load).
++                budget //= max(1, len(_PENDING_INPLACE_LAYERS))
++            _PENDING_INPLACE_LAYERS.discard(self)
++            promoted = 0
++            if chunked:
++                progress = True
++                while progress:
++                    progress = False
++                    for owner in owners:
++                        index = owner._chunk_promoted
++                        if index >= owner.num_chunks:
++                            continue
++                        size = owner._cold_chunks[index][1]
++                        if promoted + size > budget:
++                            continue
++                        promoted += owner.promote_chunk()
++                        progress = True
++            else:
++                for owner in owners:
++                    promoted += owner.promote_up_to(max(0, budget - promoted))
++            self._deferred_bank_promoted = True
++            logger.warning(
++                "b12x in-place VMM promotion free_before=%d reserve=%d "
++                "promoted=%d regions_hot=%d/%d chunks_hot=%s",
++                free_bytes,
++                reserve,
++                promoted,
++                sum(1 for o in owners if o.hot_bytes),
++                len(owners),
++                [f"{o._chunk_promoted}/{o.num_chunks}" for o in owners] if chunked else "-",
++            )
++
++    def _promote_deferred_banks(self, prepared: Any) -> None:
++        banks = getattr(getattr(prepared, "_impl", prepared), "banks", None)
++        arm_file = os.environ.get("B12X_DEFERRED_BANK_ARM_FILE", "")
++        if not arm_file or not os.path.exists(arm_file):
++            return
++        if not isinstance(banks, DeferredWeightBanks) or self._deferred_bank_promoted:
++            return
++        if torch.cuda.is_current_stream_capturing():
++            return
++        with self._deferred_bank_lock:
++            if self._deferred_bank_promoted:
++                return
++            reserve = int(
++                os.environ.get("B12X_DEFERRED_BANK_RESERVE_BYTES", str(1 << 30))
++            )
++            # mem_get_info cannot see blocks the caching allocator holds but
++            # does not use (~1.25 GiB/rank measured); return them first so the
++            # budget covers them. Each bank's slab is one large allocation, so
++            # those scattered free blocks could not be reused in place anyway.
++            torch.cuda.empty_cache()
++            free_bytes, _ = torch.cuda.mem_get_info(prepared.device)
++            budget = max(0, int(free_bytes) - reserve)
++            if os.environ.get("B12X_DEFERRED_BANK_EVEN_SPLIT", "0") == "1":
++                budget //= max(1, len(_PENDING_DEFERRED_BANKS))
++            _PENDING_DEFERRED_BANKS.discard(banks)
++            if os.environ.get("B12X_DEFERRED_INPLACE", "0") == "1":
++                # Remap the layer's canonical VMM regions to device memory at
++                # the same VA instead of copying experts into separate slabs.
++                # Every kernel path, banked or not, then reads device memory,
++                # and captured graphs keep valid addresses. Promotion is whole
++                # regions (w13, then w2); the cold bank tables already point
++                # at those canonical addresses.
++                promoted = 0
++                for owner in banks.owners:
++                    promoted += owner.promote_up_to(max(0, budget - promoted))
++                banks.enable_routes()
++                self._deferred_bank_promoted = True
++                logger.warning(
++                    "b12x in-place VMM promotion free_before=%d reserve=%d "
++                    "promoted=%d regions_hot=%d/%d",
++                    free_bytes,
++                    reserve,
++                    promoted,
++                    sum(1 for o in banks.owners if o.hot_bytes),
++                    len(banks.owners),
++                )
++                return
++            promoted = banks.promote_up_to(budget)
++            banks.enable_routes()
++            self._deferred_bank_promoted = True
++            logger.warning(
++                "b12x deferred weight promotion free_before=%d reserve=%d "
++                "promoted=%d hot=%d cold=%d",
++                free_bytes,
++                reserve,
++                promoted,
++                len(banks.hot_ids),
++                len(banks.cold_ids),
++            )
++
+     @staticmethod
+     def activation_format() -> mk.FusedMoEActivationFormat:
+         return mk.FusedMoEActivationFormat.Standard
+@@ -1065,6 +1457,11 @@
+                 "apply_router_weight_on_input does not match the prepared b12x MoE plan"
+             )
+         prepared = self._prepared()
++        self._promote_deferred_banks(prepared)
++        self._promote_inplace()
++        banks = getattr(getattr(prepared, "_impl", prepared), "banks", None)
++        if isinstance(banks, DeferredWeightBanks):
++            banks.record_routes(topk_ids)
+         # Native routes are specialized for both int32 and int64 identifiers
+         # during materialization.  Preserve the caller's representation: a
+         # conversion here would allocate during capture and would silently
+@@ -1074,6 +1471,11 @@
+             or not topk_ids.is_contiguous()
+         ):
+             raise TypeError("b12x MoE topk_ids must be contiguous int32 or int64")
++        if self._route_monitor is not None:
++            arm_file = os.environ.get("B12X_DEFERRED_BANK_ARM_FILE", "")
++            if arm_file and os.path.exists(arm_file):
++                self._route_monitor.enable()
++            self._route_monitor.record_routes(topk_ids)
+         topk_weights = _normalize_topk_weights(topk_weights)
+         plan = self._plan_for_tokens(
+             int(hidden_states.shape[0]),
+--- /dev/null
++++ b/vllm/model_executor/layers/fused_moe/expert_residency.py
+@@ -0,0 +1,657 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""Per-expert pointer-bank residency for b12x w4a8_mx MoE weights.
++
++Single policy path when bank mode is enabled. It REPLACES the prefix-only
++page-residency plan for targeted layers on opt-in: hot experts become
++dense-packed in GPU memory at true per-expert quanta, cold experts stay in
++the existing pinned device-readable host backing. When bank mode is disabled
++nothing here runs and the existing prefix/whole-parameter behaviour is
++untouched; there is intentionally no second silent policy layered beside it.
++
++Opt-in is per placement through the launcher environment
++(``B12X_EXPERT_BANK_BUDGET_BYTES`` with optional
++``B12X_EXPERT_BANK_HISTOGRAM``/``B12X_EXPERT_BANK_ENABLE``); it is never
++inferred from ambient state. Podman ``-e`` is required for container env
++delivery; launcher argument separation is preserved.
++
++Frozen contract with the kernel side:
++
++- four device Int64 tables ``w13_bank``/``down_bank``/``sfbw13_bank``/
++  ``sfbdown_bank``, length ``E``; entry ``e`` is the absolute BYTE address
++  of logical/local expert ``e``'s prepared slice inside its owned backing.
++  Intra-expert offsets keep their existing units (word offsets stay word
++  offsets; the loaded value is bytes).
++- Tables are indexed by the logical/local expert identity routing produces;
++  this module never renumbers experts. Gate/up order, packed bytes, scale
++  encoding, TP-local shapes, alphas and routing weights are preserved
++  verbatim by copying whole per-expert slices.
++- Supported recipes: N128-repacked ``w4a8_mx`` (``n64_repack=False``,
++  ``w4a8_b_tma=False``). Every other recipe rejects bank mode explicitly
++  with :class:`BankModeRejected` instead of silently falling back.
++"""
++
++from __future__ import annotations
++
++from collections.abc import Mapping, Sequence
++from dataclasses import dataclass
++from typing import Any
++import json
++import logging
++import os
++from pathlib import Path
++import threading
++import time
++
++import torch
++
++BANK_ENABLE_ENV = "B12X_EXPERT_BANK_ENABLE"
++BANK_BUDGET_ENV = "B12X_EXPERT_BANK_BUDGET_BYTES"
++BANK_HISTOGRAM_ENV = "B12X_EXPERT_BANK_HISTOGRAM"
++
++# The four canonical expert operands, in launch-ABI binding order.
++BANK_SLOTS: tuple[str, ...] = (
++    "w13_bank",
++    "down_bank",
++    "sfbw13_bank",
++    "sfbdown_bank",
++)
++
++_ALIGNMENT_BYTES = 8
++_ROUTE_KERNELS = None
++
++
++def _route_kernels():
++    global _ROUTE_KERNELS
++    if _ROUTE_KERNELS is not None:
++        return _ROUTE_KERNELS
++    # Lazy import keeps the non-CUDA residency bookkeeping usable on CPU.
++    import triton
++    import triton.language as tl
++
++    @triton.jit(do_not_specialize=["N"])
++    def count(IDS, COUNTS, ENABLED, N, EXPERTS: tl.constexpr,
++              BLOCK: tl.constexpr):
++        if tl.load(ENABLED) != 0:
++            offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
++            ids = tl.load(IDS + offsets, offsets < N, other=-1)
++            tl.atomic_add(COUNTS + ids, 1,
++                          (offsets < N) & (ids >= 0) & (ids < EXPERTS),
++                          sem="relaxed")
++
++    @triton.jit
++    def sample(COUNTS, OUT, EXPERTS: tl.constexpr, BLOCK: tl.constexpr):
++        ids = tl.arange(0, BLOCK)
++        values = tl.atomic_add(COUNTS + ids, 0, ids < EXPERTS, sem="relaxed")
++        tl.store(OUT + ids, values, ids < EXPERTS)
++
++    _ROUTE_KERNELS = (count, sample)
++    return _ROUTE_KERNELS
++
++
++class BankModeRejected(RuntimeError):
++    """The prepared recipe is outside the supported bank-mode matrix."""
++
++
++@dataclass(frozen=True)
++class ExpertBankSet:
++    """One layer's owned pointer banks and backing.
++
++    The descriptor references this object for the whole graph/plan lifetime,
++    and it owns the hot GPU slab, so every address stored in the four tables
++    stays valid while the descriptor is alive. ``hot_ids`` are logical IDs
++    resident in GPU memory in a dense slab; cold IDs keep pointing into the
++    existing pinned device-readable stacked storage. ``table_for`` is the
++    accessor the host ABI validates against.
++    """
++
++    w13_bank: torch.Tensor
++    down_bank: torch.Tensor
++    sfbw13_bank: torch.Tensor
++    sfbdown_bank: torch.Tensor
++    hot_slabs: tuple[torch.Tensor, ...]
++    hot_ids: tuple[int, ...]
++    cold_ids: tuple[int, ...]
++    slot_stride_bytes: tuple[int, ...] = tuple()
++
++    def table_for(self, slot: str) -> torch.Tensor:
++        tables = {name: getattr(self, name) for name in BANK_SLOTS}
++        return tables[slot]
++
++
++class ExpertRouteMonitor:
++    """Counter-only routed-expert monitor for GPU-resident layers."""
++
++    def __init__(self, *, layer_ordinal, num_experts, device):
++        self.layer_ordinal = int(layer_ordinal)
++        self.num_experts = _require_positive_int(num_experts, "num_experts")
++        self.device = torch.device(device)
++        self.rank = (torch.distributed.get_rank() if torch.distributed.is_initialized()
++                     else int(os.environ.get("RANK", "0")))
++        self.route_counts = torch.zeros(
++            self.num_experts, dtype=torch.int64, device=self.device
++        )
++        self.route_enabled = torch.zeros((), dtype=torch.int32, device=self.device)
++        self._route_sample = torch.empty_like(self.route_counts)
++        self._route_host = torch.empty(
++            self.num_experts, dtype=torch.int64, pin_memory=True
++        )
++        self._route_stream = torch.cuda.Stream(device=self.device)
++        self._count_routes, self._sample_routes = _route_kernels()
++        for dtype in (torch.int32, torch.int64):
++            ids = torch.zeros(256, dtype=dtype, device=self.device)
++            self.record_routes(ids)
++        self._sample_routes[(1,)](
++            self.route_counts, self._route_sample, self.num_experts, 512
++        )
++        self._route_ready = torch.cuda.Event()
++        self._route_ready.record()
++        self._route_interval = float(
++            os.environ.get("B12X_EXPERT_ROUTES_INTERVAL", "30")
++        )
++        if self._route_interval <= 0:
++            raise ValueError("route snapshot interval must be positive")
++        self._started = False
++
++    def record_routes(self, topk_ids):
++        if (topk_ids.dtype not in (torch.int32, torch.int64)
++                or not topk_ids.is_contiguous()
++                or topk_ids.device != self.route_counts.device):
++            raise ValueError("routes require contiguous int32/int64 IDs on monitor device")
++        n = topk_ids.numel()
++        if n:
++            self._count_routes[((n + 255) // 256,)](
++                topk_ids, self.route_counts, self.route_enabled,
++                n, self.num_experts, 256,
++            )
++
++    def enable(self):
++        if self._started:
++            return
++        self.route_enabled.fill_(1)
++        self._route_ready.record()
++        self._started = True
++        threading.Thread(
++            target=self._dump_loop,
++            daemon=True,
++            name=f"all-expert-routes-{self.rank}-{self.layer_ordinal}",
++        ).start()
++
++    def _dump_loop(self):
++        while True:
++            time.sleep(self._route_interval)
++            try:
++                self.dump_routes()
++            except Exception:
++                logging.getLogger(__name__).exception("all-layer route snapshot failed")
++
++    def dump_routes(self, directory="/cache"):
++        with torch.cuda.device(self.device), torch.cuda.stream(self._route_stream):
++            self._route_stream.wait_event(self._route_ready)
++            self._sample_routes[(1,)](
++                self.route_counts, self._route_sample, self.num_experts, 512
++            )
++            self._route_host.copy_(self._route_sample, non_blocking=True)
++        self._route_stream.synchronize()
++        counts = self._route_host.tolist()
++        payload = dict(
++            rank=self.rank,
++            layer=self.layer_ordinal,
++            total_routes=sum(counts),
++            counts=counts,
++            timestamp=time.time(),
++        )
++        path = Path(directory) / (
++            f"all-expert-routes-rank{self.rank}-layer{self.layer_ordinal}.json"
++        )
++        temporary = path.with_suffix(f".{os.getpid()}.tmp")
++        temporary.write_text(json.dumps(payload) + "\n")
++        os.replace(temporary, path)
++        return payload
++
++    # Counter-only monitor intentionally has no expert-bank table interface.
++
++
++class DeferredWeightBanks:
++    """All-cold codec banks, then a replaceable weight-only VRAM cache.
++
++    Caller owns launch exclusion for construction, promotion and eviction.
++    Tables never move; RAM tensors and their VMM owners remain retained.
++    Scale ABI slots alias weight tables solely as unused pointer carriers;
++    the codec specialization never loads them. No scale slabs exist.
++    """
++
++    def __init__(self, prepared, *, num_experts, device, owners,
++                 quant_recipe="w4a8_mx", n128_repacked=True, banks=None):
++        if banks is not None or quant_recipe != "w4a8_mx" or not n128_repacked:
++            raise BankModeRejected("deferred codec banks require non-bank N128 w4a8_mx")
++        self.num_experts = _require_positive_int(num_experts, "num_experts")
++        self.device = torch.device(device)
++        self.owners = tuple(owners)
++        if len(self.owners) != 2 or any(getattr(o, "operand_role", None) != "weight" for o in self.owners):
++            raise BankModeRejected("deferred banks require two retained VMM weight owners")
++        self.sources = tuple(prepared[name] for name in ("w13_bank", "down_bank"))
++        for source, owner in zip(self.sources, self.owners):
++            if not source.is_contiguous() or source.numel() % num_experts:
++                raise BankModeRejected("weights require contiguous whole expert slices")
++            if source.data_ptr() != owner.va or owner.hot_bytes != 0:
++                raise BankModeRejected("weights must use all-cold canonical VMM storage")
++        self.scales = tuple(prepared[name] for name in ("sfbw13_bank", "sfbdown_bank"))
++        if any(s.dtype != torch.uint32 or not s.is_contiguous() for s in self.scales):
++            raise BankModeRejected("deferred banks require contiguous Uint32 codec containers")
++        self.slot_stride_bytes = tuple(_slot_stride_bytes(s, num_experts) for s in self.sources)
++        self.expert_bytes = sum(self.slot_stride_bytes)
++        self._cold_tables = tuple(
++            torch.tensor([s.data_ptr() + e * stride for e in range(num_experts)], dtype=torch.int64)
++            for s, stride in zip(self.sources, self.slot_stride_bytes)
++        )
++        self.w13_bank, self.down_bank = tuple(t.to(self.device) for t in self._cold_tables)
++        self.hot_slabs = ()
++        self.hot_ids = ()
++        self.cold_ids = tuple(range(num_experts))
++        self._committed_tables = self._cold_tables
++        self._failed_backing = ()
++        self._publication_failed = False
++        self.layer_ordinal = getattr(self.owners[0], "layer_ordinal", None)
++        self._route_lock = threading.RLock()
++        self._routes = os.environ.get("B12X_EXPERT_ROUTES", "0") == "1"
++        self._routes_started = False
++        if self._routes:
++            if self.device.type != "cuda" or self.num_experts != 384:
++                raise BankModeRejected("route instrumentation requires CUDA and 384 experts")
++            if self.layer_ordinal is None or any(
++                getattr(o, "layer_ordinal", None) != self.layer_ordinal for o in self.owners
++            ):
++                raise BankModeRejected("route instrumentation requires matching layer ordinals")
++            self.rank = (torch.distributed.get_rank() if torch.distributed.is_initialized()
++                         else int(os.environ.get("RANK", "0")))
++            self.route_counts = torch.zeros(384, dtype=torch.int64, device=self.device)
++            self.route_enabled = torch.zeros((), dtype=torch.int32, device=self.device)
++            self._route_sample = torch.empty_like(self.route_counts)
++            self._route_host = torch.empty(384, dtype=torch.int64, pin_memory=True)
++            self._route_stream = torch.cuda.Stream(device=self.device)
++            self._count_routes, self._sample_routes = _route_kernels()
++            # Compile both ID representations before capture. N is runtime, so
++            # different token counts reuse these binaries without new tensors.
++            for dtype in (torch.int32, torch.int64):
++                ids = torch.zeros(256, dtype=dtype, device=self.device)
++                self.record_routes(ids)
++            self._sample_routes[(1,)](self.route_counts, self._route_sample, 384, 512)
++            self._route_ready = torch.cuda.Event()
++            self._route_ready.record()
++            self._route_interval = float(os.environ.get("B12X_EXPERT_ROUTES_INTERVAL", "30"))
++            if self._route_interval <= 0:
++                raise ValueError("route snapshot interval must be positive")
++
++    def record_routes(self, topk_ids):
++        """Always called during capture; device flag excludes preparation routes."""
++        if not self._routes:
++            return
++        if (topk_ids.dtype not in (torch.int32, torch.int64)
++                or not topk_ids.is_contiguous() or topk_ids.device != self.route_counts.device):
++            raise ValueError("routes require contiguous int32/int64 IDs on the bank device")
++        n = topk_ids.numel()
++        if n:
++            self._count_routes[((n + 255) // 256,)](
++                topk_ids, self.route_counts, self.route_enabled, n, 384, 256)
++
++    def enable_routes(self):
++        """Called only after armed promotion has published its pointer tables."""
++        if not self._routes or self._routes_started:
++            return
++        self.route_enabled.fill_(1)
++        self._route_ready.record()
++        self._routes_started = True
++        threading.Thread(target=self._route_dump_loop, daemon=True,
++                         name=f"expert-routes-{self.rank}-{self.layer_ordinal}").start()
++
++    def _route_dump_loop(self):
++        while True:
++            time.sleep(self._route_interval)
++            try:
++                self.dump_routes()
++            except Exception:
++                logging.getLogger(__name__).exception("expert route snapshot failed")
++
++    def dump_routes(self, directory="/cache"):
++        """Atomic per-counter sample; not a global pause of concurrent routing.
++
++        Only this background stream waits for its copy. Replacement is excluded
++        while deriving hot/cold accounting; counts are cumulative, not reset.
++        """
++        if not self._routes:
++            raise RuntimeError("route instrumentation is disabled")
++        with self._route_lock, torch.cuda.device(self.device):
++            with torch.cuda.stream(self._route_stream):
++                self._route_stream.wait_event(self._route_ready)
++                self._sample_routes[(1,)](self.route_counts, self._route_sample, 384, 512)
++                self._route_host.copy_(self._route_sample, non_blocking=True)
++            self._route_stream.synchronize()
++            counts = self._route_host.tolist()
++            total = sum(counts)
++            hot = sum(counts[e] for e in self.hot_ids)
++            payload = dict(rank=self.rank, layer=self.layer_ordinal,
++                           total_routes=total, cold_routes=total - hot,
++                           hot_hit_ratio=hot / total if total else 0.0,
++                           cold_hit_ratio=(total - hot) / total if total else 0.0,
++                           hot_ids=list(self.hot_ids), counts=counts, timestamp=time.time())
++            path = Path(directory) / f"expert-routes-rank{self.rank}-layer{self.layer_ordinal}.json"
++            temporary = path.with_suffix(f".{os.getpid()}.tmp")
++            temporary.write_text(json.dumps(payload) + "\n")
++            os.replace(temporary, path)
++            return payload
++
++    def table_for(self, slot):
++        return {"w13_bank": self.w13_bank, "down_bank": self.down_bank,
++                "sfbw13_bank": self.w13_bank, "sfbdown_bank": self.down_bank}[slot]
++
++    @property
++    def promoted_bytes(self):
++        return len(self.hot_ids) * self.expert_bytes
++
++    def receipt(self):
++        return {"gpu_expert_bytes": self.promoted_bytes,
++                "retained_host_bytes": self.num_experts * self.expert_bytes,
++                "pointer_table_bytes": self.num_experts * 16,
++                "scale_copy_bytes": 0}
++
++    def replace_hot(self, hot_ids, *, budget_bytes):
++        with self._route_lock:
++            return self._replace_hot(hot_ids, budget_bytes=budget_bytes)
++
++    def _replace_hot(self, hot_ids, *, budget_bytes):
++        """Copy whole experts, synchronize, publish tables in place, retain RAM.
++
++        Budget is the new cache size; replacement needs old+new peak bytes.
++        Rollback failure is fatal: retain both candidate and old backing so
++        partially published pointers cannot become dangling allocations.
++        """
++        hot = tuple(sorted(int(e) for e in hot_ids))
++        if len(set(hot)) != len(hot) or any(e < 0 or e >= self.num_experts for e in hot):
++            raise ValueError("invalid hot expert ids")
++        if budget_bytes < 0 or len(hot) * self.expert_bytes > budget_bytes:
++            raise ValueError("hot experts exceed weight byte budget")
++        if self._publication_failed:
++            raise RuntimeError("bank publication failed irrecoverably; restart required")
++        if hot == self.hot_ids:
++            return self.promoted_bytes
++        torch.cuda.synchronize(self.device)
++        slabs, tables = [], []
++        for source, stride, cold in zip(self.sources, self.slot_stride_bytes, self._cold_tables):
++            table = cold.clone()
++            if hot:
++                slab = torch.empty(len(hot) * stride, dtype=torch.uint8, device=self.device)
++                slabs.append(slab)
++                flat = source.view(torch.uint8).reshape(-1)
++                for slot, expert in enumerate(hot):
++                    slab.narrow(0, slot * stride, stride).copy_(flat.narrow(0, expert * stride, stride))
++                    table[expert] = slab.data_ptr() + slot * stride
++            tables.append(table)
++        torch.cuda.synchronize(self.device)
++        targets = (self.w13_bank, self.down_bank)
++        try:
++            for target, table in zip(targets, tables):
++                target.copy_(table)
++            torch.cuda.synchronize(self.device)
++        except Exception:
++            self._publication_failed = True
++            self._failed_backing = tuple(slabs)
++            for target, old in zip(targets, self._committed_tables):
++                target.copy_(old)
++            torch.cuda.synchronize(self.device)
++            self._failed_backing = ()
++            self._publication_failed = False
++            raise
++        self.hot_slabs = tuple(slabs)
++        self.hot_ids = hot
++        self.cold_ids = tuple(e for e in range(self.num_experts) if e not in hot)
++        self._committed_tables = tuple(tables)
++        return self.promoted_bytes
++
++    def promote_up_to(self, budget_bytes):
++        if budget_bytes < 0:
++            raise ValueError("negative budget")
++        count = min(self.num_experts, int(budget_bytes) // self.expert_bytes)
++        return self.replace_hot(self.preferred_order()[:count], budget_bytes=budget_bytes)
++
++    def preferred_order(self):
++        """Experts most-routed first, from a previous run's route snapshot.
++
++        B12X_DEFERRED_BANK_ROUTE_DIR names the directory holding the
++        expert-routes-rank<r>-layer<l>.json files that dump_routes() writes
++        (B12X_EXPERT_ROUTES=1). Without a usable file this is logical-id
++        order, the original behavior.
++        """
++        directory = os.environ.get("B12X_DEFERRED_BANK_ROUTE_DIR", "")
++        if not directory or self.layer_ordinal is None:
++            return tuple(range(self.num_experts))
++        rank = (torch.distributed.get_rank() if torch.distributed.is_initialized()
++                else int(os.environ.get("RANK", "0")))
++        path = Path(directory) / f"expert-routes-rank{rank}-layer{self.layer_ordinal}.json"
++        try:
++            counts = json.loads(path.read_text())["counts"]
++            histogram = load_route_histogram(counts, num_experts=self.num_experts)
++        except (OSError, ValueError, KeyError) as exc:
++            logging.getLogger(__name__).warning(
++                "deferred bank route order unavailable (%s); using id order", exc)
++            return tuple(range(self.num_experts))
++        # Same ranking as select_hot_experts: most routes first, ties by id.
++        return tuple(e for e, _ in sorted(histogram, key=lambda item: (-item[1], item[0])))
++
++    def evict_all(self):
++        released = self.promoted_bytes
++        self.replace_hot((), budget_bytes=0)
++        return released
++
++
++def _require_positive_int(value: Any, name: str) -> int:
++    number = int(value)
++    if number <= 0:
++        raise ValueError(f"{name} must be a positive integer, got {value!r}")
++    return number
++
++
++def load_route_histogram(
++    raw: Mapping[int | str, Any] | Sequence[Any] | None,
++    *,
++    num_experts: int,
++) -> tuple[tuple[int, int], ...]:
++    """Normalize a measured per-expert route histogram.
++
++    Accepted shapes: a mapping from logical expert id to a route count, or a
++    full sequence of ``num_experts`` counts in logical-id order. Missing ids
++    count as zero routes (never as "equal to the average"); ties keep
++    ascending logical-id order so the plan is deterministic across ranks.
++    With no counts at all the caller gets the explicitly named deterministic
++    baseline order (ascending logical id), not an invented heuristic.
++    """
++
++    _require_positive_int(num_experts, "num_experts")
++    counts: dict[int, int] = {}
++    if raw is None:
++        return tuple((e, 0) for e in range(num_experts))
++    if isinstance(raw, Mapping):
++        for key, value in raw.items():
++            expert = int(str(key))
++            if not 0 <= expert < num_experts:
++                raise ValueError(f"histogram id {expert} outside [0, {num_experts})")
++            count = int(value)
++            if count < 0:
++                raise ValueError(f"route count for expert {expert} is negative")
++            counts[expert] = count
++    else:
++        if len(raw) != num_experts:
++            raise ValueError(
++                f"histogram has {len(raw)} entries for {num_experts} experts"
++            )
++        for expert, value in enumerate(raw):
++            count = int(value)
++            if count < 0:
++                raise ValueError(f"route count for expert {expert} is negative")
++            counts[expert] = count
++    return tuple((e, counts.get(e, 0)) for e in range(num_experts))
++
++
++def parse_histogram_env(raw: str | None, *, num_experts: int) -> tuple[tuple[int, int], ...]:
++    """Parse ``id=count`` pairs (``;`` separated) from the launcher env."""
++
++    if raw is None or not raw.strip():
++        return load_route_histogram(None, num_experts=num_experts)
++    counts: dict[str, int] = {}
++    for item in raw.split(";"):
++        if not item.strip():
++            continue
++        key, _, value = item.partition("=")
++        if not value:
++            raise ValueError(f"histogram entry {item!r} is not id=count")
++        counts[key.strip()] = int(value)
++    return load_route_histogram(counts, num_experts=num_experts)
++
++
++def select_hot_experts(
++    histogram: Sequence[tuple[int, int]],
++    *,
++    num_experts: int,
++    expert_bytes: int,
++    budget_bytes: int,
++) -> tuple[int, ...]:
++    """Deterministic byte-budgeted hot-set selection for one layer/rank.
++
++    Equal-size experts (this placement): higher measured route counts win,
++    ties broken by ascending logical id, until the next whole expert would
++    exceed ``budget_bytes``. All four operand arrays of a chosen expert move
++    together, so the budget is charged once per expert at ``expert_bytes``.
++    Zero budget selects nobody; ``>= E * expert_bytes`` selects everybody.
++    No fractional or per-parameter splitting.
++    """
++
++    expert_bytes = _require_positive_int(expert_bytes, "expert_bytes")
++    budget = int(budget_bytes)
++    if budget < 0:
++        raise ValueError(f"budget_bytes must be >= 0, got {budget}")
++    if len(histogram) != num_experts:
++        raise ValueError(
++            f"histogram covers {len(histogram)} experts, expected {num_experts}"
++        )
++    capacity = budget // expert_bytes
++    if capacity >= num_experts:
++        return tuple(e for e, _ in histogram)
++    measured = any(count > 0 for _, count in histogram)
++    ranked = sorted(
++        histogram,
++        key=lambda item: (-item[1], item[0]) if measured else (item[0],),
++    )
++    return tuple(expert for expert, _ in ranked[:capacity])
++
++
++def _slot_stride_bytes(source: torch.Tensor, num_experts: int) -> int:
++    """Per-expert byte stride of one canonical prepared operand.
++
++    Derived live from the actual tensor so the byte addresses in the banks
++    match the real packed layouts instead of a guessed constant.
++    """
++
++    rows = int(source.numel()) // int(num_experts)
++    stride = rows * int(source.element_size())
++    if stride % _ALIGNMENT_BYTES:
++        raise BankModeRejected(
++            f"per-expert stride {stride}B is not {_ALIGNMENT_BYTES}B aligned; "
++            "bank mode requires Int64-loadable table entries"
++        )
++    return stride
++
++
++def build_expert_banks(
++    prepared: Mapping[str, torch.Tensor],
++    *,
++    num_experts: int,
++    hot_ids: Sequence[int],
++    device: torch.device | str,
++) -> ExpertBankSet:
++    """Own dense GPU slabs for hot experts; cold experts keep host backing.
++
++    ``prepared`` maps each bank slot to the canonical prepared operand
++    ([E, rows] storage). Hot experts are copied whole into one dense GPU
++    slab per slot (byte-identical slices: gate/up order, packed payload and
++    scale encoding preserved). Cold entries point into the existing pinned
++    stacked storage, which the UVA offload path already makes device-
++    readable; no second host copy is allocated. On any failure the freshly
++    allocated slab/tables are dropped and the exception propagates with the
++    descriptor untouched (transactional publication).
++    """
++
++    num_experts = _require_positive_int(num_experts, "num_experts")
++    for name in BANK_SLOTS:
++        source = prepared.get(name)
++        if not isinstance(source, torch.Tensor):
++            raise BankModeRejected(
++                f"prepared operand {name!r} missing; bank mode needs the "
++                "QMMA-repacked w4a8_mx representation"
++            )
++        if int(source.shape[0]) != num_experts:
++            raise BankModeRejected(
++                f"{name} has {int(source.shape[0])} experts, expected {num_experts}"
++            )
++    hot = tuple(sorted(int(e) for e in hot_ids))
++    if len(set(hot)) != len(hot) or any(not 0 <= e < num_experts for e in hot):
++        raise ValueError("hot expert ids must be unique and inside [0, E)")
++    cold = tuple(e for e in range(num_experts) if e not in set(hot))
++    slabs: list[torch.Tensor] = []
++    tables: dict[str, torch.Tensor] = {}
++    slot_strides: list[int] = []
++    try:
++        for name in BANK_SLOTS:
++            source = prepared[name]
++            stride = _slot_stride_bytes(source, num_experts)
++            slot_strides.append(stride)
++            if hot:
++                slab = torch.empty(len(hot) * stride, dtype=torch.uint8, device=device)
++            else:
++                slab = torch.empty(1, dtype=torch.uint8, device=device)
++            slabs.append(slab)
++            source_bytes = source.view(torch.uint8)
++            source_flat = source_bytes.reshape(-1)
++            table = torch.empty(num_experts, dtype=torch.int64)
++            slab_base = int(slab.data_ptr())
++            host_base = int(source_bytes.data_ptr())
++            for slot, expert in enumerate(hot):
++                dest = slab.narrow(0, slot * stride, stride)
++                dest.copy_(source_flat.narrow(0, expert * stride, stride))
++                table[expert] = slab_base + slot * stride
++            for expert in cold:
++                table[expert] = host_base + expert * stride
++            if not bool((table % _ALIGNMENT_BYTES == 0).all()):
++                raise BankModeRejected(
++                    f"{name}: computed bank entry is not "
++                    f"{_ALIGNMENT_BYTES}B aligned"
++                )
++            tables[name] = table.to(device, non_blocking=True)
++    except Exception:
++        # Explicit rollback so the pre-bank representation remains the sole
++        # owner; the caller never observes a half-published bank set.
++        del slabs, tables
++        raise
++    return ExpertBankSet(
++        w13_bank=tables["w13_bank"],
++        down_bank=tables["down_bank"],
++        sfbw13_bank=tables["sfbw13_bank"],
++        sfbdown_bank=tables["sfbdown_bank"],
++        hot_slabs=tuple(slabs),
++        slot_stride_bytes=slot_strides,
++        hot_ids=hot,
++        cold_ids=cold,
++    )
++
++
++def bank_receipt(banks: ExpertBankSet, *, expert_bytes: int) -> dict[str, Any]:
++    """One-time ledger of the bytes this bank owns, counted exactly once."""
++
++    return {
++        "gpu_expert_bytes": len(banks.hot_ids) * expert_bytes,
++        "host_expert_bytes": len(banks.cold_ids) * expert_bytes,
++        "pointer_table_bytes": sum(
++            int(getattr(banks, name).numel()) * 8 for name in BANK_SLOTS
++        ),
++        "hot_experts": len(banks.hot_ids),
++        "cold_experts": len(banks.cold_ids),
++    }
+--- a/vllm/model_executor/model_loader/csf_utils.py
++++ b/vllm/model_executor/model_loader/csf_utils.py
+@@ -1,16 +1,23 @@
+ # SPDX-License-Identifier: Apache-2.0
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+-"""Manifest validation and bounded file access for compressed FP4 checkpoints."""
++"""Block-scale checkpoint metadata and bounded safetensors access."""
+ 
+ import json
+ from contextlib import ExitStack
+ from dataclasses import dataclass
+ from pathlib import Path
+-from typing import Protocol
++from typing import TYPE_CHECKING, Protocol
+ 
+ import torch
+ from safetensors import safe_open
+ 
++if TYPE_CHECKING:
++    from b12x.loader._csf_blocks import CsfBlockPlane
++    from b12x.loader._csf_source import CsfSource
++
++CSF_ENCODING = "csf_32x2_v1"
++CSF_COMPONENTS = ("bases", "codes", "page_bases", "offsets", "exceptions")
++
+ 
+ class PackedTensorView(Protocol):
+     """CPU tensor slicing interface provided by safetensors and tensor stores."""
+@@ -32,8 +39,7 @@
+     """
+ 
+     weight: PackedTensorView
+-    fixed: torch.Tensor
+-    exceptions: torch.Tensor
++    scales: "CsfBlockPlane | CsfSource"
+     global_scale: torch.Tensor | None = None
+     input_scale: torch.Tensor | None = None
+ 
+@@ -54,29 +60,34 @@
+     return tp_rank * local, (tp_rank + 1) * local
+ 
+ 
+-def read_csf_contract(root, *, schema, codec, families):
+-    """Check storage identity and the source tensor-to-shard inventory."""
++def read_csf_contract(root, *, families):
++    """Read the scale encoding and standard tensor-to-shard index."""
+     root = Path(root)
+-    manifest = json.loads((root / "manifest.json").read_text())
+-    contract = json.loads((root / "build-contract.json").read_text())
+-    for key, expected in (("schema", schema), ("codec", codec)):
+-        if manifest.get(key) != expected or contract.get(key) != expected:
+-            raise ValueError(f"CSF requires {key}={expected!r}")
+-    if (
+-        contract.get("family") not in families
+-        or manifest.get("family") != contract["family"]
++    config = json.loads((root / "config.json").read_text())
++    text = config.get("text_config", config)
++    quant = config.get("quantization_config") or text.get("quantization_config", {})
++    if quant.get("weight_scale_encoding") not in ("csf", CSF_ENCODING):
++        raise ValueError(
++            f"CSF requires weight_scale_encoding='csf' or {CSF_ENCODING!r}"
++        )
++    model_type = text.get("model_type", config.get("model_type"))
++    family = {
++        "deepseek_v4_1": "deepseek_v41",
++        "deepseek_v4": "deepseek_v4_flash",
++    }.get(model_type, model_type)
++    if family not in families:
++        raise ValueError("CSF config must name a supported model family")
++    names = json.loads((root / "model.safetensors.index.json").read_text())[
++        "weight_map"
++    ]
++    if not names or any(
++        Path(name).is_absolute()
++        or ".." in Path(name).parts
++        or not name.endswith(".safetensors")
++        for name in names.values()
+     ):
+-        raise ValueError("CSF manifest and contract must name a supported model family")
+-    names = contract["source_names"]
+-    files = {item["file"] for item in manifest["shards"]}
+-    if set(names.values()) != files:
+-        raise ValueError("CSF manifest and source tensor inventory disagree")
+-    for name in files:
+-        if Path(name).name != name or not name.endswith(".safetensors"):
+-            raise ValueError(
+-                "CSF shard names must be checkpoint-local safetensors files"
+-            )
+-    return contract
++        raise ValueError("CSF index must reference checkpoint-local safetensors files")
++    return {"family": family, "source_names": names}
+ 
+ 
+ class CsfTensorReader(ExitStack):
+@@ -93,19 +104,46 @@
+         filename = self.source_names[name]
+         if filename not in self.handles:
+             self.handles[filename] = self.enter_context(
+-                safe_open(
+-                    self.root / "tensors" / filename, framework="pt", device="cpu"
+-                )
++                safe_open(self.root / filename, framework="pt", device="cpu")
+             )
+         return self.handles[filename]
+ 
+     def matrix(self, weight, scale, *, global_scale=None, input_scale=None):
+         """Expose a lazy packed weight view and one projection's CPU scale data."""
+-        scales = self._handle(scale)
++        from b12x.loader._csf_blocks import CsfBlockPlane
++
++        view = self._handle(weight).get_slice(weight)
++        rows, packed_columns = view.get_shape()
++        columns = packed_columns * 2 // (16 if self.codec == "nvfp4" else 32)
++        if f"{scale}.csf32_bases" in self.source_names:
++            components = {
++                component: self._handle(f"{scale}.csf32_{component}")
++                .get_tensor(f"{scale}.csf32_{component}")
++                .numpy()
++                for component in CSF_COMPONENTS
++            }
++            plane = CsfBlockPlane(rows, columns, self.codec, **components)
++        else:
++            from b12x.loader._csf_source import CsfSource
++
++            prefix = f"{scale}.{self.codec}_csf_"
++            fixed, exceptions = (
++                self._handle(prefix + name).get_tensor(prefix + name)
++                for name in ("fixed", "exceptions")
++            )
++            plane = CsfSource(
++                (fixed[None], exceptions),
++                torch.tensor([0, exceptions.numel()], dtype=torch.int64),
++                rows,
++                columns,
++                self.codec,
++                1,
++                "csf",
++            )
++            plane.validate()
+         return CsfMatrix(
+-            weight=self._handle(weight).get_slice(weight),
+-            fixed=scales.get_tensor(f"{scale}.{self.codec}_csf_fixed"),
+-            exceptions=scales.get_tensor(f"{scale}.{self.codec}_csf_exceptions"),
++            weight=view,
++            scales=plane,
+             global_scale=(
+                 self._handle(global_scale).get_tensor(global_scale)
+                 if global_scale is not None
+--- a/vllm/model_executor/model_loader/mxfp4_csf_loader.py
++++ b/vllm/model_executor/model_loader/mxfp4_csf_loader.py
+@@ -12,7 +12,6 @@
+ from functools import lru_cache
+ from pathlib import Path
+ 
+-import numpy as np
+ import regex as re
+ import torch
+ from safetensors import safe_open
+@@ -29,20 +28,13 @@
+     safetensors_file_sources,
+ )
+ 
+-SCHEMA = "lil-mxfp4-csf-checkpoint/1"
+-CODEC = "row-base-offset1-u24-exceptions/1"
+-# Routed experts, hidden size, MoE intermediate size and compressed layers.
+-FAMILIES = {
+-    "deepseek_v41": (384, 5120, 2304, range(40)),
+-    "deepseek_v4_flash": (256, 4096, 2048, range(43)),
+-    "kimi_k3": (896, 3584, 3072, range(1, 93)),
+-}
++FAMILIES = frozenset(("deepseek_v41", "deepseek_v4_flash", "kimi_k3"))
+ 
+ 
+ @lru_cache(maxsize=4)
+ def checkpoint_contract(root: str) -> dict:
+     """Validate the MXFP4-CSF container before loading model tensors."""
+-    return read_csf_contract(root, schema=SCHEMA, codec=CODEC, families=FAMILIES)
++    return read_csf_contract(root, families=FAMILIES)
+ 
+ 
+ def expert_tensor_names(family, layer_index, expert):
+@@ -75,28 +67,28 @@
+     device,
+     w13_scale_scratch,
+     w2_scale_scratch,
++    expert_order=None,
++    out_w13=None,
++    out_w2=None,
+ ):
+-    """Read rank-local gate/up/down tensors and unprepared compressed scales."""
++    """Read rank-local gate/up/down tensors and unprepared compressed scales.
++
++    ``expert_order[slot]`` names the checkpoint expert stored at ``slot``
++    (default identity); ``out_w13``/``out_w2`` receive the packed weights in
++    place of fresh device tensors, e.g. host-backed VMM expert storage.
++    """
+     contract = checkpoint_contract(str(Path(root).resolve()))
+     family = contract["family"]
+-    e, h, n, layers = FAMILIES[family]
+-    if (num_experts, hidden_size, intermediate_size) != (e, h, n):
+-        raise ValueError("MXFP4-CSF expert geometry differs from the checkpoint family")
+-    if layer_index not in layers:
++    tp_extent(intermediate_size, tp_rank, tp_size, 32)
++    first_weight = expert_tensor_names(family, layer_index, 0)[0][0]
++    if first_weight not in contract["source_names"]:
+         raise ValueError("MXFP4-CSF layer is outside the compressed expert inventory")
+-    supported_tp = {
+-        "kimi_k3": (1, 2, 4, 8, 12, 16),
+-        # 2304 / 3 = 768 local channels: 32-aligned, whole 16-row scale slabs.
+-        "deepseek_v41": (1, 2, 3, 4, 8),
+-    }.get(family, (1, 2, 4, 8))
+-    if tp_size not in supported_tp or not 0 <= tp_rank < tp_size:
+-        raise ValueError(
+-            f"MXFP4-CSF {family} supports TP {supported_tp} with a valid rank"
+-        )
+     with CsfTensorReader(root, contract["source_names"], "mxfp4") as reader:
+ 
++        order = range(num_experts) if expert_order is None else expert_order
++
+         def experts():
+-            for expert in range(num_experts):
++            for expert in order:
+                 yield tuple(
+                     reader.matrix(weight, scale)
+                     for weight, scale in expert_tensor_names(
+@@ -114,49 +106,20 @@
+             device=device,
+             w13_scale_scratch=w13_scale_scratch,
+             w2_scale_scratch=w2_scale_scratch,
++            out_w13=out_w13,
++            out_w2=out_w2,
+         )
+ 
+ 
+-POSITION_MASK = (1 << 24) - 1
+-
+-
+-def _slice_scale_plane(fixed, exceptions, rows, columns, row_slice, column_slice):
+-    """Slice compressed bytes without floating-point reconstruction or fitting."""
+-    r0, r1 = row_slice
+-    c0, c1 = column_slice
+-    if not (0 <= r0 < r1 <= rows and r0 % 16 == r1 % 16 == 0):
+-        raise ValueError("MXFP4-CSF row slices must contain complete 16-row slabs")
+-    if not 0 <= c0 < c1 <= columns:
+-        raise ValueError("MXFP4-CSF column slice is outside the scale plane")
+-    if fixed.dtype != torch.uint8 or exceptions.dtype != torch.uint32:
+-        raise TypeError("MXFP4-CSF requires uint8 fixed bytes and uint32 exceptions")
+-    selectors = (columns + 7) // 8
+-    stream = fixed.numpy().reshape(rows // 16, 16 * (1 + selectors))
+-    bases = stream[:, :16]
+-    if (bases > 254).any():
+-        raise ValueError("MXFP4-CSF palette bases must be in 0..254")
+-    bits = np.unpackbits(
+-        stream[:, 16:].reshape(rows, selectors), axis=1, bitorder="little"
++def _slice_scale_plane(scales, rows, columns, row_slice, column_slice):
++    """Describe a TP rectangle; payload validation and regrouping run on CUDA."""
++    from b12x.loader._csf_source import upload_csf_planes
++
++    if (scales.rows, scales.columns, scales.quantization) != (rows, columns, "mxfp4"):
++        raise ValueError("MXFP4-CSF scale geometry differs from its packed weights")
++    return upload_csf_planes(
++        (scales,), "cpu", row_range=row_slice, column_range=column_slice
+     )
+-    if bits[:, columns:].any():
+-        raise ValueError("MXFP4-CSF unused selector bits must be zero")
+-    selected = np.packbits(bits[r0:r1, c0:c1], axis=1, bitorder="little")
+-    result = np.concatenate(
+-        (bases[r0 // 16 : r1 // 16], selected.reshape((r1 - r0) // 16, -1)), 1
+-    )
+-    words = exceptions.numpy().reshape(-1)
+-    positions = words & POSITION_MASK
+-    if len(words) and (
+-        positions[-1] >= rows * columns or (positions[1:] <= positions[:-1]).any()
+-    ):
+-        raise ValueError(
+-            "MXFP4-CSF exception positions must be unique, sorted and in range"
+-        )
+-    rr, cc = positions // columns, positions % columns
+-    keep = (rr >= r0) & (rr < r1) & (cc >= c0) & (cc < c1)
+-    positions = (rr[keep] - r0) * (c1 - c0) + cc[keep] - c0
+-    words = (words[keep] & np.uint32(0xFF000000)) | positions
+-    return torch.from_numpy(result.copy()), torch.from_numpy(words.astype(np.uint32))
+ 
+ 
+ def _load_mxfp4_csf_weights(
+@@ -170,6 +133,8 @@
+     device,
+     w13_scale_scratch,
+     w2_scale_scratch,
++    out_w13=None,
++    out_w2=None,
+ ):
+     """Slice and upload gate/up/down-ordered expert projections.
+ 
+@@ -177,23 +142,31 @@
+     stores, manifests and model-specific tensor names belong to the caller.
+     Expanded scale buffers remain caller-owned for serialized layer execution.
+     """
+-    from b12x.moe.fused_moe import CsfScalePlanes, Mxfp4CsfWeights
++    from b12x.loader._csf_blocks import CsfBlockPlane
++    from b12x.loader._csf_source import CsfSource, batch_csf_sources
++    from b12x.moe.fused_moe import Mxfp4CsfWeights
+ 
+     if num_experts <= 0 or hidden_size <= 0 or hidden_size % 64:
+         raise ValueError("MXFP4-CSF requires experts and 64-aligned hidden channels")
+     first, last = tp_extent(intermediate_size, tp_rank, tp_size, 32)
+     local = last - first
+-    w13 = torch.empty(
+-        (num_experts, 2 * local, hidden_size // 2), dtype=torch.uint8, device="cpu"
+-    )
+-    w2 = torch.empty(
+-        (num_experts, hidden_size, local // 2), dtype=torch.uint8, device="cpu"
+-    )
+-    fixed13, fixed2, exceptions13, exceptions2 = [], [], [], []
++    shapes = (
++        (num_experts, 2 * local, hidden_size // 2),
++        (num_experts, hidden_size, local // 2),
++    )
++    w13, w2 = (
++        torch.empty(shape, dtype=torch.uint8, device=device)
++        if out is None
++        else out
++        for out, shape in zip((out_w13, out_w2), shapes)
++    )
++    if tuple(w13.shape) != shapes[0] or tuple(w2.shape) != shapes[1]:
++        raise ValueError("MXFP4-CSF destination weights differ from the layer geometry")
++    scales13: list[CsfBlockPlane | CsfSource] = []
++    scales2: list[CsfBlockPlane | CsfSource] = []
+     for expert, (first_projection, second_projection, down) in zip(
+         range(num_experts), experts, strict=True
+     ):
+-        f13, e13 = [], []
+         for matrix, projection in enumerate(
+             (first_projection, second_projection, down)
+         ):
+@@ -218,31 +191,40 @@
+                 w2[expert].copy_(view[:, first // 2 : last // 2].view(torch.uint8))
+                 rows, columns = hidden_size, intermediate_size // 32
+                 row_slice, column_slice = (0, rows), (first // 32, last // 32)
+-            fixed, exceptions = _slice_scale_plane(
+-                projection.fixed,
+-                projection.exceptions,
++            scales = projection.scales
++            if (scales.rows, scales.columns, scales.quantization) != (
+                 rows,
+                 columns,
+-                row_slice,
+-                column_slice,
+-            )
+-            if matrix < 2:
+-                f13.append(fixed)
+-                if matrix:
+-                    words = exceptions.numpy().copy()
+-                    words += np.uint32(local * columns)
+-                    exceptions = torch.from_numpy(words)
+-                e13.append(exceptions)
+-            else:
+-                fixed2.append(fixed)
+-                exceptions2.append(exceptions)
+-        fixed13.append(torch.cat(f13))
+-        exceptions13.append(torch.cat(e13))
++                "mxfp4",
++            ):
++                raise ValueError(
++                    "MXFP4-CSF scale geometry differs from its packed weights"
++                )
++            if isinstance(scales, CsfSource):
++                scales = scales.select(row_range=row_slice, column_range=column_slice)
++            (scales13 if matrix < 2 else scales2).append(scales)
+     return Mxfp4CsfWeights(
+-        w13=w13.to(device),
+-        w2=w2.to(device),
+-        w13_scales=CsfScalePlanes(tuple(fixed13), tuple(exceptions13)),
+-        w2_scales=CsfScalePlanes(tuple(fixed2), tuple(exceptions2)),
++        w13=w13,
++        w2=w2,
++        w13_scales=batch_csf_sources(
++            scales13,
++            device,
++            join=2,
++            **(
++                {}
++                if isinstance(scales13[0], CsfSource)
++                else dict(row_range=(first, last))
++            ),
++        ),
++        w2_scales=batch_csf_sources(
++            scales2,
++            device,
++            **(
++                {}
++                if isinstance(scales2[0], CsfSource)
++                else dict(column_range=(first // 32, last // 32))
++            ),
++        ),
+         w13_scale_scratch=w13_scale_scratch,
+         w2_scale_scratch=w2_scale_scratch,
+     )
+@@ -277,7 +259,7 @@
+         layers = text_config.num_hidden_layers
+         self.counter_before_loading_weights = time.perf_counter()
+         for filename in sorted(set(contract["source_names"].values())):
+-            path = str(root / "tensors" / filename)
++            path = str(root / filename)
+             descriptors = safetensors_file_sources(path)
+             with safe_open(path, framework="pt", device="cpu") as handle:
+                 for name in sorted(descriptors):
+--- /dev/null
++++ b/vllm/model_executor/offloader/uva_p4.py
+@@ -0,0 +1,132 @@
++# SPDX-License-Identifier: Apache-2.0
++"""WS3 P4 walk variant: mixed-residency expert layers via VMM shim.
++
++For decoder MoE layers with ordinal in [DS41_OFFLOAD_FROM_ORDINAL, DS41_OFFLOAD_TO_ORDINAL]:
++  1. ONE contiguous VMM region PER routed-expert parameter
++     (w13_weight, w13_weight_scale, w2_weight, w2_weight_scale), sized from
++     the live tensor shape; experts stay exactly contiguous inside the region
++     so the b12x staging arithmetic (expert_idx * row_words) needs no change.
++  2. build one contiguous view per param over its region
++  3. copy the module's current param values into the views (device->VMM)
++  4. swap module param .data to the views
++
++Within each region the device-hot part is a whole-page prefix (hot first,
++HOST_NUMA cold tail); the hot fraction comes from DS41_VMM_COLD_FRACTION.
++Histogram-driven non-prefix hot sets need WS4 bank pointers (see PR draft);
++until then the uniform prior keeps hot a prefix.
++"""
++
++from __future__ import annotations
++
++import json
++import os
++
++import torch
++
++from vllm.logger import init_logger
++
++from .vmm_shim import MixedResidencyAllocation, register_vmm_owner
++from . import vmm_policy
++
++logger = init_logger(__name__)
++
++_PARAM_ORDER = ("w13_weight", "w13_scale", "w2_weight", "w2_scale")
++# Preferred suffix first: this stack names scales w13_weight_scale /
++# w2_weight_scale; bare *_scale kept as fallback for other checkpoints.
++_CANDIDATES = {
++    "w13_weight": ("w13_weight",),
++    "w13_scale": ("w13_weight_scale", "w13_scale"),
++    "w2_weight": ("w2_weight",),
++    "w2_scale": ("w2_weight_scale", "w2_scale"),
++}
++
++
++def _load_histogram() -> dict[int, int] | None:
++    path = os.environ.get("DS41_VMM_HISTOGRAM", "")
++    if not path:
++        return None
++    try:
++        with open(path) as f:
++            raw = json.load(f)
++        return {int(k): int(v) for k, v in raw.items()}
++    except Exception as exc:  # pragma: no cover
++        logger.warning("ds41-p4: histogram load failed (%s); uniform prior", exc)
++        return None
++
++
++def maybe_vmm_wrap_layer(module: torch.nn.Module, ordinal: int) -> bool:
++    """If ordinal is in range and env enabled, swap layer experts to VMM storage.
++
++    Returns True if the module was converted. The module is an MoE layer whose
++    routed-expert parameters carry the four stacked tensors.
++    """
++    if os.environ.get("DS41_VMM_ENABLE", "0") != "1":
++        return False
++    lo = int(os.environ.get("DS41_OFFLOAD_FROM_ORDINAL", "20"))
++    hi = int(os.environ.get("DS41_OFFLOAD_TO_ORDINAL", "22"))
++    if not (lo <= ordinal <= hi):
++        return False
++
++    found: dict[str, tuple[str, torch.nn.Parameter]] = {}
++    for name, p in module.named_parameters():
++        for key in _PARAM_ORDER:
++            if key in found:
++                continue
++            for cand in _CANDIDATES[key]:
++                if name == cand or name.endswith("." + cand):
++                    found[key] = (name, p)
++                    break
++    # MXFP4-CSF layers keep only compressed scales (on device), so their
++    # scale tensors are optional; the packed weights are always required.
++    missing = [k for k in ("w13_weight", "w2_weight") if k not in found]
++    if missing:
++        logger.debug("ds41-p4: ordinal %d missing params %s; skip", ordinal, missing)
++        return False
++
++    cold_fraction = float(os.environ.get("DS41_VMM_COLD_FRACTION", "0.5"))
++
++    converted: list[str] = []
++    # from_blob has no deleter: retain physical owners independently of views.
++    owners = getattr(module, "_ds41_vmm_allocations", None)
++    if owners is None:
++        owners = {}
++        module._ds41_vmm_allocations = owners
++    device_index = torch.cuda.current_device()
++    # Run driver allocation and tensor operations in the worker's context.
++    # The wrapper supplies its explicit target device for HOST_NUMA pointers;
++    # a device scope alone cannot determine their CUDA access device.
++    with torch.cuda.device(device_index):
++        for key in (k for k in _PARAM_ORDER if k in found):
++            _, p = found[key]
++            shape = tuple(p.data.shape)
++            num_experts = shape[0]
++            row_bytes = p.data.numel() // num_experts * p.data.element_size()
++            num_pages, hot_pages = vmm_policy.region_plan(row_bytes, num_experts, cold_fraction)
++            total_bytes = vmm_policy.region_bytes(num_pages)
++            chunk_pages = None
++            chunk_experts = int(os.environ.get("DS41_VMM_CHUNK_EXPERTS", "0"))
++            if chunk_experts > 0 and hot_pages == 0 and key in ("w13_weight", "w2_weight"):
++                chunk_pages = max(1, -(-chunk_experts * row_bytes // vmm_policy.GRAN))
++            alloc = MixedResidencyAllocation(
++                num_bytes=row_bytes * num_experts,
++                device_index=device_index,
++                hot_page_indices=set(range(hot_pages)),
++                cold_chunk_pages=chunk_pages,
++            )
++            alloc.operand_role = "raw_scale" if "scale" in key or "sfb" in key else "weight"
++            alloc.layer_ordinal = ordinal
++            owners[key] = alloc
++            base = alloc.wrap_torch(torch, numel=total_bytes, dtype=torch.uint8)
++            # keep only the live-byte window, then reinterpret at the param dtype
++            live = base[: row_bytes * num_experts]
++            view = live.view(p.data.dtype).view(shape)
++            view.copy_(p.data.to(device="cpu", non_blocking=True))
++            p.data = view
++            register_vmm_owner(view, alloc)
++            converted.append(f"{key}:{hot_pages}/{num_pages}p")
++
++    logger.info(
++        "ds41-p4: ordinal %d -> per-param VMM regions (%s), device_index %d",
++        ordinal, ", ".join(converted), device_index,
++    )
++    return True
+--- a/vllm/model_executor/offloader/uva.py
++++ b/vllm/model_executor/offloader/uva.py
+@@ -2,6 +2,7 @@
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ """UVA-based CPU offloading using Unified Virtual Addressing."""
+ 
++import os
+ from collections.abc import Generator
+ from contextlib import nullcontext
+ 
+@@ -57,12 +58,53 @@
+         modules_generator: Generator[nn.Module, None, None],
+         prefix: str = "",
+     ) -> list[nn.Module]:
+-        """Wrap modules with UVA offloading."""
+-        if prefix:
+-            prefix = f"{prefix}."
+-        modules = [
+-            self._maybe_offload_to_cpu(module, prefix) for module in modules_generator
+-        ]
++        """Wrap modules with UVA offloading.
++
++        ds41-tp3 overlay: the walk stays lazy (construction and offloading
++        interleave, as stock), but on the main layer walk the budget is only spent
++        on modules whose ordinal is >= DS41_OFFLOAD_FROM_ORDINAL (default 20, the
++        CED decoder boundary). Tower walks (prefix != "") keep stock behaviour.
++        """
++        min_ordinal = int(os.environ.get("DS41_OFFLOAD_FROM_ORDINAL", "20"))
++        max_ordinal = int(os.environ.get("DS41_OFFLOAD_TO_ORDINAL", "999"))
++        prefix_dot = f"{prefix}." if prefix else ""
++        modules: list[nn.Module] = []
++        overlay_hits: list[tuple[int, int]] = []
++        for ordinal, module in enumerate(modules_generator):
++            if prefix or min_ordinal <= ordinal <= max_ordinal:
++                p4_converted = False
++                if not prefix and os.environ.get("DS41_VMM_ENABLE", "0") == "1":
++                    try:
++                        from . import uva_p4
++
++                        p4_converted = uva_p4.maybe_vmm_wrap_layer(module, ordinal)
++                    except Exception as exc:
++                        logger.warning(
++                            "ds41-p4: ordinal %d VMM conversion failed (%s); "
++                            "falling back to stock offload",
++                            ordinal,
++                            exc,
++                        )
++                if not p4_converted:
++                    before = self.cpu_offload_bytes
++                    self._maybe_offload_to_cpu(module, prefix_dot)
++                    delta = self.cpu_offload_bytes - before
++                else:
++                    delta = 0
++                if delta > 0:
++                    overlay_hits.append((ordinal, delta))
++                    # 54972: freed accelerator blocks are retained by the caching
++                    # allocator under expandable_segments; release them now so
++                    # deeper walk steps do not OOM on reserved-but-free VA.
++                    torch.accelerator.empty_cache()
++            modules.append(module)
++        if overlay_hits:
++            logger.info(
++                "ds41-tp3 overlay: offload walk from ordinal %d, "
++                "(ordinal, bytes) = %s",
++                min_ordinal,
++                [(i, format_gib(b)) for i, b in overlay_hits],
++            )
+         if self.cpu_offload_bytes > 0:
+             logger.info(
+                 "Total CPU offloaded parameters: %s",
+@@ -111,7 +153,10 @@
+                     continue
+ 
+             cpu_data = p.data.to(device="cpu")
+-            if self.pin_memory:
++            # 56413: pin only the fallback path. The UVA helper maps its own
++            # host memory for unpinned tensors; pinning here first doubles
++            # the transient host footprint (~1.9x, upstream #56410).
++            if self.pin_memory and not self.uva_offloading:
+                 cpu_data = cpu_data.pin_memory()
+ 
+             if not self.uva_offloading:
+--- /dev/null
++++ b/vllm/model_executor/offloader/vmm_policy.py
+@@ -0,0 +1,66 @@
++# SPDX-License-Identifier: Apache-2.0
++"""WS3/WS4 placement policy for DS4.1 TP3 expert layers.
++
++One contiguous VA region PER PARAMETER (not one padded per-expert-block bank):
++region bytes = num_experts * row_bytes rounded up to the 2 MiB page
++granularity. Experts are then exactly contiguous inside the region, which is
++what the b12x staging kernels assume when they compute
++``expert_idx * expert_words`` from tensor shapes - no stride bank needed as
++long as every region is internally contiguous.
++
++Within a region the device-hot part is a contiguous page prefix (hot pages
++first, HOST_NUMA cold tail), so a hot-prefix-only shim stays valid.
++
++cold_experts/hot_blocks keep the block-granular view used by the histogram
++policy tests: blocks are 3 pages (6 MiB) and hot must remain a prefix.
++"""
++
++from __future__ import annotations
++
++import math
++
++GRAN = 2 * 1024 * 1024  # driver minimum granularity on GB202
++PAGES_PER_BLOCK = 3  # smallest whole-page expert row group (row_bytes ~2 MiB)
++BLOCK_BYTES = PAGES_PER_BLOCK * GRAN
++NUM_EXPERTS = 384
++
++
++def region_plan(row_bytes: int, num_experts: int, cold_fraction: float) -> tuple[int, int]:
++    """Return (num_pages, hot_pages) for one contiguous per-param region.
++
++    hot_pages is the largest whole-page prefix covering (1 - cold_fraction)
++    of the live bytes, never exceeding the region.
++    """
++    total_bytes = num_experts * row_bytes
++    num_pages = math.ceil(total_bytes / GRAN)
++    hot_pages = min(num_pages, math.ceil(num_pages * (1.0 - cold_fraction)))
++    return num_pages, hot_pages
++
++
++def region_bytes(num_pages: int) -> int:
++    return num_pages * GRAN
++
++
++def cold_experts(histogram: dict[int, int] | None, cold_fraction: float) -> set[int]:
++    """Expert ids to keep HOST-backed; hottest ids first when a histogram exists."""
++    n_cold = int(NUM_EXPERTS * cold_fraction)
++    if histogram is None:
++        return set(range(NUM_EXPERTS - n_cold, NUM_EXPERTS))
++    ranked = sorted(histogram, key=lambda e: histogram[e], reverse=True)
++    return {e for e in ranked[n_cold:]}
++
++
++def hot_blocks(cold: set[int]) -> set[int]:
++    return {e for e in range(NUM_EXPERTS) if e not in cold}
++
++
++def summary(cold_fraction: float, histogram: dict[int, int] | None = None) -> dict:
++    cold = cold_experts(histogram, cold_fraction)
++    hot = hot_blocks(cold)
++    return {
++        "experts": NUM_EXPERTS,
++        "hot_experts": len(hot),
++        "cold_experts": len(cold),
++        "device_hot_GiB": len(hot) * BLOCK_BYTES / 2**30,
++        "host_cold_GiB": len(cold) * BLOCK_BYTES / 2**30,
++    }
+--- /dev/null
++++ b/vllm/model_executor/offloader/vmm_shim.py
+@@ -0,0 +1,682 @@
++# SPDX-License-Identifier: Apache-2.0
++"""WS3 P4 shim: VMM HOST_NUMA-backed mixed-residency torch tensors.
++
++Allocates a virtual address range whose physical pages can be backed by
++either DEVICE memory or HOST_NUMA (pinned host) memory, mapped into the
++device VA space and wrapped into a torch CUDA tensor via at::from_blob.
++Kernels address the whole range through one base pointer; residency is a
++page-granular (2 MiB) property invisible to the kernel.
++
++Allocation uses the caller's CUDA context (the worker's primary context).
++The from_blob wrapper is compiled lazily and supplies an explicit target
++device: HOST_NUMA pointer attributes do not identify the CUDA access device.
++The caller must retain the allocation until all tensor views and GPU work
++using it are finished; tensor destruction does not free the VMM range.
++Struct classes are defined after CDLL load; field names avoid 'location'
++(ctypes/driver interplay artifact, see 25-ws2-vmm-probe.md).
++"""
++
++from __future__ import annotations
++
++import ctypes
++import os
++import threading
++
++_CU_MEM_ALLOC_TYPE_PINNED = 1
++_CU_MEM_LOCATION_TYPE_DEVICE = 1
++_CU_MEM_LOCATION_TYPE_HOST_NUMA = 2
++_CU_MEM_ACCESS_PROT_READWRITE = 3
++
++_GRANULARITY_BYTES = 2 * 1024 * 1024  # verified on GB202 / driver 610.43.02
++
++
++class _VmmError(RuntimeError):
++    pass
++
++
++class _VmmLibrary:
++    """Lazy singleton driver binding with explicit argtypes."""
++
++    _instance: "_VmmLibrary | None" = None
++    _lock = threading.Lock()
++
++    def __init__(self) -> None:
++        self.cuda = ctypes.CDLL("libcuda.so.1")
++        c = self.cuda
++        for f in (
++            "cuInit",
++            "cuCtxCreate_v2",
++            "cuCtxGetDevice",
++            "cuMemCreate",
++            "cuMemAddressReserve",
++            "cuMemMap",
++            "cuMemSetAccess",
++            "cuMemUnmap",
++            "cuMemRelease",
++            "cuMemAddressFree",
++            "cuDeviceGetAttribute",
++        ):
++            getattr(c, f).restype = ctypes.c_int
++        c.cuInit.argtypes = [ctypes.c_uint]
++        c.cuCtxCreate_v2.argtypes = [
++            ctypes.POINTER(ctypes.c_void_p),
++            ctypes.c_uint,
++            ctypes.c_int,
++        ]
++        c.cuDeviceGetAttribute.argtypes = [
++            ctypes.POINTER(ctypes.c_int),
++            ctypes.c_int,
++            ctypes.c_int,
++        ]
++
++        class _Loc(ctypes.Structure):
++            _fields_ = [("type", ctypes.c_int), ("id", ctypes.c_int)]
++
++        class _Comp(ctypes.Structure):
++            _fields_ = [("type", ctypes.c_int)]
++
++        class _Prop(ctypes.Structure):
++            # CUmemAllocationProp per CUDA 12/13 headers:
++            # type(4) | requestedHandleTypes(4) | location(8) |
++            # compressionType(4) | (pad 4) | gpuStorageDeadlineMs(8)
++            # -> sizeof 32. Missing tail fields shifted nothing but keep
++            # the full declared layout for driver validation parity.
++            _fields_ = [
++                ("type", ctypes.c_int),
++                ("requestedHandleTypes", ctypes.c_int),
++                ("loc", _Loc),
++                ("compressionType", _Comp),
++                ("gpuStorageDeadlineMs", ctypes.c_ulonglong),
++            ]
++
++        class _Acc(ctypes.Structure):
++            _fields_ = [("acc_loc", _Loc), ("flags", ctypes.c_int)]
++
++        self._Loc = _Loc
++        self._Prop = _Prop
++        self._Acc = _Acc
++        c.cuMemCreate.argtypes = [
++            ctypes.POINTER(ctypes.c_uint64),
++            ctypes.c_size_t,
++            ctypes.POINTER(_Prop),
++            ctypes.c_uint64,
++        ]
++        c.cuMemAddressReserve.argtypes = [
++            ctypes.POINTER(ctypes.c_uint64),
++            ctypes.c_size_t,
++            ctypes.c_size_t,
++            ctypes.c_uint64,
++            ctypes.c_uint64,
++        ]
++        c.cuMemSetAccess.argtypes = [
++            ctypes.c_uint64,
++            ctypes.c_size_t,
++            ctypes.POINTER(_Acc),
++            ctypes.c_int,
++        ]
++        c.cuMemUnmap.argtypes = [ctypes.c_uint64, ctypes.c_size_t]
++        c.cuMemRelease.argtypes = [ctypes.c_uint64]
++        c.cuMemAddressFree.argtypes = [ctypes.c_uint64, ctypes.c_size_t]
++        c.cuCtxSynchronize.argtypes = []
++        c.cuCtxSynchronize.restype = ctypes.c_int
++        c.cuMemcpyDtoD_v2.argtypes = [ctypes.c_uint64, ctypes.c_uint64, ctypes.c_size_t]
++        c.cuMemcpyDtoD_v2.restype = ctypes.c_int
++
++        # cuMemMap via plain dlsym FAILS under torch's primary context
++        # (compat stub rejects VMM maps); the cuGetProcAddress-resolved
++        # entry works. Resolve the VMM family through the proc-address API.
++        c.cuGetProcAddress.restype = ctypes.c_int
++        c.cuGetProcAddress.argtypes = [
++            ctypes.c_char_p,
++            ctypes.POINTER(ctypes.c_void_p),
++            ctypes.c_int,
++            ctypes.c_uint64,
++            ctypes.POINTER(ctypes.c_int),
++        ]
++
++        def _resolve(name: str) -> int:
++            fn = ctypes.c_void_p()
++            st = ctypes.c_int()
++            rc = c.cuGetProcAddress(
++                name.encode(), ctypes.byref(fn), 12000, 0, ctypes.byref(st)
++            )
++            if rc != 0 or not fn.value:
++                raise _VmmError(f"cuGetProcAddress({name}): rc={rc}")
++            return fn.value
++
++        proto_map = ctypes.CFUNCTYPE(
++            ctypes.c_int,
++            ctypes.c_uint64,
++            ctypes.c_size_t,
++            ctypes.c_size_t,
++            ctypes.c_uint64,
++            ctypes.c_uint64,
++        )
++        proto_unmap = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_uint64, ctypes.c_size_t)
++        proto_setacc = ctypes.CFUNCTYPE(
++            ctypes.c_int,
++            ctypes.c_uint64,
++            ctypes.c_size_t,
++            ctypes.POINTER(_Acc),
++            ctypes.c_int,
++        )
++        self.cuMemMap = proto_map(_resolve("cuMemMap"))
++        self.cuMemUnmap = proto_unmap(_resolve("cuMemUnmap"))
++        self.cuMemSetAccess = proto_setacc(_resolve("cuMemSetAccess"))
++
++        self._initialized = False
++        self._numa_id: int | None = None
++
++    @classmethod
++    def get(cls) -> "_VmmLibrary":
++        with cls._lock:
++            if cls._instance is None:
++                cls._instance = cls()
++            return cls._instance
++
++    def ensure_init(self, device_index: int) -> None:
++        """cuInit only; the CALLER's context (torch primary ctx in the
++        engine) owns all subsequent driver calls. Never create a private
++        context here - private-context sequences failed in probe harnesses
++        while the primary-context step-by-step sequence passes."""
++        if self._initialized:
++            return
++        if self.cuda.cuInit(0) != 0:
++            raise _VmmError("cuInit failed")
++        self._initialized = True
++
++    def host_numa_id(self, device_index: int) -> int:
++        """CU_DEVICE_ATTRIBUTE_HOST_NUMA_ID = 149."""
++        if self._numa_id is None:
++            dev = ctypes.c_int(device_index)
++            out = ctypes.c_int()
++            # device handle: ordinal == devid for this purpose
++            rc = self.cuda.cuDeviceGetAttribute(
++                ctypes.byref(out), 149, dev
++            )
++            if rc != 0 or out.value < 0:
++                out.value = 0
++            self._numa_id = out.value
++        return self._numa_id
++
++    def check(self, rc: int, what: str) -> None:
++        if rc != 0:
++            s = ctypes.c_char_p()
++            self.cuda.cuGetErrorString(rc, ctypes.byref(s))
++            raise _VmmError(f"{what}: rc={rc} {s.value.decode() if s.value else ''}")
++
++_OWNER_BY_DATA_PTR: dict[int, "MixedResidencyAllocation"] = {}
++
++
++def register_vmm_owner(tensor, owner: "MixedResidencyAllocation") -> None:
++    """Retain and publish an owner by its canonical tensor data pointer."""
++
++    pointer = int(tensor.data_ptr())
++    if pointer != owner.va:
++        raise ValueError("VMM owner registry requires the canonical base pointer")
++    previous = _OWNER_BY_DATA_PTR.get(pointer)
++    if previous is not None and previous is not owner:
++        raise RuntimeError("canonical VMM pointer already has a different owner")
++    _OWNER_BY_DATA_PTR[pointer] = owner
++
++
++def vmm_owner_for_tensor(tensor):
++    """Resolve ownership after in-place B12X repacking preserves storage."""
++
++    return _OWNER_BY_DATA_PTR.get(int(tensor.untyped_storage().data_ptr()))
++
++
++class MixedResidencyAllocation:
++    """One VA range, TWO physical handles: a device-backed hot region
++    [0, hot_bytes) and a HOST_NUMA-backed cold region [hot_bytes, size).
++    Expert blocks MUST be ordered hot-first (see vmm_policy.hot_blocks +
++    uva_p4's block permutation note) so each region is contiguous.
++
++    Two handles per layer (not per-page): the driver fails rapid-fire
++    small HOST_NUMA creates after ~4-5 successes in one process, while
++    few large creates are reliable (25/26 probe notes). Base pointer is
++    fixed for the process lifetime -> kernel ABI, data_ptr-keyed plans,
++    and CUDA graphs all stay valid.
++    """
++
++    def __init__(
++        self,
++        num_bytes: int,
++        device_index: int,
++        hot_page_indices: set[int] | None = None,
++        cold_chunk_pages: int | None = None,
++    ) -> None:
++        if num_bytes <= 0:
++            raise ValueError("num_bytes must be positive")
++        if hot_page_indices is not None:
++            n = (num_bytes + _GRANULARITY_BYTES - 1) // _GRANULARITY_BYTES
++            k = len(hot_page_indices)
++            if k > n or hot_page_indices != set(range(k)):
++                raise _VmmError(
++                    "two-region shim requires hot pages to be a contiguous "
++                    f"prefix set(range(k)); got {k} pages not in prefix form"
++                )
++        hot_all = hot_page_indices is None or len(hot_page_indices) == (
++            num_bytes + _GRANULARITY_BYTES - 1
++        ) // _GRANULARITY_BYTES
++        self._all_hot = hot_all
++        self._all_cold = hot_page_indices is not None and len(hot_page_indices) == 0
++        lib = _VmmLibrary.get()
++        lib.ensure_init(device_index)
++        self.lib = lib
++        self.device_index = device_index
++        self.num_pages = (num_bytes + _GRANULARITY_BYTES - 1) // _GRANULARITY_BYTES
++        self.size = self.num_pages * _GRANULARITY_BYTES
++        self.hot_bytes = (
++            len(hot_page_indices) * _GRANULARITY_BYTES
++            if hot_page_indices is not None
++            else self.size
++        )
++
++        numa = lib.host_numa_id(device_index)
++        # CREATE FIRST, reserve later: a large VA reservation before device
++        # creation deterministically breaks the subsequent cuMemCreate
++        # (driver VA-accounting interaction, 26-ws3-notes). Handle creation
++        # order: hot, cold, then reserve, then map.
++        self._handles: list[tuple[str, int]] = []
++        self._mappings: dict[int, tuple[int, int]] = {}
++        self._cold_mapping: tuple[int, int, int] | None = None
++        self._promoted_handle: int | None = None
++        # All-cold regions created with cold_chunk_pages: one HOST_NUMA handle
++        # per chunk, so a prefix of chunks can be promoted in place.
++        self._cold_chunks: list[tuple[int, int, int]] = []
++        self._chunk_promoted = 0
++        self._freed = False
++        handle_values: list[tuple[str, int]] = []
++        if not self._all_cold:
++            prop = lib._Prop()
++            prop.type = _CU_MEM_ALLOC_TYPE_PINNED
++            prop.requestedHandleTypes = 0
++            prop.loc.type = _CU_MEM_LOCATION_TYPE_DEVICE
++            prop.loc.id = device_index
++            h = ctypes.c_uint64()
++            lib.check(
++                lib.cuda.cuMemCreate(ctypes.byref(h), self.hot_bytes, ctypes.byref(prop), 0),
++                "hot region create",
++            )
++            handle_values.append(("hot", h.value))
++        chunked = bool(cold_chunk_pages) and self._all_cold
++        chunk_sizes: list[int] = []
++        if chunked:
++            remaining = self.size
++            step = int(cold_chunk_pages) * _GRANULARITY_BYTES
++            while remaining:
++                chunk_sizes.append(min(step, remaining))
++                remaining -= chunk_sizes[-1]
++            for nbytes in chunk_sizes:
++                prop = lib._Prop()
++                prop.type = _CU_MEM_ALLOC_TYPE_PINNED
++                prop.requestedHandleTypes = 0
++                prop.loc.type = _CU_MEM_LOCATION_TYPE_HOST_NUMA
++                prop.loc.id = numa
++                h = ctypes.c_uint64()
++                lib.check(
++                    lib.cuda.cuMemCreate(ctypes.byref(h), nbytes, ctypes.byref(prop), 0),
++                    "cold chunk create",
++                )
++                handle_values.append(("chunk", h.value))
++        elif not self._all_hot:
++            cold_bytes = self.size - self.hot_bytes
++            prop = lib._Prop()
++            prop.type = _CU_MEM_ALLOC_TYPE_PINNED
++            prop.requestedHandleTypes = 0
++            prop.loc.type = _CU_MEM_LOCATION_TYPE_HOST_NUMA
++            prop.loc.id = numa
++            h = ctypes.c_uint64()
++            lib.check(
++                lib.cuda.cuMemCreate(ctypes.byref(h), cold_bytes, ctypes.byref(prop), 0),
++                "cold region create",
++            )
++            handle_values.append(("cold", h.value))
++
++        va = ctypes.c_uint64()
++        lib.check(
++            lib.cuda.cuMemAddressReserve(
++                ctypes.byref(va), self.size, _GRANULARITY_BYTES, 0, 0
++            ),
++            "cuMemAddressReserve",
++        )
++        self.va = va.value
++        offset = 0
++        chunk_iter = iter(chunk_sizes)
++        for kind, handle in handle_values:
++            if kind == "chunk":
++                bytes_here = next(chunk_iter)
++                lib.check(lib.cuMemMap(self.va + offset, bytes_here, 0, handle, 0), "chunk map")
++                self._handles.append((kind, handle))
++                self._mappings[self.va + offset] = (bytes_here, handle)
++                self._cold_chunks.append((self.va + offset, bytes_here, handle))
++                offset += bytes_here
++                continue
++            bytes_here = self.hot_bytes if kind == "hot" else self.size - self.hot_bytes
++            lib.check(
++                lib.cuMemMap(self.va + offset, bytes_here, 0, handle, 0),
++                f"{kind} region map",
++            )
++            self._handles.append((kind, handle))
++            self._mappings[self.va + offset] = (bytes_here, handle)
++            if kind == "cold":
++                self._cold_mapping = (self.va + offset, bytes_here, handle)
++            offset += bytes_here
++
++        acc = lib._Acc()
++        acc.acc_loc.type = _CU_MEM_LOCATION_TYPE_DEVICE
++        acc.acc_loc.id = device_index
++        acc.flags = _CU_MEM_ACCESS_PROT_READWRITE
++        lib.check(
++            lib.cuMemSetAccess(self.va, self.size, ctypes.byref(acc), 1),
++            "cuMemSetAccess",
++        )
++
++    @property
++    def hot_pages(self) -> set[int]:
++        return set(range(self.hot_bytes // _GRANULARITY_BYTES))
++
++    def _access(self, address: int, size: int) -> None:
++        acc = self.lib._Acc()
++        acc.acc_loc.type = _CU_MEM_LOCATION_TYPE_DEVICE
++        acc.acc_loc.id = self.device_index
++        acc.flags = _CU_MEM_ACCESS_PROT_READWRITE
++        self.lib.check(self.lib.cuMemSetAccess(address, size, ctypes.byref(acc), 1), "set access")
++
++    def _map(self, address: int, size: int, handle: int) -> None:
++        self.lib.check(self.lib.cuMemMap(address, size, 0, handle, 0), "map")
++        self._mappings[address] = (size, handle)
++        self._access(address, size)
++
++    def _unmap(self, address: int) -> None:
++        size, _ = self._mappings[address]
++        self.lib.check(self.lib.cuMemUnmap(address, size), "unmap")
++        del self._mappings[address]
++
++    def promote_up_to(self, budget_bytes: int) -> int:
++        """Promote the complete cold mapping without changing canonical VA.
++
++        Caller must exclude launches/capture on every stream for this owner.
++        CUDA prohibits partial unmaps and nonzero allocation offsets. Thus
++        this two-handle owner has a whole-cold-region promotion quantum, NOT
++        a page quantum: an insufficient budget returns zero. Retained host
++        backing is immutable and makes eviction copy-free.
++        """
++        if budget_bytes < 0 or self._freed:
++            raise ValueError("negative budget or freed VMM owner")
++        if self._cold_mapping is None or self._promoted_handle is not None:
++            return 0
++        address, size, cold = self._cold_mapping
++        if budget_bytes < size:
++            return 0
++        lib = self.lib
++        lib.check(lib.cuda.cuCtxSynchronize(), "promotion quiesce")
++        prop = lib._Prop()
++        prop.type = _CU_MEM_ALLOC_TYPE_PINNED
++        prop.loc.type = _CU_MEM_LOCATION_TYPE_DEVICE
++        prop.loc.id = self.device_index
++        handle = ctypes.c_uint64()
++        lib.check(lib.cuda.cuMemCreate(ctypes.byref(handle), size, ctypes.byref(prop), 0), "promotion create")
++        hot = handle.value
++        self._handles.append(("cache", hot))
++        temporary = ctypes.c_uint64()
++        reserved = False
++        try:
++            lib.check(lib.cuda.cuMemAddressReserve(ctypes.byref(temporary), size, _GRANULARITY_BYTES, 0, 0), "promotion reserve")
++            reserved = True
++            self._map(temporary.value, size, hot)
++            lib.check(lib.cuda.cuMemcpyDtoD_v2(temporary.value, address, size), "promotion copy")
++            lib.check(lib.cuda.cuCtxSynchronize(), "promotion copy complete")
++            self._unmap(address)
++            try:
++                self._map(address, size, hot)
++            except Exception:
++                if address in self._mappings:
++                    self._unmap(address)
++                self._map(address, size, cold)
++                raise
++            self._promoted_handle = hot
++            self.hot_bytes += size
++        finally:
++            if temporary.value in self._mappings:
++                self._unmap(temporary.value)
++            if reserved:
++                lib.check(lib.cuda.cuMemAddressFree(temporary.value, size), "promotion temporary free")
++            if not any(h == hot for _, h in self._mappings.values()):
++                lib.check(lib.cuda.cuMemRelease(hot), "promotion unused release")
++                self._handles.remove(("cache", hot))
++        return size
++
++    @property
++    def num_chunks(self) -> int:
++        return len(self._cold_chunks)
++
++    def promote_chunk(self) -> int:
++        """Promote the next cold chunk to device memory at its canonical VA.
++
++        Caller excludes launches on every stream. Returns the chunk's bytes,
++        or 0 when no chunk remains. The chunk's host backing is released
++        (chunks are never evicted) unless DS41_VMM_KEEP_PROMOTED_HOST=1.
++        """
++        if self._freed or self._chunk_promoted >= len(self._cold_chunks):
++            return 0
++        address, size, cold = self._cold_chunks[self._chunk_promoted]
++        lib = self.lib
++        lib.check(lib.cuda.cuCtxSynchronize(), "chunk promotion quiesce")
++        prop = lib._Prop()
++        prop.type = _CU_MEM_ALLOC_TYPE_PINNED
++        prop.loc.type = _CU_MEM_LOCATION_TYPE_DEVICE
++        prop.loc.id = self.device_index
++        handle = ctypes.c_uint64()
++        lib.check(lib.cuda.cuMemCreate(ctypes.byref(handle), size, ctypes.byref(prop), 0), "chunk promotion create")
++        hot = handle.value
++        self._handles.append(("chunk-hot", hot))
++        temporary = ctypes.c_uint64()
++        lib.check(lib.cuda.cuMemAddressReserve(ctypes.byref(temporary), size, _GRANULARITY_BYTES, 0, 0), "chunk promotion reserve")
++        try:
++            self._map(temporary.value, size, hot)
++            lib.check(lib.cuda.cuMemcpyDtoD_v2(temporary.value, address, size), "chunk promotion copy")
++            lib.check(lib.cuda.cuCtxSynchronize(), "chunk promotion copy complete")
++            self._unmap(temporary.value)
++            self._unmap(address)
++            self._map(address, size, hot)
++        finally:
++            if temporary.value in self._mappings:
++                self._unmap(temporary.value)
++            lib.check(lib.cuda.cuMemAddressFree(temporary.value, size), "chunk promotion temporary free")
++        if os.environ.get("DS41_VMM_KEEP_PROMOTED_HOST", "0") != "1":
++            lib.check(lib.cuda.cuMemRelease(cold), "chunk promotion host release")
++            self._handles.remove(("chunk", cold))
++        self._chunk_promoted += 1
++        self.hot_bytes += size
++        return size
++
++    def evict_promoted(self) -> int:
++        """Restore immutable retained RAM backing; caller excludes launches."""
++        if self._freed:
++            raise ValueError("freed VMM owner")
++        if self._promoted_handle is None:
++            return 0
++        address, size, cold = self._cold_mapping
++        hot = self._promoted_handle
++        self.lib.check(self.lib.cuda.cuCtxSynchronize(), "eviction quiesce")
++        self._unmap(address)
++        try:
++            self._map(address, size, cold)
++        except Exception:
++            if address in self._mappings:
++                self._unmap(address)
++            self._map(address, size, hot)
++            raise
++        self._promoted_handle = None
++        self.hot_bytes -= size
++        self.lib.check(self.lib.cuda.cuMemRelease(hot), "eviction release")
++        self._handles.remove(("cache", hot))
++        return size
++
++    def set_page_residency(self, page_index: int, hot: bool) -> None:
++        raise _VmmError("partial remaps unsupported; use promote_up_to/evict_promoted")
++
++    def wrap_torch(self, torch, numel: int, dtype=None):
++        """Wrap the VA range into a torch CUDA tensor (from_blob, no deleter)."""
++        ext = _get_wrap_ext(torch)
++        if dtype is None:
++            dtype = torch.float32
++        itemsize = torch.tensor([], dtype=dtype).element_size()
++        shape = [numel]
++        t = ext.wrap_ptr(self.va, shape, self.device_index, itemsize, str(dtype).split(".")[-1])
++        return t
++
++    def free(self) -> None:
++        """Release tracked mappings/handles once, after caller quiescence."""
++        if self._freed:
++            return
++        for address in tuple(self._mappings):
++            self._unmap(address)
++        for kind, handle in tuple(self._handles):
++            self.lib.check(self.lib.cuda.cuMemRelease(handle), "free handle")
++            self._handles.remove((kind, handle))
++        self.lib.check(self.lib.cuda.cuMemAddressFree(self.va, self.size), "free VA")
++        self._freed = True
++
++    def __repr__(self) -> str:
++        return (
++            f"MixedResidencyAllocation(va=0x{self.va:x}, pages={self.num_pages}, "
++            f"hot_bytes={self.hot_bytes}/{self.size})"
++        )
++
++
++_WRAP_EXT = None
++_WRAP_LOCK = threading.Lock()
++
++
++class LazyHostTable:
++    """Device-visible host table whose pages are created only when mapped.
++
++    Reserves the full VA range and maps HOST_NUMA chunks on demand: creating
++    a HOST_NUMA handle commits its host RAM, so unmapped chunks cost nothing.
++    The first chunk is mapped at construction (kernel preparation reads its
++    leading rows); map_all() backs the rest at the same VA, so tensors and
++    lookup bindings built on wrap_torch() stay valid. Touching an unmapped
++    chunk faults; callers must not read rows beyond chunk 0 before map_all().
++    """
++
++    def __init__(self, num_bytes: int, device_index: int, chunk_bytes: int = 1 << 30):
++        if num_bytes <= 0:
++            raise ValueError("num_bytes must be positive")
++        lib = _VmmLibrary.get()
++        lib.ensure_init(device_index)
++        self.lib = lib
++        self.device_index = device_index
++        gran = _GRANULARITY_BYTES
++        self.size = (num_bytes + gran - 1) // gran * gran
++        step = max(gran, chunk_bytes // gran * gran)
++        self.chunks = [(off, min(step, self.size - off)) for off in range(0, self.size, step)]
++        self._numa = lib.host_numa_id(device_index)
++        self._handles: dict[int, int] = {}
++        va = ctypes.c_uint64()
++        lib.check(
++            lib.cuda.cuMemAddressReserve(ctypes.byref(va), self.size, gran, 0, 0),
++            "lazy table reserve",
++        )
++        self.va = va.value
++        self._freed = False
++        self._map_chunk(0)
++
++    @property
++    def mapped_bytes(self) -> int:
++        return sum(self.chunks[i][1] for i in self._handles)
++
++    def _map_chunk(self, index: int) -> None:
++        if index in self._handles:
++            return
++        offset, nbytes = self.chunks[index]
++        lib = self.lib
++        prop = lib._Prop()
++        prop.type = _CU_MEM_ALLOC_TYPE_PINNED
++        prop.requestedHandleTypes = 0
++        prop.loc.type = _CU_MEM_LOCATION_TYPE_HOST_NUMA
++        prop.loc.id = self._numa
++        handle = ctypes.c_uint64()
++        lib.check(
++            lib.cuda.cuMemCreate(ctypes.byref(handle), nbytes, ctypes.byref(prop), 0),
++            "lazy table chunk create",
++        )
++        try:
++            lib.check(lib.cuMemMap(self.va + offset, nbytes, 0, handle.value, 0), "lazy table map")
++        except Exception:
++            lib.check(lib.cuda.cuMemRelease(handle.value), "lazy table release")
++            raise
++        acc = lib._Acc()
++        acc.acc_loc.type = _CU_MEM_LOCATION_TYPE_DEVICE
++        acc.acc_loc.id = self.device_index
++        acc.flags = _CU_MEM_ACCESS_PROT_READWRITE
++        lib.check(lib.cuMemSetAccess(self.va + offset, nbytes, ctypes.byref(acc), 1), "lazy table access")
++        self._handles[index] = handle.value
++
++    def map_all(self) -> None:
++        for index in range(len(self.chunks)):
++            self._map_chunk(index)
++
++    def wrap_torch(self, torch, numel: int, dtype=None):
++        ext = _get_wrap_ext(torch)
++        dtype = torch.uint8 if dtype is None else dtype
++        itemsize = torch.tensor([], dtype=dtype).element_size()
++        return ext.wrap_ptr(self.va, [numel], self.device_index, itemsize, str(dtype).split(".")[-1])
++
++    def free(self) -> None:
++        if self._freed:
++            return
++        for index, handle in tuple(self._handles.items()):
++            offset, nbytes = self.chunks[index]
++            self.lib.check(self.lib.cuMemUnmap(self.va + offset, nbytes), "lazy table unmap")
++            self.lib.check(self.lib.cuda.cuMemRelease(handle), "lazy table release")
++            del self._handles[index]
++        self.lib.check(self.lib.cuda.cuMemAddressFree(self.va, self.size), "lazy table free VA")
++        self._freed = True
++
++
++def _get_wrap_ext(torch):
++    """Compile (once per process) the tiny from_blob wrapper extension."""
++    global _WRAP_EXT
++    with _WRAP_LOCK:
++        if _WRAP_EXT is not None:
++            return _WRAP_EXT
++        from torch.utils.cpp_extension import load_inline
++
++        cpp = r"""
++#include <torch/extension.h>
++#include <ATen/Dispatch.h>
++torch::Tensor wrap_ptr(int64_t ptr, std::vector<int64_t> shape,
++                       int64_t device_index, int64_t itemsize,
++                       std::string dtype_name) {
++    auto opts = torch::TensorOptions().device(torch::kCUDA, device_index);
++    if (dtype_name == "float32") {
++        opts = opts.dtype(torch::kFloat32);
++    } else if (dtype_name == "uint8") {
++        opts = opts.dtype(torch::kUInt8);
++    } else if (dtype_name == "float16") {
++        opts = opts.dtype(torch::kFloat16);
++    } else if (dtype_name == "bfloat16") {
++        opts = opts.dtype(torch::kBFloat16);
++    } else if (dtype_name == "int32") {
++        opts = opts.dtype(torch::kInt32);
++    } else {
++        TORCH_CHECK(false, "unsupported dtype ", dtype_name);
++    }
++    // HOST_NUMA pointers can report device 0 regardless of the CUDA device
++    // granted access by cuMemSetAccess. Supply the known target so
++    // TensorMaker does not infer a CUDA ordinal from pointer attributes.
++    // The caller retains ownership of the VMM allocation.
++    return at::from_blob((void*)ptr, shape, [](void*){}, opts, opts.device());
++}
++"""
++        _WRAP_EXT = load_inline(
++            name="ds41_vmm_blob_wrap_v4",
++            cpp_sources=[cpp],
++            functions=["wrap_ptr"],
++            with_cuda=True,
++            verbose=False,
++        )
++        return _WRAP_EXT
+--- a/vllm/models/deepseek_v4_1/attention.py
++++ b/vllm/models/deepseek_v4_1/attention.py
+@@ -3,6 +3,7 @@
+ """V4.1 Full/Reindex/Reuse topology with native b12x compute only."""
+ 
+ import math
++import os
+ from dataclasses import replace
+ from typing import cast
+ 
+@@ -404,7 +405,10 @@
+ class DeepseekV4Attention(nn.Module, AttentionLayerBase):
+     backend_cls = DeepseekV41B12xBackend
+     # Index scores need bounded row scratch; attention handles the whole batch.
+-    INDEX_CHUNK = 256
++    # Prefill indexer rows per call. Its score scratch scales with these rows
++    # times the max-context page width, so smaller chunks trade prefill
++    # launches for memory; decode uses DECODE_CHUNK.
++    INDEX_CHUNK = int(os.environ.get("DS41_INDEX_CHUNK", "256"))
+     DECODE_CHUNK = 64
+ 
+     @classmethod
+--- a/vllm/models/deepseek_v4_1/b12x_layers.py
++++ b/vllm/models/deepseek_v4_1/b12x_layers.py
+@@ -5,6 +5,7 @@
+ from __future__ import annotations
+ 
+ from bisect import bisect_left
++import os
+ from functools import cache
+ from weakref import WeakValueDictionary
+ 
+@@ -24,6 +25,7 @@
+     UnquantizedEmbeddingMethod,
+ )
+ from vllm.model_executor.parameter import BlockQuantScaleParameter
++from vllm.model_executor.utils import replace_parameter
+ from vllm.utils.b12x import (
+     B12xPreparationUnit,
+     B12xWorkload,
+@@ -35,6 +37,7 @@
+     LayerNameType,
+     _encode_layer_name,
+     _resolve_layer_name,
++    get_accelerator_view_from_cpu_tensor,
+ )
+ from vllm.v1.worker.workspace import (
+     current_preallocated_workspace,
+@@ -134,6 +137,13 @@
+     """Retain sharded weight loading/ties; replace only token-row compute."""
+ 
+     def process_weights_after_loading(self, layer: nn.Module) -> None:
++        if os.environ.get("DS41_EMBEDDING_UVA", "0") == "1":
++            source = layer.weight.detach().to(device="cpu")
++            pinned = torch.empty_like(source, pin_memory=True)
++            pinned.copy_(source)
++            view = get_accelerator_view_from_cpu_tensor(pinned)
++            replace_parameter(layer, "weight", view)
++            layer._ds41_embedding_host_weight = pinned
+         layer.b12x_embedding_plans = {}
+         set_b12x_preparation_provider(layer, self)
+ 
+--- a/vllm/models/deepseek_v4_1/common/engram.py
++++ b/vllm/models/deepseek_v4_1/common/engram.py
+@@ -4,6 +4,8 @@
+ 
+ from functools import lru_cache
+ 
++import os
++
+ import torch
+ import torch.nn as nn
+ from b12x.norm import hyperconnection
+@@ -11,6 +13,11 @@
+ from b12x.sequence import engram as native
+ from b12x.sequence._shared.disk_table import MappedHostAllocation
+ 
++from . import engram_row_cache
++
++# Host RAM row cache for disk tables when DS41_ENGRAM_ROW_CACHE_ROWS > 0.
++engram_row_cache.install()
++
+ from vllm.config import get_current_vllm_config
+ from vllm.distributed import (
+     get_tensor_model_parallel_rank,
+@@ -73,6 +80,26 @@
+         self.disk_resident_scales = (
+             engram_config.disk_resident_scales if engram_config is not None else False
+         )
++        # DS41_ENGRAM_RAM_LAYERS (e.g. "1"): with disk tables, keep the listed
++        # layers' tables in mapped host RAM, looked up before graph replay (see nvidia/model.py).
++        ram_layers = {
++            int(x) for x in os.environ.get("DS41_ENGRAM_RAM_LAYERS", "").split(",") if x
++        }
++        # DS41_ENGRAM_LAZY_RAM_LAYERS (e.g. "14"): RAM tables whose host pages
++        # are committed only when filled, after expert promotion has freed the
++        # parked experts' host copies (see ParallelEngramEmbedding.fill_lazy).
++        self.lazy_ram_layers = frozenset(
++            int(x)
++            for x in os.environ.get("DS41_ENGRAM_LAZY_RAM_LAYERS", "").split(",")
++            if x
++        ) if self.table_memory == "disk" else frozenset()
++        self.layer_table_memory = tuple(
++            "ram"
++            if self.table_memory == "disk"
++            and (layer in ram_layers or layer in self.lazy_ram_layers)
++            else self.table_memory
++            for layer in self.layer_ids
++        )
+         self.projection_tp = (
+             engram_config.projection_tp if engram_config is not None else False
+         )
+@@ -111,11 +138,12 @@
+                 geometry=self.geometry,
+                 invocation={
+                     "operation": "lookup",
+-                    "compact_rows": self.table_memory == "disk",
+-                    "resident_scales": self.disk_resident_scales,
++                    "compact_rows": memory == "disk",
++                    # Resident scales apply to disk tables only (compact rows).
++                    "resident_scales": self.disk_resident_scales and memory == "disk",
+                 },
+             )
+-            for caps in self.caps
++            for caps, memory in zip(self.caps, self.layer_table_memory)
+         )
+ 
+     @classmethod
+@@ -408,7 +436,14 @@
+ 
+ class ParallelEngramEmbedding(nn.Module):
+     def __init__(
+-        self, plan, caps, geometry, table_memory="device", *, resident_scales=False
++        self,
++        plan,
++        caps,
++        geometry,
++        table_memory="device",
++        *,
++        resident_scales=False,
++        lazy_ram=False,
+     ):
+         super().__init__()
+         self.plan = plan
+@@ -430,7 +465,11 @@
+         self.resident_scales = resident_scales
+         self._disk_binding = None
+         self.mapped_host_nbytes = 0
+-        if table_memory == "ram":
++        self._lazy_sources = None
++        self._lazy_filled = True
++        if table_memory == "ram" and lazy_ram:
++            self._init_lazy_ram(caps)
++        elif table_memory == "ram":
+             nbytes = (
+                 self.weight_shape[0] * self.weight_shape[1]
+                 + self.scale_shape[0] * self.scale_shape[1]
+@@ -492,7 +531,13 @@
+                 set_weight_attrs(
+                     param,
+                     {
+-                        "weight_loader": _load_table,
++                        # Lazy tables only record their checkpoint source here;
++                        # fill_lazy() reads it after expert promotion.
++                        "weight_loader": (
++                            self._record_lazy_source
++                            if self._lazy_sources is not None
++                            else _load_table
++                        ),
+                         "global_rows": self.table_rows,
+                         "shard_start": self.shard_start,
+                     },
+@@ -508,6 +553,100 @@
+             persistent=False,
+         )
+ 
++    def _init_lazy_ram(self, caps):
++        """Reserve the table's VA now; create its host RAM in fill_lazy().
++
++        Creating HOST_NUMA memory commits it, so only the first 1 GiB chunk
++        (read by kernel preparation) exists until fill_lazy(), which runs once
++        expert promotion has returned the parked layers' host RAM.
++        """
++        if os.environ.get("DS41_ENGRAM_RAM_IN_GRAPH", "0") == "1":
++            raise ValueError("Lazy Engram RAM requires pre-graph lookups (DS41_ENGRAM_RAM_IN_GRAPH=0)")
++        from vllm.model_executor.offloader.vmm_shim import LazyHostTable
++
++        device_index = caps.device.index
++        if device_index is None:
++            device_index = torch.cuda.current_device()
++        tables, views = [], []
++        with torch.cuda.device(device_index):
++            for shape, dtype in (
++                (self.weight_shape, torch.float8_e4m3fn),
++                (self.scale_shape, torch.uint8),
++            ):
++                nbytes = shape[0] * shape[1]
++                table = LazyHostTable(nbytes, device_index)
++                flat = table.wrap_torch(torch, numel=table.size, dtype=torch.uint8)
++                tables.append(table)
++                views.append(flat[:nbytes].view(dtype).view(shape))
++        self._lazy_allocations = tuple(tables)
++        self.mapped_host_nbytes = sum(v.numel() * v.element_size() for v in views)
++        self.weight = nn.Parameter(views[0], requires_grad=False)
++        self.weight_scale_inv = nn.Parameter(views[1], requires_grad=False)
++        self._lazy_sources = {}
++        self._lazy_filled = False
++        logger.info(
++            "Engram layer %d TP rank %d: %.2f GiB lazy host RAM table "
++            "(created after expert promotion)",
++            caps.layer_id,
++            caps.tp_rank,
++            self.mapped_host_nbytes / (1 << 30),
++        )
++
++    def _record_lazy_source(self, param, loaded_weight):
++        source = get_file_tensor_source(loaded_weight)
++        if source is None:
++            raise ValueError("Lazy Engram RAM requires a file-backed checkpoint table")
++        if source.shape != (param.global_rows, *param.shape[1:]):
++            raise ValueError("Engram source must be the unpadded global checkpoint table")
++        name = "weight_scale_inv" if param is self.weight_scale_inv else "weight"
++        self._lazy_sources[name] = source
++
++    @property
++    def lazy_pending(self) -> bool:
++        return self._lazy_sources is not None and not self._lazy_filled
++
++    def fill_lazy(self, piece_bytes: int = 256 << 20) -> None:
++        """Read this rank's table rows from the checkpoint into the table.
++
++        Reads go through one pinned buffer and drop their page cache behind
++        them, so host RAM grows only by the table itself.
++        """
++        if not self.lazy_pending:
++            return
++        for table in self._lazy_allocations:
++            table.map_all()
++        staging = torch.empty(piece_bytes, dtype=torch.uint8, pin_memory=True)
++        for name in ("weight", "weight_scale_inv"):
++            param = getattr(self, name)
++            source = self._lazy_sources.get(name)
++            if source is None:
++                raise RuntimeError(f"Lazy Engram table has no checkpoint source for {name}")
++            row_bytes = param.shape[1] * param.element_size()
++            count = max(0, min(param.shape[0], self.table_rows - self.shard_start))
++            flat = param.data.view(torch.uint8).reshape(-1)
++            if count < param.shape[0]:
++                flat[count * row_bytes :].zero_()
++            total = count * row_bytes
++            first = source.offset + self.shard_start * row_bytes
++            fd = os.open(source.path, os.O_RDONLY)
++            try:
++                done = 0
++                while done < total:
++                    n = min(piece_bytes, total - done)
++                    got = os.preadv(fd, [memoryview(staging.numpy())[:n]], first + done)
++                    if got != n:
++                        raise OSError(
++                            f"Short read filling Engram table from {source.path}: "
++                            f"{done + got} of {total} bytes"
++                        )
++                    flat[done : done + n].copy_(staging[:n])
++                    os.posix_fadvise(fd, first + done, n, os.POSIX_FADV_DONTNEED)
++                    done += n
++            finally:
++                os.close(fd)
++        torch.cuda.synchronize()
++        self._lazy_filled = True
++
+     def close(self):
+         """Release file-backed staging only after graph consumers are gone."""
+         if self.disk_table is not None:
+@@ -520,13 +659,20 @@
+         ):
+             if allocation is not None:
+                 allocation.close()
++        for allocation in getattr(self, "_lazy_allocations", ()):
++            allocation.free()
+ 
+     def load_weights(self, weights):
+         loaded = set()
+         for name, value in weights:
+             if name not in ("weight", "weight_scale_inv"):
+                 raise ValueError(f"Unknown Engram table weight: {name}")
+-            if self.table_memory != "disk":
++            if self._lazy_sources is not None:
++                source = get_file_tensor_source(value)
++                if source is None:
++                    raise ValueError("Lazy Engram RAM requires a file-backed checkpoint table")
++                self._lazy_sources[name] = source
++            elif self.table_memory != "disk":
+                 _load_table(getattr(self, name), value)
+             else:
+                 source = get_file_tensor_source(value)
+@@ -639,8 +785,11 @@
+             plan,
+             caps,
+             layout.geometry,
+-            layout.table_memory,
+-            resident_scales=getattr(layout, "disk_resident_scales", False),
++            layout.layer_table_memory[layer_hash_index],
++            resident_scales=getattr(layout, "disk_resident_scales", False)
++            and layout.layer_table_memory[layer_hash_index] == "disk",
++            lazy_ram=layout.layer_ids[layer_hash_index]
++            in getattr(layout, "lazy_ram_layers", ()),
+         )
+         self._disk_prepared = False
+         self._disk_prepared_tokens = 0
+--- /dev/null
++++ b/vllm/models/deepseek_v4_1/common/engram_row_cache.py
+@@ -0,0 +1,151 @@
++# SPDX-License-Identifier: Apache-2.0
++"""Host RAM row cache in front of b12x's disk Engram reader (DS41 TP3 port).
++
++Disk-mode Engram lookups read every row from NVMe: the io_uring reader
++bypasses the page cache, and b12x's DiskRowCache only removes duplicates
++inside one batch. Engram rows are reused heavily across batches (measured on
++layer 14: 62% of 6.5M lookups hit a row already read), so a modest cache in
++host RAM removes most NVMe reads.
++
++The cache is direct-mapped by row id: slot = hash(id) % capacity, with a tag
++array holding the cached id. DiskRowCache._read_staged() is wrapped so that
++hits are copied into the reader's output buffers and only the remaining
++positions go to the native reader, through side buffers of the same capacity.
++The output contract is unchanged: output position i holds the row of ids[i].
++
++Enabled by DS41_ENGRAM_ROW_CACHE_ROWS (rows per disk table, e.g. 8388608 =
++2 GiB at 256 bytes per row); 0 or unset keeps the stock reader.
++"""
++
++import os
++import threading
++
++import numpy as np
++
++from vllm.logger import init_logger
++
++logger = init_logger(__name__)
++
++_HASH = np.uint64(0x9E3779B97F4A7C15)
++
++
++class _RowCache:
++    def __init__(self, reader, capacity: int):
++        self.capacity = capacity
++        self.weight_bytes = reader.weight_row_bytes
++        self.scale_bytes = reader.scale_row_bytes if reader._scale_buffer is not None else 0
++        self.tags = np.full(capacity, -1, dtype=np.int64)
++        self.weight = np.empty((capacity, self.weight_bytes), dtype=np.uint8)
++        self.scale = (
++            np.empty((capacity, self.scale_bytes), dtype=np.uint8)
++            if self.scale_bytes
++            else None
++        )
++        n = reader.max_lookups
++        self.side_ids = np.empty(n, dtype=np.int64)
++        self.side_weight = np.empty((n, self.weight_bytes), dtype=np.uint8)
++        self.side_scale = (
++            np.empty((n, self.scale_bytes), dtype=np.uint8) if self.scale_bytes else None
++        )
++        self.side_ids_buffer = memoryview(self.side_ids)
++        self.side_weight_buffer = memoryview(self.side_weight)
++        self.side_scale_buffer = (
++            memoryview(self.side_scale) if self.side_scale is not None else None
++        )
++        self.lookups = 0
++        self.hits = 0
++
++    def slots(self, ids):
++        mixed = ids.astype(np.uint64, copy=False) * _HASH
++        return (mixed % np.uint64(self.capacity)).astype(np.int64)
++
++
++def _cached_read_staged(self, count: int) -> None:
++    cache = self.__dict__.get("_ds41_row_cache")
++    if cache is None or self._gds is not None or count == 0:
++        return _STOCK_READ_STAGED(self, count)
++    import torch
++
++    with torch.cuda.device(self.device):
++        self._ids_ready.synchronize()
++        ids = self.ids_host.numpy()[:count]
++        weight_out = self.weight_host.numpy()
++        scale_out = self.scale_host.numpy() if cache.scale_bytes else None
++        valid = (ids >= self.shard_start) & (ids < self.shard_end)
++        slots = cache.slots(ids)
++        hit = valid & (cache.tags[slots] == ids)
++        hit_pos = np.flatnonzero(hit)
++        if hit_pos.size:
++            weight_out[hit_pos] = cache.weight[slots[hit_pos]]
++            if scale_out is not None:
++                scale_out[hit_pos] = cache.scale[slots[hit_pos]]
++        rest = np.flatnonzero(~hit)
++        if rest.size:
++            n = rest.size
++            cache.side_ids[:n] = ids[rest]
++            self._native.ple_reader_run(
++                self._reader,
++                cache.side_ids_buffer,
++                cache.side_weight_buffer,
++                cache.side_scale_buffer,
++                n,
++            )
++            weight_out[rest] = cache.side_weight[:n]
++            if scale_out is not None:
++                scale_out[rest] = cache.side_scale[:n]
++            fill = rest[valid[rest]]
++            if fill.size:
++                src = np.flatnonzero(valid[rest])
++                fill_slots = slots[fill]
++                cache.tags[fill_slots] = ids[fill]
++                cache.weight[fill_slots] = cache.side_weight[src]
++                if cache.scale is not None:
++                    cache.scale[fill_slots] = cache.side_scale[src]
++        cache.lookups += int(valid.sum())
++        cache.hits += int(hit_pos.size)
++        cache.calls = getattr(cache, "calls", 0) + 1
++        if cache.calls % 2000 == 0:
++            logger.info(
++                "Engram row cache [%d, %d): %.1f%% hits over %d lookups",
++                self.shard_start, self.shard_end,
++                100.0 * cache.hits / max(1, cache.lookups), cache.lookups,
++            )
++
++
++_STOCK_READ_STAGED = None
++_INSTALL_LOCK = threading.Lock()
++
++
++def install() -> None:
++    """Wrap DiskRowCache once; caches attach per reader on first construction."""
++    global _STOCK_READ_STAGED
++    rows = int(os.environ.get("DS41_ENGRAM_ROW_CACHE_ROWS", "0") or 0)
++    if rows <= 0:
++        return
++    from b12x.sequence._shared.disk_table import DiskRowCache
++
++    with _INSTALL_LOCK:
++        if _STOCK_READ_STAGED is not None:
++            return
++        _STOCK_READ_STAGED = DiskRowCache._read_staged
++        stock_init = DiskRowCache.__init__
++
++        def _init(self, *args, **kwargs):
++            stock_init(self, *args, **kwargs)
++            if self._gds is None:
++                self._ds41_row_cache = _RowCache(self, rows)
++                logger.info(
++                    "Engram row cache: %d rows (%.2f GiB) for shard [%d, %d)",
++                    rows,
++                    rows * (self.weight_row_bytes + self.scale_row_bytes) / (1 << 30),
++                    self.shard_start,
++                    self.shard_end,
++                )
++
++        DiskRowCache.__init__ = _init
++        DiskRowCache._read_staged = _cached_read_staged
++
++
++def stats(reader) -> tuple[int, int] | None:
++    cache = getattr(reader, "_ds41_row_cache", None)
++    return None if cache is None else (cache.lookups, cache.hits)
+--- a/vllm/models/deepseek_v4_1/mxfp4_csf.py
++++ b/vllm/models/deepseek_v4_1/mxfp4_csf.py
+@@ -26,6 +26,7 @@
+     MoEPrepareAndFinalizeNoDPEPModular,
+ )
+ from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
++from vllm.utils.math_utils import round_up
+ from vllm.utils.torch_utils import set_default_torch_num_threads
+ 
+ from .quant_config import DeepseekV41FP8Config
+@@ -96,6 +97,18 @@
+         return super().get_quant_method(layer, prefix)
+ 
+ 
++
++def _hot_first_order(layer_index, num_experts):
++    """Checkpoint expert per slot from B12X_EXPERT_ORDER_DIR route counts.
++
++    Matches the router-row relabeling DeepseekV41 load_weights applies to the
++    same layers, so a promoted prefix of the layer holds its hottest experts.
++    """
++    from vllm.models.deepseek_v4_1.nvidia.model import _hot_first_expert_order
++
++    order = _hot_first_expert_order(num_experts).get(layer_index)
++    return None if order is None else order[0].tolist()
++
+ class Mxfp4CsfMoEMethod(FusedMoEMethodBase):
+     """Expand scales for routed experts into serialized, model-owned scratch."""
+ 
+@@ -145,9 +158,17 @@
+         self.layer_index = int(match.group(1))
+         self.num_experts, self.hidden_size = num_experts, hidden_size
+         self.local_intermediate = intermediate_size_per_partition
+-        for name in ("w13_weight", "w2_weight"):
+-            layer.register_buffer(
+-                name, torch.empty(0, dtype=torch.uint8), persistent=False
++        # Full-size packed weights (instead of empty placeholders) so the
++        # DS41 TP3 offloader can move parked layers into host-backed VMM
++        # regions at construction; the CSF reader fills them in place.
++        shapes = {
++            "w13_weight": (num_experts, 2 * intermediate_size_per_partition, hidden_size // 2),
++            "w2_weight": (num_experts, hidden_size, intermediate_size_per_partition // 2),
++        }
++        for name, shape in shapes.items():
++            layer.register_parameter(
++                name,
++                torch.nn.Parameter(torch.empty(shape, dtype=torch.uint8), requires_grad=False),
+             )
+ 
+     def get_fused_moe_quant_config(self, layer):
+@@ -173,6 +194,11 @@
+         device = layer.w13_weight.device
+         e, h, n = self.num_experts, self.hidden_size, self.local_intermediate
+         shapes = ((e, h // 32, 2 * n), (e, n // 32, h))
++        if self.activation_mode == "a8" and n % 128 != 64:
++            shapes = (
++                (e, 2 * round_up(n, 128), round_up(h // 32, 4)),
++                (e, round_up(h, 256), round_up(n // 32, 4)),
++            )
+         if self.owner.scale_scratch is None:
+             # MXFP4-CSF disallows ubatching: every layer consumes these scale grids
+             # before its successor may overwrite them on the same stream.
+@@ -198,6 +224,9 @@
+                 device=device,
+                 w13_scale_scratch=scratch[0],
+                 w2_scale_scratch=scratch[1],
++                expert_order=_hot_first_order(self.layer_index, e),
++                out_w13=layer.w13_weight.data,
++                out_w2=layer.w2_weight.data,
+             )
+         plan = fused_moe.plan_weights(
+             source=fused_moe.PackedSource(format="fp4_e8m0_k32", w13_layout="w31"),
+@@ -217,6 +246,8 @@
+         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+         backend = B12xExperts(self.moe, self.moe_quant_config)
+         backend.install_prepared_experts(layer, prepared)
++        # Register host-backed (VMM) layers for in-place promotion after arming.
++        backend._attach_expert_banks(layer, prepared)
+         self.moe_kernel = mk.FusedMoEKernel(
+             MoEPrepareAndFinalizeNoDPEPModular(), backend
+         )
+--- a/vllm/models/deepseek_v4_1/nvidia/model.py
++++ b/vllm/models/deepseek_v4_1/nvidia/model.py
+@@ -2,10 +2,13 @@
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ import copy
+ import typing
++import os
++import json
+ from collections.abc import Callable, Iterable
+ from itertools import islice
+ 
+ import regex as re
++import time
+ import torch
+ import torch.nn as nn
+ from b12x.sequence import engram as engram_native
+@@ -74,6 +77,7 @@
+     pass
+ 
+ logger = init_logger(__name__)
++_ENGRAM_RAM_IN_GRAPH = os.environ.get("DS41_ENGRAM_RAM_IN_GRAPH", "0") == "1"
+ 
+ 
+ def _select_dsv4_attn_cls(vllm_config):
+@@ -494,6 +498,8 @@
+             for layer in islice(self.layers, self.start_layer, self.end_layer)
+             if getattr(layer, "engram", None) is not None
+         )
++        if getattr(self, "_lazy_engram_pending", True):
++            self._fill_lazy_engram(engrams)
+         try:
+             for engram in engrams:
+                 engram.invalidate_disk_output()
+@@ -507,12 +513,29 @@
+                 lookback_token_ids,
+                 hashes,
+             )
++            if _ENGRAM_HASH_DUMP:
++                _dump_engram_hashes(engrams, hashes)
++            # Layers kept in host RAM (DS41_ENGRAM_RAM_LAYERS) look up here,
++            # before graph replay, unless DS41_ENGRAM_RAM_IN_GRAPH=1.
++            if not _ENGRAM_RAM_IN_GRAPH:
++                for engram in engrams:
++                    if engram.embed_tokens.table_memory == "disk":
++                        continue
++                    if engram.embed_tokens.lazy_pending:
++                        # Unfilled lazy table (before arming): contribute zeros
++                        # rather than read unmapped rows.
++                        engram.staged_rows[: hashes.shape[0]].zero_()
++                        continue
++                    engram.prepare_embeddings(hashes[:, engram.layer_hash_index])
++            disk_engrams = tuple(
++                e for e in engrams if e.embed_tokens.table_memory == "disk"
++            )
+             # One batch lets the per-layer disk reads overlap on the host.
+             bindings = [
+                 engram.stage_disk(
+                     hashes[:, engram.layer_hash_index], self.engram_hash.num_tokens
+                 )
+-                for engram in engrams
++                for engram in disk_engrams
+             ]
+             counts = [hashes.shape[0]] * len(bindings)
+             # Enqueue the gathers before replay: graph waits can block every
+@@ -528,6 +551,50 @@
+                     logger.exception("Failed to clear Engram rows during cleanup")
+             raise
+ 
++    def _fill_lazy_engram(self, engrams):
++        """Fill DS41_ENGRAM_LAZY_RAM_LAYERS tables once promotion is armed.
++
++        Promotes the parked expert layers first (freeing their host copies),
++        then fills each rank's lazy tables one rank at a time, checking host
++        RAM before each fill. Runs outside graph capture, before the step's
++        Engram lookups, so no request reads an unfilled table once armed.
++        """
++        lazy = [e for e in engrams if e.embed_tokens.lazy_pending]
++        if not lazy:
++            self._lazy_engram_pending = False
++            return
++        arm_file = os.environ.get("B12X_DEFERRED_BANK_ARM_FILE", "")
++        if not arm_file or not os.path.exists(arm_file):
++            return
++        from vllm.distributed import get_tp_group
++        from vllm.model_executor.layers.fused_moe.b12x import promote_pending_inplace
++
++        promote_pending_inplace()
++        torch.cuda.synchronize()
++        group = get_tp_group()
++        margin = int(float(os.environ.get("DS41_ENGRAM_LAZY_MARGIN_GIB", "8")) * (1 << 30))
++        for rank in range(group.world_size):
++            if rank == group.rank_in_group:
++                need = sum(e.embed_tokens.mapped_host_nbytes for e in lazy)
++                available = _host_mem_available()
++                if available < need + margin:
++                    raise RuntimeError(
++                        f"Lazy Engram RAM: {available / (1 << 30):.1f} GiB host RAM "
++                        f"available, {need / (1 << 30):.1f} GiB table + "
++                        f"{margin / (1 << 30):.0f} GiB margin needed"
++                    )
++                start = time.perf_counter()
++                for engram in lazy:
++                    engram.embed_tokens.fill_lazy()
++                logger.info(
++                    "Lazy Engram RAM: rank %d filled %.2f GiB in %.1f s "
++                    "(host RAM available before: %.1f GiB)",
++                    rank, need / (1 << 30), time.perf_counter() - start,
++                    available / (1 << 30),
++                )
++            group.barrier()
++        self._lazy_engram_pending = False
++
+     def prepare_dummy_engram(self, num_tokens):
+         if torch.compiler.is_compiling() or torch.cuda.is_current_stream_capturing():
+             raise RuntimeError(
+@@ -598,6 +665,15 @@
+         if self.disk_engram and input_ids is not None:
+             engram_hashes = self.prepared_engram_hashes[: input_ids.shape[0]]
+             engram_mask = ~image_sentinel_mask(input_ids)
++            # Host-RAM tables (DS41_ENGRAM_RAM_LAYERS) read in-graph, if asked.
++            for layer in islice(self.layers, self.start_layer, self.end_layer):
++                engram = getattr(layer, "engram", None)
++                if (
++                    _ENGRAM_RAM_IN_GRAPH
++                    and engram is not None
++                    and engram.embed_tokens.table_memory != "disk"
++                ):
++                    engram.prepare_embeddings(engram_hashes[:, engram.layer_hash_index])
+         elif self.engram_hash is not None and input_ids is not None:
+             attn_metadata = (
+                 get_forward_context().attn_metadata
+@@ -774,6 +850,7 @@
+ 
+         # Pre-compute expert mapping ONCE.
+         expert_mapping = self.get_expert_mapping()
++        expert_order = _hot_first_expert_order(self.config.n_routed_experts)
+ 
+         for name, loaded_weight in weights:
+             if name.startswith(("vision.", "aligner.", "image_")):
+@@ -821,10 +898,13 @@
+                         and loaded_weight.dtype == torch.float8_e8m0fnu
+                     ):
+                         loaded_weight = loaded_weight.view(torch.uint8)
++                    layer_order = _layer_of(name, expert_order)
+                     for mapping in expert_mapping:
+                         param_name, weight_name, expert_id, expert_shard_id = mapping
+                         if weight_name not in name:
+                             continue
++                        if layer_order is not None:
++                            expert_id = layer_order[1][expert_id]
+                         name_mapped = name.replace(weight_name, param_name)
+                         if is_pp_missing_parameter(name_mapped, self):
+                             continue
+@@ -859,6 +939,10 @@
+                 else:
+                     if is_pp_missing_parameter(name, self):
+                         continue
++                    layer_order = _layer_of(name, expert_order)
++                    if layer_order is not None and ".ffn.gate." in name:
++                        # Router rows follow the hot-first expert slots.
++                        loaded_weight = loaded_weight[layer_order[0]]
+                     # Non-LoRA params on a LoRA-wrapped module live at
+                     # ``<head>.base_layer.<leaf>``; the checkpoint is plain.
+                     if name not in params_dict:
+@@ -999,3 +1083,84 @@
+                 module.setup_wo_projection()
+             if isinstance(module, Engram):
+                 module.process_weights_after_loading()
++
++
++
++
++# DS41_ENGRAM_HASH_DUMP=1 (diagnostic): rank 0 records the row ids its disk
++# Engram layers look up, in /cache/engram-hashes/, to size a hot-row cache.
++_ENGRAM_HASH_DUMP = os.environ.get("DS41_ENGRAM_HASH_DUMP", "0") == "1"
++_HASH_DUMP_STATE = {"parts": {}, "rows": 0, "files": 0}
++
++
++def _dump_engram_hashes(engrams, hashes):
++    import numpy as np
++
++    if get_tensor_model_parallel_rank() != 0:
++        return
++    state = _HASH_DUMP_STATE
++    for engram in engrams:
++        if engram.embed_tokens.table_memory != "disk":
++            continue
++        layer = engram.embed_tokens.caps.layer_id
++        ids = hashes[:, engram.layer_hash_index].reshape(-1)
++        ids = ids[ids >= 0].cpu().numpy()
++        state["parts"].setdefault(layer, []).append(ids)
++        state["rows"] += ids.size
++    if state["rows"] >= 1 << 21:
++        os.makedirs("/cache/engram-hashes", exist_ok=True)
++        for layer, parts in state["parts"].items():
++            np.save(
++                f"/cache/engram-hashes/layer{layer}-{state['files']:05d}.npy",
++                np.concatenate(parts),
++            )
++        state.update(parts={}, rows=0, files=state["files"] + 1)
++
++def _host_mem_available() -> int:
++    with open("/proc/meminfo") as meminfo:
++        for line in meminfo:
++            if line.startswith("MemAvailable:"):
++                return int(line.split()[1]) * 1024
++    raise RuntimeError("MemAvailable missing from /proc/meminfo")
++
++def _hot_first_expert_order(num_experts: int) -> dict[int, tuple]:
++    """Per-layer (order, slot_of) placing the most-routed experts first.
++
++    B12X_EXPERT_ORDER_DIR holds expert-routes-rank0-layer<L>.json route-count
++    snapshots for the host-offloaded layers (DS41_OFFLOAD_FROM/TO_ORDINAL).
++    Relabeling experts consistently in the router and the expert weights does
++    not change outputs; it makes a promoted prefix of the layer's VMM region
++    hold the experts that carry most routes.
++    """
++    directory = os.environ.get("B12X_EXPERT_ORDER_DIR", "")
++    if not directory:
++        return {}
++    first = int(os.environ.get("DS41_OFFLOAD_FROM_ORDINAL", "20"))
++    last = int(os.environ.get("DS41_OFFLOAD_TO_ORDINAL", "22"))
++    orders = {}
++    for layer in range(first, last + 1):
++        path = os.path.join(directory, f"expert-routes-rank0-layer{layer}.json")
++        if not os.path.exists(path):
++            continue
++        with open(path) as fh:
++            counts = json.load(fh)["counts"]
++        if len(counts) != num_experts:
++            raise ValueError(f"{path}: expected {num_experts} route counts")
++        order = sorted(range(num_experts), key=lambda e: (-counts[e], e))
++        slot_of = [0] * num_experts
++        for slot, expert in enumerate(order):
++            slot_of[expert] = slot
++        orders[layer] = (torch.tensor(order, dtype=torch.long), slot_of)
++    if orders:
++        logger.info("Hot-first expert order for layers %s", sorted(orders))
++    return orders
++
++
++def _layer_of(name: str, orders: dict[int, tuple]):
++    if not orders or not name.startswith("layers."):
++        return None
++    try:
++        layer = int(name.split(".", 2)[1])
++    except ValueError:
++        return None
++    return orders.get(layer)
+--- a/vllm/models/deepseek_v4/common/rope.py
++++ b/vllm/models/deepseek_v4/common/rope.py
+@@ -1,11 +1,35 @@
+ # SPDX-License-Identifier: Apache-2.0
+-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+-"""DeepseekV4 rotary embedding initialization."""
++"""DeepSeek V4 RoPE builder with a serving-length materialization cap.
+ 
++Frequency correction keeps checkpoint training geometry. Only the number of
++cached lookup rows is bounded by ``DS41_ROPE_CACHE_ROWS``; unset keeps upstream.
++"""
++import os
++
++import torch
++from vllm.model_executor.layers.rotary_embedding.deepseek_scaling_rope import (
++    DeepseekV4ScalingRotaryEmbedding,
++)
+ from vllm.model_executor.layers.rotary_embedding import get_rope
+ from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbedding
+ 
+ 
++def _compute_capped_cache(self) -> torch.Tensor:
++    """Preserve YaRN frequency math; cap only allocated lookup positions."""
++
++    inv_freq = self._compute_inv_freq(self.scaling_factor)
++    full_rows = int(self.max_position_embeddings * self.scaling_factor)
++    requested = int(os.environ.get("DS41_ROPE_CACHE_ROWS", "0"))
++    rows = min(full_rows, requested) if requested else full_rows
++    if rows <= 0:
++        raise ValueError("DS41_ROPE_CACHE_ROWS must be positive")
++    t = torch.arange(rows, device=inv_freq.device, dtype=torch.float32)
++    freqs = torch.einsum("i,j -> ij", t, inv_freq)
++    return torch.cat((freqs.cos() * self.mscale, freqs.sin() * self.mscale), dim=-1)
++
++
++DeepseekV4ScalingRotaryEmbedding._compute_cos_sin_cache = _compute_capped_cache
++
+ def build_deepseek_v4_rope(
+     config,
+     *,
+@@ -15,8 +39,6 @@
+     compress_ratio: int,
+ ) -> RotaryEmbedding:
+     rope_parameters = config.rope_parameters
+-    # Newer checkpoints nest per-layer-type rope dicts ({"main", "compress"});
+-    # older ones ship a single flat dict shared by all layer types.
+     if isinstance(rope_parameters.get("main"), dict) and isinstance(
+         rope_parameters.get("compress"), dict
+     ):
+@@ -29,24 +51,36 @@
+         config.compress_rope_theta if compress_ratio > 1 else config.rope_theta
+     )
+     if compress_ratio > 1 and rope_parameters["rope_type"] != "default":
+-        # YaRN applies only to compressor (CSA/HCA) layers.
+         rope_parameters["rope_type"] = (
+             "deepseek_yarn"
+             if rope_parameters.get("apply_yarn_scaling", True)
+             else "deepseek_llama_scaling"
+         )
+     else:
+-        # Sliding-window layers use plain RoPE (theta=rope_theta, no YaRN).
+         rope_parameters["rope_type"] = "deepseek_yarn"
+         rope_parameters["factor"] = 1.0
+         rope_parameters["original_max_position_embeddings"] = max_position_embeddings
+-    rope_parameters["mscale"] = 0  # Disable mscale
+-    rope_parameters["mscale_all_dim"] = 0  # Disable mscale
++    rope_parameters["mscale"] = 0
++    rope_parameters["mscale_all_dim"] = 0
+     rope_parameters["is_deepseek_v4"] = True
+     rope_parameters["rope_dim"] = rope_head_dim
+-    return get_rope(
++
++    requested_rows = int(os.environ.get("DS41_ROPE_CACHE_ROWS", "0"))
++    if requested_rows and not 0 < requested_rows <= max_position_embeddings:
++        raise ValueError(
++            f"DS41_ROPE_CACHE_ROWS={requested_rows} must be inside "
++            f"[1, {max_position_embeddings}]"
++        )
++
++    rotary = get_rope(
+         head_dim,
+         max_position=max_position_embeddings,
+         rope_parameters=rope_parameters,
+         is_neox_style=False,
+     )
++    if requested_rows and rotary.cos_sin_cache.shape[0] != requested_rows:
++        raise RuntimeError(
++            "DeepSeek RoPE cache cap was not applied during construction: "
++            f"got {rotary.cos_sin_cache.shape[0]}, expected {requested_rows}"
++        )
++    return rotary
+--- a/vllm/utils/b12x.py
++++ b/vllm/utils/b12x.py
+@@ -381,7 +381,15 @@
+ 
+ 
+ def get_b12x_intrinsics() -> ModuleType | None:
+-    return _get_submodule("b12x._lib.intrinsics")
++    intrinsics = _get_submodule("b12x._lib.intrinsics")
++    # FlashInfer b12x moved swizzle_block_scale into intrinsics.reference
++    # without re-exporting it from the package.
++    if intrinsics is not None and not hasattr(intrinsics, "swizzle_block_scale"):
++        import importlib
++
++        reference = importlib.import_module("b12x._lib.intrinsics.reference")
++        intrinsics.swizzle_block_scale = reference.swizzle_block_scale
++    return intrinsics
+ 
+ 
+ def get_b12x_mxfp8_linear() -> ModuleType | None:
