@@ -7,7 +7,7 @@ Weights: [deepseek-ai/DeepSeek-V4.1-Flash-1017](https://huggingface.co/deepseek-
 `1bae0e1088993b9b82de08f59de5be5a34e42170` (MIT). Runtime: Local Inference Lab's vLLM "karmic-kraken" image
 (`karmic-kraken-beta-20261016.2`) with FlashInfer `main` b12x and the TP3 changes in `src/`.
 
-Image: **`azallaza/ds41-kraken-tp3:20261019`** (`sha256:54836f9d19449e2375c86cd2c285344c7384b7ce862169ad2e3cf5ae165ff69b`, 45.1 GB).
+Image: **`azallaza/ds41-kraken-tp3:20261019`** (`sha256:54836f9d19449e2375c86cd2c285344c7384b7ce862169ad2e3cf5ae165ff69b`; 13.0 GB download, 45.1 GB unpacked).
 
 ```bash
 docker pull azallaza/ds41-kraken-tp3:20261019
