@@ -24,7 +24,7 @@ Host settings: 350 W/GPU, +6000 memory offset, ~256 GB host RAM, the checkpoint 
 | GPUs | 3× RTX PRO 6000 Blackwell Workstation (sm_120, 96 GB, PCIe Gen5 x16), 350 W cap, +6000 memory offset |
 | Host | Threadripper PRO 7965WX (24 cores), 256 GB RAM (247 GiB usable), driver 615.71.09 |
 | Context / KV | 1,048,576-token window, **2,185,581-token KV pool (2.08 × 1M)**, up to 4 sequences |
-| Prefill | ~10,000-11,000 tok/s on real source code (100-260K tokens); 7,129 tok/s on a 983K-token prompt |
+| Prefill | 14,195 / 12,716 tok/s at 32K / 128K (`llm_decode_bench`); ~10,000-11,000 tok/s on real source code (100-260K tokens); 7,129 tok/s on a 983K-token prompt |
 | Decode, 1 user | ~172 tok/s at 32K-128K context, 225-300 tok/s on code and explanations (DSpark, 5 drafts) |
 | Decode, 4 users | 336-349 tok/s aggregate at 32K-128K context |
 
@@ -33,11 +33,10 @@ Host settings: 350 W/GPU, +6000 memory offset, ~256 GB host RAM, the checkpoint 
 1. [What it is](#what-it-is)
 2. [How it fits in 3 × 96 GB](#how-it-fits-in-3--96-gb)
 3. [Measurements](#measurements-on-this-image) · [Quality and long context](#quality-and-long-context)
-4. [Comparison with the EXL3 hybrid recipe](#comparison-with-the-exl3-hybrid-recipe)
-5. [Memory](#memory)
-6. [Measured and not adopted](#measured-and-not-adopted)
-7. [Known limitations](#known-limitations) · [Not tested](#not-tested)
-8. [Files](#files) · [Variables](#variables) · [compose.yaml](#composeyaml)
+4. [Memory](#memory)
+5. [Measured and not adopted](#measured-and-not-adopted)
+6. [Known limitations](#known-limitations) · [Not tested](#not-tested)
+7. [Files](#files) · [Variables](#variables) · [compose.yaml](#composeyaml)
 
 ## What it is
 
@@ -83,11 +82,12 @@ All on the published image from a fresh cache volume, 350 W, +6000 memory offset
 | Benchmark | Result |
 | --- | --- |
 | Known-answer checks (5 prompts) | 5/5 |
-| Needle at 28,553 tokens | pass, 2.32 s |
+| Needle at 28,553 tokens | pass, TTFT 2.32 s (**12,318 tok/s** prefill) |
 | Needle at 982,982 tokens | pass, TTFT 137.9 s (**7,129 tok/s**), peak 97,337 of 97,887 MiB |
 | Real source code (FlashInfer Python), 105K / 259K / 102K tokens | **10,594 / 9,928 / 11,086 tok/s** prefill |
 | Decode, short prompt, 3 runs | 78.9-79.8 steps/s × 2.84-2.87 tokens/step = **226-227 tok/s** |
 | 4 concurrent short requests | 458 tok/s aggregate |
+| `llm_decode_bench` prefill 32K / 128K (32,252 / 128,511 tokens) | **14,195 / 12,716 tok/s** (TTFT 2.27 / 10.11 s) |
 | `llm_decode_bench` 32K, C1 / C4 | 171.7 / 336.3 tok/s (67.8 / 138.3 engine steps/s) |
 | `llm_decode_bench` 128K, C1 / C4 | 172.6 / 349.3 tok/s (67.1 / 138.5 engine steps/s) |
 | `llm_decode_bench` coding peak (Sieve of Eratosthenes, 3 runs) | 254.4 tok/s mean |
@@ -118,30 +118,6 @@ basic 48/60, 48/60; hard 36/60, 50/60). The vision tower runs from host memory (
 
 For reference, GLM-5.3 Kraken TP3 20261015 measured lavd 30 exact, hotel-lights 27-28 exact, long generation
 4/4 clean (worst 0.0017) and vision 117/120 on the hard set on the same tests.
-
-## Comparison with the EXL3 hybrid recipe
-
-[meldavy/dsv41f-1017-sm120-tp3](https://github.com/meldavy/dsv41f-1017-sm120-tp3) serves the same model on the
-same GPUs with the routed experts requantized to EXL3 3.5 bpw, which fits everything in VRAM and leaves host RAM
-for both Engram tables. Its benchmark scripts are not published; `meldavy_bench.py` follows the protocol in its
-README (thinking off, one stream, 512-token decode after synthetic 10K/32K prompts, four 600-token realistic
-outputs, warm runs) and was run on this image. Their numbers are copied from their README.
-
-| Cell (one stream, thinking off) | **This image** | EXL3 hybrid, DSpark K7 adaptive | EXL3 hybrid, no speculation |
-| --- | --- | --- | --- |
-| Prefill, 10K filler | **11,176-11,439 tok/s** | 4,756-4,821 | 6,924-7,108 |
-| Prefill, 32K filler | **14,371-14,444 tok/s** | 6,815-6,818 | 7,546-7,597 |
-| Decode after 10K filler | **207-278 tok/s** | 133.7-149.9 | 91.5-91.7 |
-| Decode after 32K filler | **149-275 tok/s** | 152.8-166.5 | 91.5-91.7 |
-| Python module + tests | **246-259 tok/s** | 207.6-213.3 | — |
-| Rust parser | **293-299 tok/s** | 240.5-260.4 | — |
-| TCP explainer | **227-229 tok/s** | 151.5-158.2 | — |
-| Refactor | **234-242 tok/s** | 178.2-184.4 | — |
-| KV pool | 2.19M tokens (2.08 × 1M) | 1.43M (1.36 × 1M) | 3.14M (2.99 × 1M) |
-| Expert weights | original MXFP4 | EXL3 3.5 bpw | EXL3 3.5 bpw |
-
-Prompts are written to the same description, not copied, and decode after filler varies widely with the
-continuation. The hybrid without speculation keeps the larger KV pool (3 full 1M requests).
 
 ## Memory
 
@@ -193,8 +169,8 @@ other GPU power limits.
 - `qualification/`: `run_qualification.py` and the GLM-derived checks it runs (`long_retrieval.py`, `long_context.py`,
   `analyze_quality.py`), `vision/` (the GLM synthetic image sets, `run_vision.py`, `score_vision.py`), `img_stress.py`,
   `stress_kv.py`, with `RESULTS.md` and the raw outputs. The 581K-token conversation used for long generation is not included.
-- `bench/`: the measurements above (`meldavy_protocol`, `quick`, `prefill_real_code`, `llm_decode_bench`,
-  `needle_983k`) and the scripts that produced them: `meldavy_bench.py`, `bench.py` (quick), `prefill_real.py`, `bench_long.py` (needle).
+- `bench/`: the measurements above (`quick`, `prefill_real_code`, `llm_decode_bench`, `llm_decode_bench_prefill`,
+  `needle_983k`) and the scripts that produced them: `bench.py` (quick), `prefill_real.py`, `bench_long.py` (needle).
 
 ## Variables
 
