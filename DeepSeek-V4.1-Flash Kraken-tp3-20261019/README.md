@@ -17,11 +17,11 @@ HF_CACHE_DIR=/path/to/huggingface docker compose up -d     # port 15015, model n
 The container arms expert promotion by itself once `/health` answers (log line
 `ds41-serve: expert promotion armed and warmed`); serve traffic after that line for full speed.
 
-Host settings: 350 W/GPU, ~256 GB host RAM, the checkpoint on an NVMe drive (Engram layer 14 is read from it while serving).
+Host settings: 350 W/GPU, +6000 memory offset, ~256 GB host RAM, the checkpoint on an NVMe drive (Engram layer 14 is read from it while serving).
 
 | | |
 | --- | --- |
-| GPUs | 3× RTX PRO 6000 Blackwell Workstation (sm_120, 96 GB, PCIe Gen5 x16), 350 W cap |
+| GPUs | 3× RTX PRO 6000 Blackwell Workstation (sm_120, 96 GB, PCIe Gen5 x16), 350 W cap, +6000 memory offset |
 | Host | Threadripper PRO 7965WX (24 cores), 256 GB RAM (247 GiB usable), driver 615.71.09 |
 | Context / KV | 1,048,576-token window, **2,185,581-token KV pool (2.08 × 1M)**, up to 4 sequences |
 | Prefill | ~10,000-11,000 tok/s on real source code (100-260K tokens); 7,129 tok/s on a 983K-token prompt |
@@ -78,7 +78,7 @@ next to the parked expert layers on 256 GB (see [Measured and not adopted](#meas
 
 ## Measurements on this image
 
-All on the published image from a fresh cache volume, 350 W, one container; raw outputs in `bench/`.
+All on the published image from a fresh cache volume, 350 W, +6000 memory offset, one container; raw outputs in `bench/`.
 
 | Benchmark | Result |
 | --- | --- |
