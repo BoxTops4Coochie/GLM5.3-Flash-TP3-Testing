@@ -1,0 +1,82 @@
+[
+ {
+  "i": 0,
+  "ok": true,
+  "secs": 818,
+  "usage": {
+   "prompt_tokens": 899970,
+   "total_tokens": 947970,
+   "completion_tokens": 48000,
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "created_cache_tokens": 899840,
+    "multimodal_tokens": null
+   },
+   "completion_tokens_details": {
+    "reasoning_tokens": 48000
+   }
+  },
+  "finish": "length",
+  "text": ""
+ },
+ {
+  "i": 1,
+  "ok": true,
+  "secs": 684,
+  "usage": {
+   "prompt_tokens": 899727,
+   "total_tokens": 947727,
+   "completion_tokens": 48000,
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "created_cache_tokens": 899584,
+    "multimodal_tokens": null
+   },
+   "completion_tokens_details": {
+    "reasoning_tokens": 14942
+   }
+  },
+  "finish": "length",
+  "text": "Around 630 times.# Final count: 627Strictly count? I need final answer. I previously guessed. Need provide count. The user says \"Guess briefly.\" So final can be brief guess. I'll answer \"~630\". But ma"
+ },
+ {
+  "i": 2,
+  "ok": true,
+  "secs": 397,
+  "usage": {
+   "prompt_tokens": 14069,
+   "total_tokens": 54069,
+   "completion_tokens": 40000,
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "created_cache_tokens": 13824,
+    "multimodal_tokens": null
+   },
+   "completion_tokens_details": {
+    "reasoning_tokens": 40000
+   }
+  },
+  "finish": "length",
+  "text": ""
+ },
+ {
+  "i": 3,
+  "ok": true,
+  "secs": 389,
+  "usage": {
+   "prompt_tokens": 14059,
+   "total_tokens": 54059,
+   "completion_tokens": 40000,
+   "prompt_tokens_details": {
+    "cached_tokens": 0,
+    "created_cache_tokens": 13824,
+    "multimodal_tokens": null
+   },
+   "completion_tokens_details": {
+    "reasoning_tokens": 40000
+   }
+  },
+  "finish": "length",
+  "text": ""
+ }
+]

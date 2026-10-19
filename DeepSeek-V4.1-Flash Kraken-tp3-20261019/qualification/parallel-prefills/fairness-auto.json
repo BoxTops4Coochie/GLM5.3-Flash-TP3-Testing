@@ -1,0 +1,22 @@
+[
+ {
+  "short": {
+   "ttft_s": 0.64,
+   "prompt_tokens": 89
+  },
+  "long": {
+   "ttft_s": 39.21,
+   "prompt_tokens": 419467
+  }
+ },
+ {
+  "short": {
+   "ttft_s": 0.57,
+   "prompt_tokens": 89
+  },
+  "long": {
+   "ttft_s": 38.12,
+   "prompt_tokens": 419777
+  }
+ }
+]

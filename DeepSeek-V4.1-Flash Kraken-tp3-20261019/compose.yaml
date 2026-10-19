@@ -1,4 +1,4 @@
-# DeepSeek-V4.1-Flash-1017 TP3 release, image azallaza/ds41-kraken-tp3:20261019
+# DeepSeek-V4.1-Flash-1017 TP3 release, image azallaza/ds41-kraken-tp3:20261019.2
 # (karmic-kraken-beta-20261016.2 + FlashInfer main 5b065abe b12x + the TP3 port in src/).
 # Defaults: original deepseek-ai weights (MXFP4 experts, lossless), DSpark 5 drafts with
 # every draft verified, 1M context, 4096-token prefill chunks, KV 2,185,581 tokens
@@ -7,7 +7,7 @@
 # Needs 3x 96 GB GPUs and ~256 GB host RAM (~150 GB used). Tested at 350 W/GPU.
 services:
   ds41-kraken-tp3:
-    image: "${DS41_IMAGE:-azallaza/ds41-kraken-tp3:20261019}"
+    image: "${DS41_IMAGE:-azallaza/ds41-kraken-tp3:20261019.2}"
     container_name: ds41-kraken-tp3
     restart: "no"
     stop_grace_period: 90s

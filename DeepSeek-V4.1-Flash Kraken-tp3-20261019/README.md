@@ -1,4 +1,4 @@
-# DeepSeek-V4.1-Flash-1017 Kraken TP3 — 20261019
+# DeepSeek-V4.1-Flash-1017 Kraken TP3 — 20261019.2
 
 DeepSeek-V4.1-Flash-1017 served at **tensor parallel 3 with the full 1M-token context** on three 96 GB RTX PRO 6000
 Blackwell cards, from DeepSeek's **original weights** (FP8 dense layers, MXFP4 routed experts; nothing requantized).
@@ -7,10 +7,13 @@ Weights: [deepseek-ai/DeepSeek-V4.1-Flash-1017](https://huggingface.co/deepseek-
 `1bae0e1088993b9b82de08f59de5be5a34e42170` (MIT). Runtime: Local Inference Lab's vLLM "karmic-kraken" image
 (`karmic-kraken-beta-20261016.2`) with FlashInfer `main` b12x and the TP3 changes in `src/`.
 
-Image: **`azallaza/ds41-kraken-tp3:20261019`** (`sha256:54836f9d19449e2375c86cd2c285344c7384b7ce862169ad2e3cf5ae165ff69b`; 13.0 GB download, 45.1 GB unpacked).
+Image: **`azallaza/ds41-kraken-tp3:20261019.2`** (`sha256:06578acf49f51b7130224bcf5f6e77dfc651027895503b11cbaf7bd9b27cc460`).
+Same as `20261019` (`sha256:54836f9d…`, 13.0 GB download, 45.1 GB unpacked) except one launcher setting,
+`max-parallel-prefills: auto` (see [Update 20261019.2](#update-202610192-parallel-prefills)). It shares all but three small
+layers with `20261019`, so pulling it over `20261019` downloads ~120 KB.
 
 ```bash
-docker pull azallaza/ds41-kraken-tp3:20261019
+docker pull azallaza/ds41-kraken-tp3:20261019.2
 HF_CACHE_DIR=/path/to/huggingface docker compose up -d     # port 15015, model name DeepSeek-V4.1-Flash
 ```
 
@@ -18,6 +21,18 @@ The container arms expert promotion by itself once `/health` answers (log line
 `ds41-serve: expert promotion armed and warmed`); serve traffic after that line for full speed.
 
 Host settings: 350 W/GPU, +6000 memory offset, ~256 GB host RAM, the checkpoint on an NVMe drive (Engram layer 14 is read from it while serving).
+
+## Update 20261019.2: parallel prefills
+
+| Change | Effect |
+| --- | --- |
+| `max-parallel-prefills: 1 -> auto` (vLLM `max_parallel_prefills`): up to 4 prefills share each step round-robin; a lone prefill keeps the full 4096-token budget | a short (89-token) request arriving 3 s into a ~420K-token prefill: TTFT **34.2-35.1 s -> 0.57-0.67 s**; the long prompt 37.2-38.1 -> 38.1-39.2 s |
+
+Rechecked with `auto` (no other change): 2 x ~900K + 2 x ~14K prompts prefilling at once 4/4 OK, 0 preemptions,
+peak KV 75.2%, min free 550 MiB; 983K-token needle pass at 7,467 tok/s; `llm_decode_bench` prefill 32K / 128K
+13,502 / 12,206 tok/s (cold Engram row cache after the restart; 14,195 / 12,716 on `20261019`); decode 219-236 tok/s,
+4 concurrent 490 tok/s, 5/5 known answers. Mount a settings file with `max-parallel-prefills: 1` to restore one
+prefill at a time. Results in `qualification/parallel-prefills/`.
 
 | | |
 | --- | --- |
@@ -32,7 +47,7 @@ Host settings: 350 W/GPU, +6000 memory offset, ~256 GB host RAM, the checkpoint 
 
 1. [What it is](#what-it-is)
 2. [How it fits in 3 × 96 GB](#how-it-fits-in-3--96-gb)
-3. [Measurements](#measurements-on-this-image) · [Quality and long context](#quality-and-long-context)
+3. [Update 20261019.2](#update-202610192-parallel-prefills) · [Measurements](#measurements-on-this-image) · [Quality and long context](#quality-and-long-context)
 4. [Memory](#memory)
 5. [Measured and not adopted](#measured-and-not-adopted)
 6. [Known limitations](#known-limitations) · [Not tested](#not-tested)
@@ -77,7 +92,7 @@ next to the parked expert layers on 256 GB (see [Measured and not adopted](#meas
 
 ## Measurements on this image
 
-All on the published image from a fresh cache volume, 350 W, +6000 memory offset, one container; raw outputs in `bench/`.
+On `20261019` (one prefill at a time) from a fresh cache volume, 350 W, +6000 memory offset, one container; raw outputs in `bench/`.
 
 | Benchmark | Result |
 | --- | --- |
@@ -110,7 +125,7 @@ Same protocol as the GLM-5.3 Kraken TP3 releases (`qualification/run_qualificati
 | Vision, basic set (60 images: OCR, 5-line read, count 3-12, 3x3 colors, tallest bar), T=0 / T=1 | **60/60, 60/60** |
 | Vision, hard set (small low-contrast OCR, 10-line read, count 13-28, exact bar value, 12 similar shades), T=0 / T=1 | **58/60, 59/60** (117/120): one OCR spacing error, one 10-line read with inserted words; dense counting 24/24 |
 | 4 concurrent requests x 10 photos at 6000x4000 (11.8 MB JPEGs) | **4/4 OK**, 0 preemptions, 9,831 prompt tokens each, min free 590 MiB |
-| 4 concurrent: 2 x ~900K-token + 2 x ~14K-token prompts, 48K / 40K generated tokens each, `ignore_eos` | **4/4 OK** (all four running together), 0 preemptions, 1,827,825 prompt tokens, peak KV 74.0%, min free 590 MiB, 502 s |
+| 4 concurrent: 2 x ~900K-token + 2 x ~14K-token prompts, 48K / 40K generated tokens each, `ignore_eos` | **4/4 OK** (all four running together), 0 preemptions, 1,827,825 prompt tokens, peak KV 74.0%, min free 590 MiB; with `auto` (all four prefilling at once, cold cache): 4/4 OK, 0 preemptions, peak KV 75.2%, min free 550 MiB, 818 s |
 
 Vision scores use `vision/score_vision.py`, which also accepts a final "the answer is X" sentence: at T=1 the model
 often ends with "Therefore, the answer is **green**." where the GLM scorer expects the bare word (strict scores:
@@ -152,7 +167,6 @@ the vLLM processes. With ~256 GB this leaves room for the OS and other services,
 - Promotion happens on the warm-up request after `/health`; requests that arrive before the
   `expert promotion armed and warmed` log line run with parked layers 20-25 in host memory (slower decode).
 - Up to 4 concurrent sequences (`max-num-seqs: 4`, CUDA graphs up to 24 tokens).
-- One long prefill takes every step (`max-parallel-prefills: 1`); a short request arriving behind a long prompt waits.
 - Time to first token is ~0.25 s even for short prompts (fixed per-request host overhead of the eager prefill pass).
 
 ## Not tested
@@ -168,7 +182,8 @@ other GPU power limits.
   `image-inspect.json`.
 - `qualification/`: `run_qualification.py` and the GLM-derived checks it runs (`long_retrieval.py`, `long_context.py`,
   `analyze_quality.py`), `vision/` (the GLM synthetic image sets, `run_vision.py`, `score_vision.py`), `img_stress.py`,
-  `stress_kv.py`, with `RESULTS.md` and the raw outputs. The 581K-token conversation used for long generation is not included.
+  `stress_kv.py`, `prefill_fairness.py` (short request behind a long prefill), `parallel-prefills/` (the `auto` rechecks),
+  with `RESULTS.md` and the raw outputs. The 581K-token conversation used for long generation is not included.
 - `bench/`: the measurements above (`quick`, `prefill_real_code`, `llm_decode_bench`, `llm_decode_bench_prefill`,
   `needle_983k`) and the scripts that produced them: `bench.py` (quick), `prefill_real.py`, `bench_long.py` (needle).
 
@@ -189,7 +204,7 @@ other GPU power limits.
 ## compose.yaml
 
 ```yaml
-# DeepSeek-V4.1-Flash-1017 TP3 release, image azallaza/ds41-kraken-tp3:20261019
+# DeepSeek-V4.1-Flash-1017 TP3 release, image azallaza/ds41-kraken-tp3:20261019.2
 # (karmic-kraken-beta-20261016.2 + FlashInfer main 5b065abe b12x + the TP3 port in src/).
 # Defaults: original deepseek-ai weights (MXFP4 experts, lossless), DSpark 5 drafts with
 # every draft verified, 1M context, 4096-token prefill chunks, KV 2,185,581 tokens
@@ -198,7 +213,7 @@ other GPU power limits.
 # Needs 3x 96 GB GPUs and ~256 GB host RAM (~150 GB used). Tested at 350 W/GPU.
 services:
   ds41-kraken-tp3:
-    image: "${DS41_IMAGE:-azallaza/ds41-kraken-tp3:20261019}"
+    image: "${DS41_IMAGE:-azallaza/ds41-kraken-tp3:20261019.2}"
     container_name: ds41-kraken-tp3
     restart: "no"
     stop_grace_period: 90s

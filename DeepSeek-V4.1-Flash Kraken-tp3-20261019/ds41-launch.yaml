@@ -14,7 +14,9 @@ options:
   max-cudagraph-capture-size: 24
   # KV is a fixed byte budget (--kv-cache-memory-bytes), so this only bounds startup.
   gpu-memory-utilization: 0.93
-  max-parallel-prefills: 1
+  # Up to 4 prefills share each step round-robin; a lone prefill keeps the full budget.
+  # A short request behind a ~420K-token prefill: TTFT 34-35 s with 1, 0.6 s with auto.
+  max-parallel-prefills: auto
   prefill-policy: round-robin
   # DSpark speculative decoding with 5 drafts, every draft verified.
   mode: dspark
