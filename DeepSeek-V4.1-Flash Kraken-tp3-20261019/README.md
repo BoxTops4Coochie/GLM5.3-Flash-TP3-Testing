@@ -122,6 +122,8 @@ Same protocol as the GLM-5.3 Kraken TP3 releases (`qualification/run_qualificati
 | Retrieval of three exact markers at 128K / 900K tokens | **pass / pass** |
 | Long generation after a captured 581,537-token conversation, seeds 201-204, natural EOS, 65,536-token cap | **4/4 clean**: 16,323-23,274 tokens, all ended with `stop`, worst 8-gram repeat 0.0013 |
 
+| Vision and stress test | Result |
+| --- | --- |
 | Vision, basic set (60 images: OCR, 5-line read, count 3-12, 3x3 colors, tallest bar), T=0 / T=1 | **60/60, 60/60** |
 | Vision, hard set (small low-contrast OCR, 10-line read, count 13-28, exact bar value, 12 similar shades), T=0 / T=1 | **58/60, 59/60** (117/120): one OCR spacing error, one 10-line read with inserted words; dense counting 24/24 |
 | 4 concurrent requests x 10 photos at 6000x4000 (11.8 MB JPEGs) | **4/4 OK**, 0 preemptions, 9,831 prompt tokens each, min free 590 MiB |
