@@ -1,0 +1,37 @@
+$ python3 test_bench_report.py
+PASS test_zero_drafted_tokens_has_zero_acceptance_rate
+
+18 passed, 0 failed
+
+$ python3 bench_report.py sample.jsonl
+sample.jsonl:5: field 'elapsed_seconds' must be greater than 0
+MODEL  CONC  RUNS  AVG_TPS  MEDIAN_TPS  MIN_TPS  MAX_TPS  STDDEV  ACCEPT%  ACCEPTED  REJECTED
+ds41      8     1    853.3       853.3    853.3    853.3    0.00     74.4      2900      1000
+ds41      1     2    348.8       348.8    341.3    356.2    7.42     91.0      7100       700
+glm53     1     1    288.5       288.5    288.5    288.5    0.00     84.6      3300       600
+
+$ python3 bench_report.py sample.jsonl --model glm53 --format json
+[
+  {
+    "model": "glm53",
+    "concurrency": 1,
+    "runs": 1,
+    "mean_generation_tps": 288.4507042253521,
+    "median_generation_tps": 288.4507042253521,
+    "min_generation_tps": 288.4507042253521,
+    "max_generation_tps": 288.4507042253521,
+    "stdev_generation_tps": 0.0,
+    "mean_acceptance_rate": 84.61538461538461,
+    "total_accepted_tokens": 3300.0,
+    "total_rejected_tokens": 600.0
+  }
+]
+
+$ python3 bench_report.py nope.jsonl; echo exit=$?
+error: cannot read 'nope.jsonl': [Errno 2] No such file or directory: 'nope.jsonl'
+exit=1
+
+$ python3 bench_report.py sample.jsonl --min-acceptance 99; echo exit=$?
+sample.jsonl:5: field 'elapsed_seconds' must be greater than 0
+error: no valid rows after filtering
+exit=1

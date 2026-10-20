@@ -1,0 +1,31 @@
+╭──────────────────────────── NVIDIA P2P Override ─────────────────────────────╮
+│ Effective: yes                                                               │
+│ Configured file: yes (/etc/modprobe.d/nvidia-p2p-override.conf)              │
+│ Runtime: ForceP2P=0x11; RMForceP2PType=1; RMPcieP2PType=2;                   │
+│ GrdmaPciTopoCheckOverride=1; EnableResizableBar=1; DmaRemapPeerMmio=1        │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─────────────────────────────── Configuration ────────────────────────────────╮
+│ LLM Inference Benchmark                                                      │
+│ Model: DeepSeek-V4.1-Flash @ localhost:15015                                 │
+│ Decode concurrency: [1, 4]                                                   │
+│ Decode contexts: ['32k', '128k']                                             │
+│ Duration: 30.0s per decode test | Max tokens: 8192                           │
+│ Pre-decode warmup: C=1 max-runnable context for 3s                           │
+│ Exact-loop guard: enabled | Output preview: unavailable in plain mode        │
+│ Prefill: integrated decode scouts | Sustained decode: 4 cells                │
+╰──────────────────────────────────────────────────────────────────────────────╯
+Engine: vLLM 0.1.dev21836+g6d66eed35  Models: ['DeepSeek-V4.1-Flash']
+KV cache budget (vLLM metrics): 2,185,581 tokens (kv_cache_size_tokens)
+Model context length: 1,048,576 tokens
+Prefill tests: integrated from decode scout requests ['32k', '128k']; scout-only
+extras ['8k', '64k']
+Calibrating padding text (run=jcnwzqjgmyvd, up to 128k)...
+  Token targeting: single-point estimate from 8k (use --token-targeting exact 
+for /tokenize binary search)
+  Calibrated: 6.22 chars/token (cached, source=8k)
+  8k: 50,993 chars (~8,191 tokens)
+  32k: 203,975 chars (~32,767 tokens)
+  64k: 407,951 chars (~65,535 tokens)
+  128k: 815,903 chars (~131,071 tokens)
+Done.
+

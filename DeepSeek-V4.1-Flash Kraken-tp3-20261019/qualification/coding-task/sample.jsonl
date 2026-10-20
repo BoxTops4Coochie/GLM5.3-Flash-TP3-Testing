@@ -1,0 +1,5 @@
+{"model":"ds41","concurrency":1,"prompt_tokens":32000,"output_tokens":4096,"elapsed_seconds":12.0,"accepted_tokens":3500,"drafted_tokens":3900}
+{"model":"ds41","concurrency":1,"prompt_tokens":32000,"output_tokens":4096,"elapsed_seconds":11.5,"accepted_tokens":3600,"drafted_tokens":3900}
+{"model":"ds41","concurrency":8,"prompt_tokens":32000,"output_tokens":4096,"elapsed_seconds":4.8,"accepted_tokens":2900,"drafted_tokens":3900}
+{"model":"glm53","concurrency":1,"prompt_tokens":32000,"output_tokens":4096,"elapsed_seconds":14.2,"accepted_tokens":3300,"drafted_tokens":3900}
+{"model":"bad-row","concurrency":1,"prompt_tokens":1000,"output_tokens":500,"elapsed_seconds":0,"accepted_tokens":100,"drafted_tokens":90}

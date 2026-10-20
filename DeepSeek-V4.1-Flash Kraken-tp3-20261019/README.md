@@ -131,6 +131,26 @@ Vision scores use `vision/score_vision.py`, which also accepts a final "the answ
 often ends with "Therefore, the answer is **green**." where the GLM scorer expects the bare word (strict scores:
 basic 48/60, 48/60; hard 36/60, 50/60). The vision tower runs from host memory (`--cpu-offload-params vision`).
 
+### Coding task
+
+One prompt (`qualification/coding-task/PROMPT.md`): build a standard-library Python CLI, `bench_report.py`, that
+validates a JSONL file of benchmark runs, groups them by model and concurrency, reports throughput statistics with
+`--top`, `--min-acceptance`, `--model` and table/JSON/CSV output, plus a test file that runs both directly and
+under pytest. The model wrote both files in one pass (462 + 323 lines, unedited in `coding-task/`).
+
+| Check | Result |
+| --- | --- |
+| `python3 test_bench_report.py` / `pytest` | **18 passed** / **18 passed** |
+| Sample file from the prompt (4 valid rows, 1 invalid) | table correct by hand calculation; the invalid row reported to stderr with its line number |
+| `--top`, `--min-acceptance`, `--model`, `--format json` (numbers, not strings), `--format csv` (header row) | all as specified |
+| Unreadable file / zero rows after filtering | exit code 1 with an error message, both |
+| Standard library only, dataclasses, type hints, logic outside `main()` | yes: 2 frozen dataclasses, 17 functions |
+| Generation speed (server log, 10 s windows, 1 user) | **~14,600 tokens in ~70 s, 191-281 tok/s** (rising as acceptance length climbed from 3.2 to 5.3 of 6); 60% of drafted tokens accepted |
+
+Two choices left open by the prompt: the standard deviation is the population form, and token totals print as
+floats (`3300.0`). Outputs and the commands run are in `coding-task/verification.txt`; the server log lines in
+`coding-task/server-log.txt`.
+
 For reference, GLM-5.3 Kraken TP3 20261015 measured lavd 30 exact, hotel-lights 27-28 exact, long generation
 4/4 clean (worst 0.0017) and vision 117/120 on the hard set on the same tests.
 
@@ -183,6 +203,7 @@ other GPU power limits.
 - `qualification/`: `run_qualification.py` and the GLM-derived checks it runs (`long_retrieval.py`, `long_context.py`,
   `analyze_quality.py`), `vision/` (the GLM synthetic image sets, `run_vision.py`, `score_vision.py`), `img_stress.py`,
   `stress_kv.py`, `prefill_fairness.py` (short request behind a long prefill), `parallel-prefills/` (the `auto` rechecks),
+  `coding-task/` (prompt, the model's two files, verification, server log),
   with `RESULTS.md` and the raw outputs. The 581K-token conversation used for long generation is not included.
 - `bench/`: the measurements above (`quick`, `prefill_real_code`, `llm_decode_bench`, `llm_decode_bench_prefill`,
   `needle_983k`) and the scripts that produced them: `bench.py` (quick), `prefill_real.py`, `bench_long.py` (needle).
