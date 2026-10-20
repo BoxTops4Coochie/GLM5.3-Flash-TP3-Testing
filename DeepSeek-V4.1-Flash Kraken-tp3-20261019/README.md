@@ -1,4 +1,4 @@
-# DeepSeek-V4.1-Flash-1017 Kraken TP3 — 20261019.2
+# DeepSeek-V4.1-Flash-1017 Kraken TP3 — 20261019.3
 
 DeepSeek-V4.1-Flash-1017 served at **tensor parallel 3 with the full 1M-token context** on three 96 GB RTX PRO 6000
 Blackwell cards, from DeepSeek's **original weights** (FP8 dense layers, MXFP4 routed experts; nothing requantized).
@@ -7,13 +7,14 @@ Weights: [deepseek-ai/DeepSeek-V4.1-Flash-1017](https://huggingface.co/deepseek-
 `1bae0e1088993b9b82de08f59de5be5a34e42170` (MIT). Runtime: Local Inference Lab's vLLM "karmic-kraken" image
 (`karmic-kraken-beta-20261016.2`) with FlashInfer `main` b12x and the TP3 changes in `src/`.
 
-Image: **`azallaza/ds41-kraken-tp3:20261019.2`** (`sha256:06578acf49f51b7130224bcf5f6e77dfc651027895503b11cbaf7bd9b27cc460`).
-Same as `20261019` (`sha256:54836f9d…`, 13.0 GB download, 45.1 GB unpacked) except one launcher setting,
-`max-parallel-prefills: auto` (see [Update 20261019.2](#update-202610192-parallel-prefills)). It shares all but three small
-layers with `20261019`, so pulling it over `20261019` downloads ~120 KB.
+Image: **`azallaza/ds41-kraken-tp3:20261019.3`** (`sha256:c4c2de529da6d3762951e7f5c5b696866f20d740a5f16d9cdda0f13786352646`).
+Same code as `20261019` (`sha256:54836f9d…`, 13.0 GB download, 45.1 GB unpacked); `20261019.2` added
+`max-parallel-prefills: auto`, and `20261019.3` the NVFP4 drafter head and top-p 1.0 as the server default (see
+[Update 20261019.3](#update-202610193-drafter-head-and-top-p-10)). Each shares all but three small layers with the
+previous tag, so pulling it over an earlier one downloads ~120 KB.
 
 ```bash
-docker pull azallaza/ds41-kraken-tp3:20261019.2
+docker pull azallaza/ds41-kraken-tp3:20261019.3
 HF_CACHE_DIR=/path/to/huggingface docker compose up -d     # port 15015, model name DeepSeek-V4.1-Flash
 ```
 
@@ -21,6 +22,19 @@ The container arms expert promotion by itself once `/health` answers (log line
 `ds41-serve: expert promotion armed and warmed`); serve traffic after that line for full speed.
 
 Host settings: 350 W/GPU, +6000 memory offset, ~256 GB host RAM, the checkpoint on an NVMe drive (Engram layer 14 is read from it while serving).
+
+## Update 20261019.3: drafter head and top-p 1.0
+
+| Change | Effect |
+| --- | --- |
+| DSpark drafter vocabulary head in NVFP4 (`VLLM_DS41_DRAFT_NVFP4_HEAD=1`; compose `DRAFT_NVFP4_HEAD`, `0` = BF16) | Only the drafts change: the full model still verifies every token, so outputs keep the target model's distribution. A/B on the same image (top-p 0.95, fresh restart each): short 228.7 -> 235.3 tok/s, 32K C1 164 -> 169, 128K C1 160 -> 167, 128K C4 320 -> 329, 4 concurrent short 461 -> 475, coding 265 -> 268; prefill and needle unchanged |
+| Server-default sampling `temperature 1.0, top_p 1.0` (`override-generation-config` in `ds41-launch.yaml`) | The model card's recommendation; the lil `ds41-flash` profile ships top_p 0.95 from the older V4.1 launcher. Requests that set their own values still win. Quality rerun at 1.0 below; the 0.95 results are kept in `qualification/topp-0.95-20261019.2/` |
+
+Measured on `20261019.3` from a fresh restart (`bench-20261019.3/`): real code 10,646 / 10,228 / 11,354 tok/s prefill;
+`llm_decode_bench` prefill 32K / 128K 13,486 / 12,245 tok/s; 983K needle pass at 7,193 tok/s (peak 97,319 MiB);
+decode 32K C1 / C4 186.7 / 340.7 tok/s, 128K C1 / C4 179.2 / 307.1 tok/s; coding peak 271.8 tok/s mean; short
+223-229 tok/s; 4 concurrent short 474 tok/s; 5/5 known answers. Draft acceptance at 1 user rose (2.71-2.77 vs
+2.41-2.51 tokens/step at 0.95); the 128K C4 cell is the noisiest (307-349 tok/s across runs of the same image).
 
 ## Update 20261019.2: parallel prefills
 
@@ -39,15 +53,15 @@ prefill at a time. Results in `qualification/parallel-prefills/`.
 | GPUs | 3× RTX PRO 6000 Blackwell Workstation (sm_120, 96 GB, PCIe Gen5 x16), 350 W cap, +6000 memory offset |
 | Host | Threadripper PRO 7965WX (24 cores), 256 GB RAM (247 GiB usable), driver 615.71.09 |
 | Context / KV | 1,048,576-token window, **2,185,581-token KV pool (2.08 × 1M)**, up to 4 sequences |
-| Prefill | 14,195 / 12,716 tok/s at 32K / 128K (`llm_decode_bench`); ~10,000-11,000 tok/s on real source code (100-260K tokens); 7,129 tok/s on a 983K-token prompt |
-| Decode, 1 user | ~172 tok/s at 32K-128K context, 225-300 tok/s on code and explanations (DSpark, 5 drafts) |
-| Decode, 4 users | 336-349 tok/s aggregate at 32K-128K context |
+| Prefill | 13,486-14,195 / 12,245-12,716 tok/s at 32K / 128K (`llm_decode_bench`); ~10,000-11,000 tok/s on real source code (100-260K tokens); 7,129-7,467 tok/s on a 983K-token prompt |
+| Decode, 1 user | ~180-187 tok/s at 32K-128K context, 225-300 tok/s on code and explanations (DSpark, 5 drafts) |
+| Decode, 4 users | 307-349 tok/s aggregate at 32K-128K context; ~475 tok/s on short prompts |
 
 ## Contents
 
 1. [What it is](#what-it-is)
 2. [How it fits in 3 × 96 GB](#how-it-fits-in-3--96-gb)
-3. [Update 20261019.2](#update-202610192-parallel-prefills) · [Measurements](#measurements-on-this-image) · [Quality and long context](#quality-and-long-context)
+3. [Update 20261019.3](#update-202610193-drafter-head-and-top-p-10) · [Update 20261019.2](#update-202610192-parallel-prefills) · [Measurements](#measurements-on-this-image) · [Quality and long context](#quality-and-long-context)
 4. [Memory](#memory)
 5. [Measured and not adopted](#measured-and-not-adopted)
 6. [Known limitations](#known-limitations) · [Not tested](#not-tested)
@@ -113,14 +127,17 @@ Engram row cache hits more; the real-code rows are the representative numbers.
 ## Quality and long context
 
 Same protocol as the GLM-5.3 Kraken TP3 releases (`qualification/run_qualification.py`): thinking on,
-`reasoning_effort` max, temperature 1, top-p 0.95, on the published image without restarts.
+`reasoning_effort` max, temperature 1, on the published image without restarts. Top-p 1.0 on `20261019.3` (the
+server default); the same checks at top-p 0.95 on `20261019.2` are in the right column.
 
-| Test | Result |
-| --- | --- |
-| lavd (`llm_decode_bench --test-profile lavd`), 30 runs at 4 concurrent, seed 103 | **30 exact** / 0 wrong / 0 truncated |
-| hotel-lights, 30 runs at 4 concurrent, seed 103 | **30 exact** / 0 wrong / 0 truncated |
-| Retrieval of three exact markers at 128K / 900K tokens | **pass / pass** |
-| Long generation after a captured 581,537-token conversation, seeds 201-204, natural EOS, 65,536-token cap | **4/4 clean**: 16,323-23,274 tokens, all ended with `stop`, worst 8-gram repeat 0.0013 |
+| Test | top-p 1.0 (`20261019.3`) | top-p 0.95 (`20261019.2`) |
+| --- | --- | --- |
+| lavd (`llm_decode_bench --test-profile lavd`), 30 runs at 4 concurrent, seed 103 | **30 exact** / 0 wrong / 0 truncated | 30 exact / 0 / 0 |
+| hotel-lights, 30 runs at 4 concurrent, seed 103 | **30 exact** / 0 wrong / 0 truncated | 30 exact / 0 / 0 |
+| Retrieval of three exact markers at 128K / 900K tokens | **pass / pass** | pass / pass |
+| Long generation after a captured 581,537-token conversation, seeds 201-204, natural EOS, 65,536-token cap | **4/4 clean**: 21,292-31,792 tokens, all ended with `stop`, worst 8-gram repeat 0.0005 | 4/4 clean: 16,323-23,274 tokens, worst 0.0013 |
+
+Vision and stress tests ran on `20261019`/`.2` (vision without a top-p setting, the stress tests at 0.95).
 
 | Vision and stress test | Result |
 | --- | --- |
@@ -178,8 +195,10 @@ the vLLM processes. With ~256 GB this leaves room for the OS and other services,
 | Prefill chunks of 8192 tokens (1 GiB reserve) | Out of memory on a 31K prompt; KV would also drop to 1.84M tokens |
 | Promotion reserve 768 MiB at 4096-token chunks | Out of memory on a 31K prompt |
 | Adaptive verification on (the profile default) | 8-12% slower decode at short, 128K and 512K context; equal at 32K |
-| NVFP4 drafter vocabulary head | No change in steps/s |
 | PCIe one-shot all-reduce up to 6 MB, or DMA from 1 MB | No change in TTFT, prefill or decode |
+| Prefill chunks of 4080 tokens so the attention all-reduce takes the b12x DMA path (4096 x 5120 elements is not a multiple of 24) | No change (real-code prefill 10,690 / 10,467 / 11,499 vs 11,189 / 10,560 / 11,692 tok/s); NCCL already moves a 40 MiB all-reduce at 45.8 GB/s bus bandwidth |
+| 4 / 6 / 7 drafts instead of 5 | 4: 1-user decode at 32K-128K -23-28% (4 users +6-14%); 6: 1 user +1-4%, short prompts -5%, 4 users collapse to ~50 tok/s; 7: slower everywhere |
+| Prefill indexer chunk 256 instead of 128 | 983K prefill 7,165 vs 7,277 tok/s; 4-user decode -3-7% (fewer experts promoted) |
 | Tuning pinned to MoE only | Startup fails: ranks reach different tuning keys |
 | Parking layers 20-29 instead of 20-25 | No further gain |
 | `local-inference-lab/DeepSeek-V4.1-Flash-1017-lossless-CSF` | Same weights; its container format is read by the base image's loader but not by FlashInfer `main` |
@@ -207,6 +226,7 @@ other GPU power limits.
   `stress_kv.py`, `prefill_fairness.py` (short request behind a long prefill), `parallel-prefills/` (the `auto` rechecks),
   `coding-task/` (prompt, the model's two files, verification, server log),
   with `RESULTS.md` and the raw outputs. The 581K-token conversation used for long generation is not included.
+- `bench-20261019.3/`: the `20261019.3` measurements (same scripts).
 - `bench/`: the measurements above (`quick`, `prefill_real_code`, `llm_decode_bench`, `llm_decode_bench_prefill`,
   `needle_983k`) and the scripts that produced them: `bench.py` (quick), `prefill_real.py`, `bench_long.py` (needle).
 
@@ -222,12 +242,13 @@ other GPU power limits.
 | `RESERVE_BYTES` | `1073741824` | GPU memory left free after promotion; 4096-token chunks need 1 GiB |
 | `ENGRAM_RAM_LAYERS` | `1` | Engram layers held in pinned host RAM (empty = both read from disk) |
 | `ENGRAM_ROW_CACHE_ROWS` | `8388608` | host row cache for disk Engram tables (rows of 256 B); `0` = off |
+| `DRAFT_NVFP4_HEAD` | `1` | DSpark drafter vocabulary head in NVFP4; `0` = BF16 |
 | `DS41_LAUNCH_SETTINGS` | `/etc/ds41/launch.yaml` | lil launcher settings (context, chunk size, drafts, Engram mode) |
 
 ## compose.yaml
 
 ```yaml
-# DeepSeek-V4.1-Flash-1017 TP3 release, image azallaza/ds41-kraken-tp3:20261019.2
+# DeepSeek-V4.1-Flash-1017 TP3 release, image azallaza/ds41-kraken-tp3:20261019.3
 # (karmic-kraken-beta-20261016.2 + FlashInfer main 5b065abe b12x + the TP3 port in src/).
 # Defaults: original deepseek-ai weights (MXFP4 experts, lossless), DSpark 5 drafts with
 # every draft verified, 1M context, 4096-token prefill chunks, KV 2,185,581 tokens
@@ -236,7 +257,7 @@ other GPU power limits.
 # Needs 3x 96 GB GPUs and ~256 GB host RAM (~150 GB used). Tested at 350 W/GPU.
 services:
   ds41-kraken-tp3:
-    image: "${DS41_IMAGE:-azallaza/ds41-kraken-tp3:20261019.2}"
+    image: "${DS41_IMAGE:-azallaza/ds41-kraken-tp3:20261019.3}"
     container_name: ds41-kraken-tp3
     restart: "no"
     stop_grace_period: 90s
@@ -281,6 +302,9 @@ services:
       # Host RAM row cache for the disk Engram table, in rows (256 B each): 8388608 = 2 GiB
       # per GPU worker. 0 = read every row from the checkpoint.
       DS41_ENGRAM_ROW_CACHE_ROWS: "${ENGRAM_ROW_CACHE_ROWS:-8388608}"
+      # DSpark drafter vocabulary head in NVFP4 (drafts only; every token is still verified by
+      # the full model, so outputs are unchanged): +3-4% decode. 0 = BF16 head.
+      VLLM_DS41_DRAFT_NVFP4_HEAD: "${DRAFT_NVFP4_HEAD:-1}"
       # Mount a different lil launcher settings file here to change context, drafts or chunking.
       DS41_LAUNCH_SETTINGS: "${DS41_LAUNCH_SETTINGS:-/etc/ds41/launch.yaml}"
       HF_HUB_OFFLINE: "1"

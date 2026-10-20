@@ -46,6 +46,7 @@ def messages(n):
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--label', required=True)
+parser.add_argument('--top-p', type=float, default=1.0)
 parser.add_argument('--targets', nargs='+', type=int, default=[128000, 900000])
 args = parser.parse_args()
 OUT = OUT / args.label
@@ -64,7 +65,7 @@ for target in args.targets:
             break
         n = max(1, round(n * target/count))
     assert abs(count-target) < 100, attempts
-    body = dict(model='DeepSeek-V4.1-Flash', messages=msgs, temperature=1, top_p=.95,
+    body = dict(model='DeepSeek-V4.1-Flash', messages=msgs, temperature=1, top_p=args.top_p,
         seed=target, min_tokens=0, ignore_eos=False, max_completion_tokens=2048,
         repetition_penalty=1, tool_choice='none', cache_salt=f'ds41-{args.label}-retrieval-{target}',
         chat_template_kwargs={'thinking': True, 'reasoning_effort': 'max'})

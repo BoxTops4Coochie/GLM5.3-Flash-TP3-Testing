@@ -22,6 +22,9 @@ options:
   mode: dspark
   draft-tokens: 5
   adaptive-verification: false
+  # Server-default sampling for requests that set none: the model card's temperature 1.0 and
+  # top_p 1.0 (the lil profile ships 0.95 from the older V4.1 launcher). Requests still override.
+  override-generation-config: {temperature: 1.0, top_p: 1.0}
   # Engram: layer 1's table in pinned host RAM (DS41_ENGRAM_RAM_LAYERS=1), layer 14's
   # read from the checkpoint with its scales resident in host RAM and a host row cache.
   engram-table-memory: disk

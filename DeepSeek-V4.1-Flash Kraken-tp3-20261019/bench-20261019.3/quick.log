@@ -1,0 +1,9 @@
+known True '391'
+known True 'Canberra'
+known True 'Au'
+known True '17:15'
+known True 'yrassecen'
+decode {'ttft_s': 0.227, 'completion_tokens': 995, 'prompt_tokens': 59, 'decode_tok_s': 228.5, 'reasoning_chars': 910, 'steps_per_s': 79.08, 'tokens_per_step': 2.892}
+decode {'ttft_s': 0.217, 'completion_tokens': 1241, 'prompt_tokens': 59, 'decode_tok_s': 223.3, 'reasoning_chars': 1815, 'steps_per_s': 79.42, 'tokens_per_step': 2.814}
+needle True 2.285 28553 '48213-ZETA'
+concurrent 474.3 agg tok/s, errors 0

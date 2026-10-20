@@ -40,7 +40,7 @@ def main():
     import argparse
     p = argparse.ArgumentParser()
     p.add_argument('--label', required=True)
-    p.add_argument('--top-p', type=float, default=0.95)
+    p.add_argument('--top-p', type=float, default=1.0)
     p.add_argument('--temperature', type=float, default=1.0)
     p.add_argument('--seed', type=int, default=73)
     p.add_argument('--context', choices=('full', 'none'), default='full')
@@ -52,7 +52,7 @@ def main():
     p.add_argument('--clear-thinking', action='store_true')
     p.add_argument('--payload', type=Path)
     a = p.parse_args()
-    assert a.top_p == .95 and a.natural_eos and not a.ban_tool_start and not a.trace
+    assert a.natural_eos and not a.ban_tool_start and not a.trace
     out = HERE / a.label
     out.mkdir(exist_ok=False)
     cap = a.payload or ROOT / 'captured-request.san.json'

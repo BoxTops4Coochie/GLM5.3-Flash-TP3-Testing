@@ -1,0 +1,1 @@
+{"ttft_s": 138.299, "completion_tokens": 38, "prompt_tokens": 994842, "decode_tok_s": 2815.7, "reasoning_chars": 119, "pass": true, "wall_s": 138.3, "peak_gpu_mib": [97317, 97317, 97319], "prefill_tok_s": 7193} answer: '48213-ZETA'

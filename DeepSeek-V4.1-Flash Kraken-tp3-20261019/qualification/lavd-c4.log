@@ -11,8 +11,8 @@
 │ Concurrency: 4                                                               │
 │ Measured runs: 30 | Max tokens: 100000                                       │
 │ Scoring: EXACT / NEAR / FAIL numeric pair                                    │
-│ Sampling: temperature 1, top_p 0.95, seed 103 + run index, reasoning_effort  │
-│ max | Watchdog: stall 600s, wall-clock off                                   │
+│ Sampling: temperature 1, top_p 1, seed 103 + run index, reasoning_effort max │
+│ | Watchdog: stall 600s, wall-clock off                                       │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 
 ╭────────────────────────────── Completion Stats ──────────────────────────────╮
@@ -38,13 +38,13 @@ Profile
 │ dataset sha256 │ 612f8041bbca048c  │
 ╰────────────────┴───────────────────╯
 ╭───────────────────────── Whole-run GPU Power ──────────────────────────╮
-│ avg 1,045 W | max 1,080 W | limit 1,050 W | over 17m 49s | 468 samples │
+│ avg 1,040 W | max 1,077 W | limit 1,050 W | over 18m 39s | 490 samples │
 ╰────────────────────────────────────────────────────────────────────────╯
 Concurrency Results                                                             
 ╭───┬────────┬────────────┬──────┬─────────┬──────────┬──────────┬─────────┬───╮
 │ … │ done/… │      score │ sta… │ output… │ output … │ aggrega… │ avg re… │ … │
 ├───┼────────┼────────────┼──────┼─────────┼──────────┼──────────┼─────────┼───┤
-│ 4 │  30/30 │ EXACT 30 … │ ★★★… │  20,502 │   24,744 │    149.2 │   138.5 │ … │
+│ 4 │  30/30 │ EXACT 30 … │ ★★★… │  20,875 │   24,565 │    146.3 │   142.8 │ … │
 ╰───┴────────┴────────────┴──────┴─────────┴──────────┴──────────┴─────────┴───╯
 Selected C=4                                      
 ╭────────────────────────────┬───────────────────╮
@@ -55,14 +55,14 @@ Selected C=4
 │ stars                      │     ★★★★★★★★★★ 👍 │
 │ pass rate                  │    100.0% (30/30) │
 │ hit max_tokens             │                 0 │
-│ completion tokens avg      │            20,588 │
-│ completion tokens p50      │            20,502 │
-│ completion tokens p90      │            24,744 │
-│ completion tokens p99      │            26,300 │
-│ elapsed avg                │            138.5s │
-│ TTFT avg                   │             0.51s │
-│ aggregate gen tok/s        │             149.2 │
-│ mean per-request gen tok/s │             149.8 │
+│ completion tokens avg      │            20,712 │
+│ completion tokens p50      │            20,875 │
+│ completion tokens p90      │            24,565 │
+│ completion tokens p99      │            26,395 │
+│ elapsed avg                │            142.8s │
+│ TTFT avg                   │             1.26s │
+│ aggregate gen tok/s        │             146.3 │
+│ mean per-request gen tok/s │             146.9 │
 ╰────────────────────────────┴───────────────────╯
 Interpretation: EXACT means the parsed ticket/hour totals are exactly 72, 46.0. 
 NEAR means both count and hours are within the configured tolerance; FAIL means 

@@ -1,0 +1,63 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 2.64kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for ghcr.io/local-inference-lab/vllm@sha256:f5f9efe1b10ec7b853a495e66b7dbf15ff54f62741e444dea0b44e16736a10a9
+#2 ...
+
+#3 [auth] local-inference-lab/vllm:pull token for ghcr.io
+#3 DONE 0.0s
+
+#2 [internal] load metadata for ghcr.io/local-inference-lab/vllm@sha256:f5f9efe1b10ec7b853a495e66b7dbf15ff54f62741e444dea0b44e16736a10a9
+#2 DONE 0.6s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 DONE 0.0s
+
+#6 [1/8] FROM ghcr.io/local-inference-lab/vllm@sha256:f5f9efe1b10ec7b853a495e66b7dbf15ff54f62741e444dea0b44e16736a10a9
+#6 resolve ghcr.io/local-inference-lab/vllm@sha256:f5f9efe1b10ec7b853a495e66b7dbf15ff54f62741e444dea0b44e16736a10a9 done
+#6 DONE 0.0s
+
+#7 [2/8] ADD https://github.com/local-inference-lab/flashinfer/archive/5b065abe0ce787364d26f01d753c7b73d2c0d57e.tar.gz /tmp/flashinfer.tar.gz
+#7 DONE 0.4s
+
+#5 [internal] load build context
+#5 transferring context: 4.79kB done
+#5 DONE 0.0s
+
+#8 [2/8] ADD https://github.com/local-inference-lab/flashinfer/archive/5b065abe0ce787364d26f01d753c7b73d2c0d57e.tar.gz /tmp/flashinfer.tar.gz
+#8 CACHED
+
+#9 [3/8] RUN set -e;     SP=/opt/venv/lib/python3.12/site-packages;     mkdir /tmp/fi; tar -xzf /tmp/flashinfer.tar.gz -C /tmp/fi --strip-components=1;     rm -rf "$SP/flashinfer/experimental/b12x";     cp -r /tmp/fi/flashinfer/. "$SP/flashinfer/";     cp -r /tmp/fi/csrc/. "$SP/flashinfer/data/csrc/";     cp -r /tmp/fi/include/. "$SP/flashinfer/data/include/";     rm -rf /tmp/fi /tmp/flashinfer.tar.gz
+#9 CACHED
+
+#10 [4/8] COPY src/ /opt/venv/lib/python3.12/site-packages/
+#10 CACHED
+
+#11 [5/8] COPY ds41-launch.yaml /etc/ds41/launch.yaml
+#11 DONE 0.0s
+
+#12 [6/8] COPY expert-order/ /opt/ds41/expert-order/
+#12 DONE 0.0s
+
+#13 [7/8] COPY ds41-serve /usr/local/bin/ds41-serve
+#13 DONE 0.0s
+
+#14 [8/8] RUN chmod +x /usr/local/bin/ds41-serve
+#14 DONE 0.3s
+
+#15 exporting to image
+#15 exporting layers 0.1s done
+#15 exporting manifest sha256:f0cb3a999da2fb9c7cff48fac06e0bf7f7772ba8816c5456d4a29856ffce519c done
+#15 exporting config sha256:9365ad7d3f45ff1cd4d0ba104913806388624f06a2c6231a04e6e9aab1ddabb0 done
+#15 exporting attestation manifest sha256:36b7c2c3cf3b12560461adde454f1bbc27bce46c67d096cbcd6b5f6817782a87 done
+#15 exporting manifest list sha256:c4c2de529da6d3762951e7f5c5b696866f20d740a5f16d9cdda0f13786352646 done
+#15 naming to docker.io/azallaza/ds41-kraken-tp3:20261019.3 done
+#15 unpacking to docker.io/azallaza/ds41-kraken-tp3:20261019.3 0.0s done
+#15 DONE 0.2s
