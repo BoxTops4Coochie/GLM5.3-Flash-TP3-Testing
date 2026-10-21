@@ -35,6 +35,8 @@ services:
       # first start ~10 minutes longer while kernels compile.
       - runtime-cache:/cache
     environment:
+      # Weights repo (from HF_CACHE_DIR). Any checkpoint in the original FP8 layout is a drop-in;
+      # e.g. MODEL=mrfakename/DeepSeek-V4.1-Flash-1017-abliterated. See README "Alternative weights".
       MODEL: "${MODEL:-deepseek-ai/DeepSeek-V4.1-Flash-1017}"
       # Fixed KV pool per GPU. 2.25 GiB = 2,185,581 tokens at 4096-token chunks.
       KV_CACHE_MEMORY_BYTES: "${KV_CACHE_MEMORY_BYTES:-2415919104}"

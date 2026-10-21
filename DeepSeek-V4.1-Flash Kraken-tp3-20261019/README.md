@@ -64,7 +64,7 @@ prefill at a time. Results in `qualification/parallel-prefills/`.
 3. [Update 20261019.3](#update-202610193-drafter-head-and-top-p-10) · [Update 20261019.2](#update-202610192-parallel-prefills) · [Measurements](#measurements-on-this-image) · [Quality and long context](#quality-and-long-context)
 4. [Memory](#memory)
 5. [Measured and not adopted](#measured-and-not-adopted)
-6. [Known limitations](#known-limitations) · [Not tested](#not-tested)
+6. [Alternative weights](#alternative-weights) · [Known limitations](#known-limitations) · [Not tested](#not-tested)
 7. [Files](#files) · [Variables](#variables) · [compose.yaml](#composeyaml)
 
 ## What it is
@@ -203,6 +203,36 @@ the vLLM processes. With ~256 GB this leaves room for the OS and other services,
 | Parking layers 20-29 instead of 20-25 | No further gain |
 | `local-inference-lab/DeepSeek-V4.1-Flash-1017-lossless-CSF` | Same weights; its container format is read by the base image's loader but not by FlashInfer `main` |
 
+## Alternative weights
+
+The recipe serves the original `deepseek-ai/DeepSeek-V4.1-Flash-1017` by default. Any checkpoint that keeps the
+original FP8 layout (same tensor names, dtypes and shapes, same `model.safetensors.index.json`) is a drop-in: point
+`MODEL` at it and it loads with no other change. Set `MODEL` in `compose.yaml` or a `.env` file next to it:
+
+```bash
+# serve a community abliterated/uncensored build instead of the stock weights
+MODEL=mrfakename/DeepSeek-V4.1-Flash-1017-abliterated docker compose up -d --force-recreate
+```
+
+The abliteration community re-publishes 1017 with refusal behaviour removed by a weight-space edit (directional
+ablation of `attn.wo_b` and the shared-expert `w2`); the routed experts, Engram tables, MTP/DSpark layers and block
+scales stay bit-identical to the original. We ran one such build (`mrfakename/DeepSeek-V4.1-Flash-1017-abliterated`,
+48 FP8 shards, 8 of them byte-identical to the original) through this recipe on `20261019.3`:
+
+| | Stock `1017` | Abliterated |
+| --- | --- | --- |
+| lavd / hotel-lights, 30 runs @ 4 concurrent | 30/30, 30/30 | **30/30, 30/30** |
+| Retrieval 128K / 900K | pass / pass | **pass / pass** |
+| Long generation, 4 seeds (worst 8-gram repeat) | 4/4 clean (0.0005) | **4/4 clean** (0.0019) |
+| Real-code prefill / 983K-token needle | 10,646-11,354 / 7,193 tok/s | 10,133-11,203 / 7,054 tok/s |
+| Decode engine steps/s (short, 32K, 4×32K) | 79.1-79.4 / 67.5 / 139.9 | 79.5-79.6 / 67.2 / 140.3 |
+| Peak GPU memory | 97,319 MiB | 97,317 MiB |
+
+Speed, context, memory and the quality checks are unchanged (tok/s moves only with run-to-run draft acceptance at
+temperature 1). These are **third-party weights** — we did not produce them or audit them for safety, and the
+uncensoring numbers are the publisher's, not ours. A checkpoint in a different container (CSF, NVFP4, EXL3, GGUF,
+MLX) or with a changed tensor inventory (e.g. expert pruning) will **not** load here without conversion.
+
 ## Known limitations
 
 - Promotion happens on the warm-up request after `/health`; requests that arrive before the
@@ -234,7 +264,8 @@ other GPU power limits.
 
 | Variable | Default | Values |
 | --- | --- | --- |
-| `HF_CACHE_DIR` | required | Hugging Face cache containing `deepseek-ai/DeepSeek-V4.1-Flash-1017` |
+| `HF_CACHE_DIR` | required | Hugging Face cache containing the weights repo below |
+| `MODEL` | `deepseek-ai/DeepSeek-V4.1-Flash-1017` | weights repo to serve; see [Alternative weights](#alternative-weights) |
 | `HOST_PORT` | `15015` | host port for the OpenAI-compatible API |
 | `GPU0`/`GPU1`/`GPU2` | `0`/`1`/`2` | GPU indices |
 | `KV_CACHE_MEMORY_BYTES` | `2415919104` | KV bytes per GPU; more KV leaves less for promoted experts |
@@ -285,6 +316,8 @@ services:
       # first start ~10 minutes longer while kernels compile.
       - runtime-cache:/cache
     environment:
+      # Weights repo (from HF_CACHE_DIR). Any checkpoint in the original FP8 layout is a drop-in;
+      # e.g. MODEL=mrfakename/DeepSeek-V4.1-Flash-1017-abliterated. See README "Alternative weights".
       MODEL: "${MODEL:-deepseek-ai/DeepSeek-V4.1-Flash-1017}"
       # Fixed KV pool per GPU. 2.25 GiB = 2,185,581 tokens at 4096-token chunks.
       KV_CACHE_MEMORY_BYTES: "${KV_CACHE_MEMORY_BYTES:-2415919104}"
