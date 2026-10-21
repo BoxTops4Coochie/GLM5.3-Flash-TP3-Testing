@@ -213,8 +213,8 @@ original FP8 layout (same tensor names, dtypes and shapes, same `model.safetenso
 `HF_CACHE_DIR` points at, then set `MODEL` and start:
 
 ```bash
-# 1. fetch the weights into the cache (skip the GGUF/LoRA extras; ~296 GB of new shards,
-#    shards it shares with the stock model are reused from cache). Expect to retry: hf resumes.
+# 1. fetch the weights into the cache (skip the tiny GGUF LoRA; downloads all 48 FP8 shards,
+#    ~510 GB. hf re-runs resume, so just rerun on a stall.)
 HF_HUB_ENABLE_HF_TRANSFER=1 hf download mrfakename/DeepSeek-V4.1-Flash-1017-abliterated \
   --exclude '*.gguf' --cache-dir "$HF_CACHE_DIR/hub"
 
@@ -224,6 +224,11 @@ MODEL=mrfakename/DeepSeek-V4.1-Flash-1017-abliterated docker compose up -d --for
 # 3. wait for the arm line, same as the stock weights, then send traffic
 docker logs -f ds41-kraken-tp3 2>&1 | grep -m1 'expert promotion armed and warmed'
 ```
+
+`hf download` fetches the whole repo (~510 GB); it only skips files already downloaded *for this repo*, not the 8
+shards that happen to be byte-identical to the stock model (those sit under a different cache folder). If you already
+have the stock weights cached and want to save that ~214 GB, hardlink the shared shards into the abliterated repo's
+`blobs/` by their LFS oid before step 1, then only the 40 edited shards (~296 GB) download.
 
 Switch back by setting `MODEL=deepseek-ai/DeepSeek-V4.1-Flash-1017` (or removing the override) and recreating; both
 copies stay cached, so flipping between them later is just the `MODEL` change. A persistent choice is cleanest in a
