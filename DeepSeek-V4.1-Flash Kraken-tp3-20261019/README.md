@@ -207,12 +207,27 @@ the vLLM processes. With ~256 GB this leaves room for the OS and other services,
 
 The recipe serves the original `deepseek-ai/DeepSeek-V4.1-Flash-1017` by default. Any checkpoint that keeps the
 original FP8 layout (same tensor names, dtypes and shapes, same `model.safetensors.index.json`) is a drop-in: point
-`MODEL` at it and it loads with no other change. Set `MODEL` in `compose.yaml` or a `.env` file next to it:
+`MODEL` at it and it loads with no other change.
+
+**Get it and run it** (example: the abliterated build below). Download the weights into the same Hugging Face cache
+`HF_CACHE_DIR` points at, then set `MODEL` and start:
 
 ```bash
-# serve a community abliterated/uncensored build instead of the stock weights
+# 1. fetch the weights into the cache (skip the GGUF/LoRA extras; ~296 GB of new shards,
+#    shards it shares with the stock model are reused from cache). Expect to retry: hf resumes.
+HF_HUB_ENABLE_HF_TRANSFER=1 hf download mrfakename/DeepSeek-V4.1-Flash-1017-abliterated \
+  --exclude '*.gguf' --cache-dir "$HF_CACHE_DIR/hub"
+
+# 2. serve it — set MODEL inline, in compose.yaml, or in a .env next to it
 MODEL=mrfakename/DeepSeek-V4.1-Flash-1017-abliterated docker compose up -d --force-recreate
+
+# 3. wait for the arm line, same as the stock weights, then send traffic
+docker logs -f ds41-kraken-tp3 2>&1 | grep -m1 'expert promotion armed and warmed'
 ```
+
+Switch back by setting `MODEL=deepseek-ai/DeepSeek-V4.1-Flash-1017` (or removing the override) and recreating; both
+copies stay cached, so flipping between them later is just the `MODEL` change. A persistent choice is cleanest in a
+`.env` file beside `compose.yaml` (`MODEL=…`), which `docker compose` reads automatically.
 
 The abliteration community re-publishes 1017 with refusal behaviour removed by a weight-space edit (directional
 ablation of `attn.wo_b` and the shared-expert `w2`); the routed experts, Engram tables, MTP/DSpark layers and block
